@@ -1,0 +1,25 @@
+otto:
+  version: 1
+  defaults:
+    jobs: 12
+    tasks:
+    - option1
+  params:
+    -o|--option1:
+      metavar: OPT
+      help: option1 help message
+    -O|--option2:
+      dest: stored_name
+      default: three
+      choices:
+      - one
+      - two
+      - three
+      help: option2 help message
+    positional:
+      default: 1
+      choices:
+      - 1
+      - 2
+      - 3
+      help: help message

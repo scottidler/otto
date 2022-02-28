@@ -1,0 +1,44 @@
+defaults:
+  version: 1
+  tasks:
+  - world
+otto:
+  tasks:
+    punch:
+      params:
+        -t|--type:
+          choices:
+          - howdy
+          - help
+          default: bueller
+          help: default="bueller"; override type
+        -f|--flag:
+          default: punch
+          constant:
+          - donkey
+          - punch
+          nargs: +
+          help: the famous move
+    hello:
+      params:
+        -g|--greeting:
+          choices:
+          - howdy
+          - help
+          default: hello
+          help: default="hello"; override greeting
+      action: |
+        #!/bin/bash
+        echo "${greeting:-hello}"
+      help: hello task
+    world:
+      before:
+      - hello
+      params:
+        -n|--name:
+          default: world
+          help: default="world"; override name
+      action: |
+        #!/bin/bash
+        echo "$name"
+      help: world task

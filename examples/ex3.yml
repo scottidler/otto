@@ -1,0 +1,24 @@
+otto:
+  version: 1
+  tasks:
+    example1:
+      name: rename_task
+      action: |
+        #!/bin/bash
+        echo "action1"
+      help: example1 task
+    example2:
+      deps:
+        - example1
+      outs:
+        - some-file
+      show: false
+      verbosity: 1
+      help: example2 task
+    example3:
+      foreach: something
+      yield:
+        action: |
+          #!/bin/bash
+          echo "some-code"
+      help: example3 task

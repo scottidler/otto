@@ -1,0 +1,23 @@
+[package]
+name = "otto"
+version = "0.1.0"
+edition = "2021"
+authors = ["Scott Idler <scott.a.idler@gmail.com>"]
+
+[lib]
+name = "otto"
+path = "src/lib.rs"
+
+[[bin]]
+name = "otto"
+path = "src/main.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.32"
+thiserror = "1.0.20"
+clap = "3.1.2"
+serde = { version = "1.0", features = ["derive"] }
+log = { version = "0.4", features = ["std", "serde"] }
+serde_yaml = "0.8"
