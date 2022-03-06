@@ -12,13 +12,8 @@ otto:
           - help
           default: bueller
           help: default="bueller"; override type
-        -f|--flag:
-          default: punch
-          constant:
-          - donkey
-          - punch
-          nargs: +
-          help: the famous move
+        pos:
+          help: pos help
     hello:
       params:
         -g|--greeting:

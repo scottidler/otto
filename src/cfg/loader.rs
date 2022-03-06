@@ -4,7 +4,7 @@ use std::fs;
 
 use super::spec::{Param, Spec, Task};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Loader {}
 
 impl Loader {

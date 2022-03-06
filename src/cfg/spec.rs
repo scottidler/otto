@@ -58,8 +58,8 @@ impl<'de> Deserialize<'de> for Nargs {
             "*" => Nargs::ZeroOrMore,
             _ => {
                 println!("s={}", s);
-                if s.contains(":") {
-                    let parts: Vec<&str> = s.split(":").collect();
+                if s.contains(':') {
+                    let parts: Vec<&str> = s.split(':').collect();
                     let min = parts[0].parse::<usize>().map_err(Error::custom)?;
                     let max = parts[1].parse::<usize>().map_err(Error::custom)?;
                     Nargs::Range(min - 1, max)
@@ -137,7 +137,7 @@ fn default_verbosity() -> i32 {
     1
 }
 
-fn default_version() -> i32 {
+fn default_api() -> i32 {
     1
 }
 
@@ -146,7 +146,7 @@ fn default_jobs() -> i32 {
 }
 fn default_defaults() -> Defaults {
     Defaults {
-        version: default_version(),
+        api: default_api(),
         verbosity: default_verbosity(),
         jobs: default_jobs(),
         tasks: vec![],
@@ -163,8 +163,8 @@ pub struct Spec {
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct Defaults {
-    #[serde(default = "default_version")]
-    pub version: i32,
+    #[serde(default = "default_api")]
+    pub api: i32,
 
     #[serde(default = "default_verbosity")]
     pub verbosity: i32,
@@ -182,7 +182,13 @@ pub struct Otto {
     pub name: String,
 
     #[serde(default)]
-    pub help: Option<String>,
+    pub author: Option<String>,
+
+    #[serde(default)]
+    pub about: Option<String>,
+
+    #[serde(default)]
+    pub version: Option<String>,
 
     #[serde(default, deserialize_with = "deserialize_param_map")]
     pub params: Params,
@@ -194,20 +200,20 @@ pub struct Otto {
 }
 
 impl Otto {
-    fn get_param_key(&self, flag: &String) -> Result<&String, ConfigError> {
+    fn get_param_key(&self, flag: &str) -> Result<&String, ConfigError> {
         for (key, param) in self.params.iter() {
             if param.flags.iter().any(|f| f == flag) {
-                return Ok(&key);
+                return Ok(key);
             }
         }
         Err(ConfigError::FlagLookupError(flag.to_string()))
     }
-    pub fn get_param(&self, name: &String) -> Result<&Param, ConfigError> {
+    pub fn get_param(&self, name: &str) -> Result<&Param, ConfigError> {
         self.params
             .get(name)
-            .ok_or(ConfigError::NameLookupError(name.to_string()))
+            .ok_or_else(|| ConfigError::NameLookupError(name.to_string()))
     }
-    pub fn get_param_from_flag(&self, flag: &String) -> Result<&Param, ConfigError> {
+    pub fn get_param_from_flag(&self, flag: &str) -> Result<&Param, ConfigError> {
         let key = self.get_param_key(flag)?;
         self.get_param(key)
     }
@@ -215,18 +221,18 @@ impl Otto {
         let name = param.name.to_owned();
         self.params
             .insert(name.to_owned(), param)
-            .ok_or(ConfigError::NameLookupError(name.to_string()))
+            .ok_or(ConfigError::NameLookupError(name))
     }
-    pub fn get_task(&self, name: &String) -> Result<&Task, ConfigError> {
+    pub fn get_task(&self, name: &str) -> Result<&Task, ConfigError> {
         self.tasks
             .get(name)
-            .ok_or(ConfigError::NameLookupError(name.to_string()))
+            .ok_or_else(|| ConfigError::NameLookupError(name.to_string()))
     }
     pub fn set_task(&mut self, task: Task) -> Result<Task, ConfigError> {
         let name = task.name.to_owned();
         self.tasks
             .insert(name.to_owned(), task)
-            .ok_or(ConfigError::NameLookupError(name.to_string()))
+            .ok_or(ConfigError::NameLookupError(name))
     }
 }
 
@@ -272,23 +278,13 @@ pub struct Param {
 
 impl Param {
     pub fn param_type(&self) -> ParamType {
-        if self.flags.len() == 0 {
-            return ParamType::POS;
+        match self.name.chars().next() {
+            Some('-') => match self.default.as_deref() {
+                Some("true") | Some("false") => ParamType::FLG,
+                Some(_) | None => ParamType::OPT,
+            },
+            Some(_) | None => ParamType::OPT,
         }
-        ParamType::OPT
-        /*
-        match &self.nargs {
-            Some(nargs) => {
-                if nargs == "0" {
-                    ParamType::FLG
-                }
-                else {
-                    ParamType::OPT
-                }
-            }
-            None => ParamType::OPT
-        }
-        */
     }
 }
 
@@ -316,22 +312,22 @@ where
                     .flags
                     .to_owned()
                     .into_iter()
-                    .filter(|i| i.starts_with("-") && i.len() == 2)
-                    .map(|i| i.to_string())
+                    .filter(|i| i.starts_with('-') && i.len() == 2)
+                    //.map(|i| i.to_string())
                     .collect();
                 let long: Vec<String> = param
                     .flags
                     .to_owned()
                     .into_iter()
                     .filter(|i| i.starts_with("--") && i.len() > 2)
-                    .map(|i| i.to_string())
+                    //.map(|i| i.to_string())
                     .collect();
                 if param.dest.is_none() {
                     let dest = match long.first() {
                         Some(long) => String::from(long.trim_matches('-')),
                         None => match short.first() {
                             Some(short) => String::from(short.trim_matches('-')),
-                            None => panic!("crash and burn"),
+                            None => param.name,
                         },
                     };
                     param.dest = Some(dest);
@@ -388,20 +384,20 @@ impl Task {
             selected,
         }
     }
-    fn get_param_key(&self, flag: &String) -> Result<&String, ConfigError> {
+    fn get_param_key(&self, flag: &str) -> Result<&String, ConfigError> {
         for (key, param) in self.params.iter() {
             if param.flags.iter().any(|f| f == flag) {
-                return Ok(&key);
+                return Ok(key);
             }
         }
         Err(ConfigError::FlagLookupError(flag.to_string()))
     }
-    pub fn get_param(&self, name: &String) -> Result<&Param> {
+    pub fn get_param(&self, name: &str) -> Result<&Param> {
         self.params
             .get(name)
-            .ok_or(anyhow!("get_param: failed to get name={}", name))
+            .ok_or_else(|| anyhow!("get_param: failed to get name={}", name))
     }
-    pub fn get_param_from_flag(&self, flag: &String) -> Result<&Param> {
+    pub fn get_param_from_flag(&self, flag: &str) -> Result<&Param> {
         let key = self.get_param_key(flag)?;
         self.get_param(key)
     }
@@ -409,7 +405,7 @@ impl Task {
         let name = param.name.to_owned();
         self.params
             .insert(name.to_owned(), param)
-            .ok_or(anyhow!("set_param: failed to set param.name={}", name))
+            .ok_or_else(|| anyhow!("set_param: failed to set param.name={}", name))
     }
 }
 
