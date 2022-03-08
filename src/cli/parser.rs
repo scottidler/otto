@@ -3,22 +3,15 @@
 use crate::cfg::spec::{Nargs, Otto, Param, Spec, Task, Value};
 use clap::{arg, Arg, ArgMatches, Command};
 use std::env;
+use std::ops::Range;
 use std::path::PathBuf;
 
 #[macro_use]
 use super::macros;
 use super::error;
 
-#[derive(Debug, Default, PartialEq)]
-pub struct TaskArgs {
-    name: String,
-    args: Vec<String>,
-}
-
-impl TaskArgs {
-    pub fn new(name: String) -> Self {
-        Self { name, args: vec![] }
-    }
+fn print_type_of<T: ?Sized>(_: &T) {
+    println!("{}", std::any::type_name::<T>())
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -26,6 +19,46 @@ pub struct Parser {
     pub spec: Spec,
     pub prog: String,
     pub args: Vec<String>,
+}
+
+#[derive(Debug, Default, PartialEq, Clone)]
+struct PartitionedArgs {
+    args: Vec<String>,
+    partitions: Vec<Range<usize>>,
+}
+impl PartitionedArgs {
+    fn new(tasknames: &[&str]) -> Self {
+        let args: Vec<String> = env::args().collect();
+        let mut beg = 0;
+        let mut partitions = vec![];
+        for (i, arg) in args.iter().skip(1).enumerate() {
+            if tasknames.iter().any(|t| t == arg) {
+                let end = i + 1;
+                partitions.push(Range::<usize> { start: beg, end });
+                beg = end;
+            }
+        }
+        partitions.push(Range::<usize> {
+            start: beg,
+            end: args.len(),
+        });
+        Self { args, partitions }
+    }
+    fn partitions(&self) -> Vec<&[String]> {
+        self.partitions
+            .iter()
+            .map(|p| &self.args[p.clone()])
+            .collect()
+    }
+    fn partition(&self, index: usize) -> Option<&[String]> {
+        if index < self.len() {
+            return Some(&self.args[self.partitions[index].clone()]);
+        }
+        None
+    }
+    fn len(&self) -> usize {
+        self.partitions.len()
+    }
 }
 
 impl Parser {
@@ -97,8 +130,13 @@ impl Parser {
         arg
     }
     */
-    fn task_names(&self) -> Vec<String> {
-        self.spec.otto.tasks.keys().cloned().collect()
+    fn task_names(&self) -> Vec<&str> {
+        self.spec
+            .otto
+            .tasks
+            .keys()
+            .map(AsRef::as_ref)
+            .collect::<Vec<&str>>()
     }
     fn tasks(&self) -> Vec<&Task> {
         self.spec.otto.tasks.values().collect()
@@ -107,10 +145,8 @@ impl Parser {
     pub fn parse(&self) -> Vec<ArgMatches> {
         let task_names = self.task_names();
         println!("task_names={:#?}", task_names);
-        let taskargs_v = self.partition();
-        println!("{:#?}", taskargs_v);
-        let commands = self.tasks_to_commands();
-        //println!("{:#?}", commands);
+        let pa = PartitionedArgs::new(&task_names);
+        println!("pa={:#?}", pa);
         vec![]
     }
     fn tasks_to_commands(&self) -> Vec<Command> {
@@ -128,22 +164,5 @@ impl Parser {
             Command::new(task.name.to_owned()).args(args)
         }
         self.tasks().iter().map(|t| task_to_command(t)).collect()
-    }
-    fn partition(&self) -> Vec<TaskArgs> {
-        let args: Vec<String> = env::args().skip(1).collect();
-        let mut results = vec![];
-        let path = std::env::current_exe().unwrap();
-        let prog = path.file_name().unwrap();
-        let mut taskargs = TaskArgs::new(prog.to_str().unwrap().into());
-        for arg in args {
-            if self.task_names().iter().any(|t| *t == arg) {
-                results.push(taskargs);
-                taskargs = TaskArgs::new(arg);
-            } else {
-                taskargs.args.push(arg);
-            }
-        }
-        results.push(taskargs);
-        results
     }
 }
