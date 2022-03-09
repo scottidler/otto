@@ -1,6 +1,7 @@
 #![allow(unused_imports, unused_variables, dead_code)]
 use anyhow::{Context, Error, Result};
 use std::fs;
+use std::path::Path;
 
 use super::spec::{Param, Spec, Task};
 
@@ -12,7 +13,8 @@ impl Loader {
         Self {}
     }
 
-    pub fn load(&self, filename: &str) -> Result<Spec, Error> {
+    //pub fn load(&self, filename: &str) -> Result<Spec, Error> {
+    pub fn load(&self, filename: &Path) -> Result<Spec, Error> {
         let content =
             fs::read_to_string(filename).context(format!("Can't load filename={:?}", filename))?;
         let spec: Spec =
