@@ -1,12 +1,16 @@
 #![allow(unused_imports, unused_variables, unused_attributes, dead_code)]
 
-use crate::cfg::spec::{Nargs, Otto, Param, Spec, Task, Value};
+use clap::error::{ContextKind, ContextValue, ErrorKind};
+use clap::Error;
 use clap::{arg, Arg, ArgMatches, Command};
+
 use std::env;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::str::FromStr;
+
+use crate::cfg::spec::{Nargs, Otto, Param, Spec, Task, Value};
 
 #[macro_use]
 use super::macros;
@@ -17,6 +21,64 @@ where
     T: Debug,
 {
     println!("type={} value={:#?}", std::any::type_name::<T>(), t);
+}
+
+fn extract(item: (ContextKind, &ContextValue)) -> Option<&ContextValue> {
+    let (k, v) = item;
+    if k == ContextKind::InvalidArg {
+        return Some(v);
+    }
+    None
+}
+
+pub trait GetKnownMatches {
+    fn get_known_matches(&self) -> Result<(ArgMatches, Vec<String>), Error>;
+    fn get_known_matches_from(
+        &self,
+        args: &mut Vec<String>,
+    ) -> Result<(ArgMatches, Vec<String>), Error>;
+}
+
+impl<'a> GetKnownMatches for Command<'a> {
+    fn get_known_matches(&self) -> Result<(ArgMatches, Vec<String>), Error> {
+        let mut args: Vec<String> = env::args().collect();
+        self.get_known_matches_from(&mut args)
+    }
+    fn get_known_matches_from(
+        &self,
+        args: &mut Vec<String>,
+    ) -> Result<(ArgMatches, Vec<String>), Error> {
+        let mut rem: Vec<String> = vec![];
+        loop {
+            match self.clone().try_get_matches_from(&*args) {
+                Ok(matches) => {
+                    return Ok((matches, rem));
+                }
+                Err(error) => match error.kind() {
+                    ErrorKind::UnknownArgument => {
+                        let items = error.context().find_map(extract);
+                        match items {
+                            Some(x) => match x {
+                                ContextValue::String(s) => {
+                                    rem.push(s.to_owned());
+                                    args.retain(|a| a != s);
+                                }
+                                _ => {
+                                    return Err(error);
+                                }
+                            },
+                            None => {
+                                return Err(error);
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(error);
+                    }
+                },
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Clone)]
@@ -59,60 +121,49 @@ impl PartitionedArgs {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
-pub struct Parser {
-    pub jobs: usize,
-    pub prog: String,
-    pub args: Vec<String>,
-    //pub ottofile: String,
-    pub ottofile: PathBuf,
+fn otto_seed() -> Command<'static> {
+    Command::new("otto")
+        .disable_help_flag(true)
+        .disable_version_flag(true)
+        .arg(
+            Arg::new("ottofile")
+                .takes_value(true)
+                .short('o')
+                .long("ottofile")
+                .help("path to ottofile"),
+        )
 }
-/*
-fn otto_parser() -> Command {
-    Command::new("otto").arg(
-        Arg::new("ottofile")
-            .takes_value(true)
-            .short('o')
-            .long("ottofile")
-            .help("path to ottofile"),
-    )
-}
-*/
 
-impl Parser {
-    pub fn new() -> Self {
-        let args: Vec<String> = env::args().collect();
-        let prog = args[0].clone();
-        let jobs = 4; //dynamically default to nproc
-        let ottofile = "./otto.yml".to_owned();
-        let matches = Command::new("otto")
-            .arg(
-                Arg::new("ottofile")
-                    .takes_value(true)
-                    .short('o')
-                    .long("ottofile")
-                    .help("path to ottofile"),
-            )
-            .get_matches_from(&args);
-        let ottofile =
-            PathBuf::from_str(matches.value_of("ottofile").unwrap_or("./otto.yml")).unwrap();
-        Self {
-            jobs,
-            prog,
-            args,
-            ottofile,
-        }
+#[derive(Debug, PartialEq)]
+pub struct Parser<'a> {
+    spec: &'a Spec,
+}
+
+impl<'a> Parser<'a> {
+    pub fn new(spec: &'a Spec) -> Self {
+        Self { spec }
+    }
+    fn task_names(&self) -> Vec<&str> {
+        self.spec.otto.tasks.keys().map(AsRef::as_ref).collect()
+    }
+    pub fn divine_ottofile() -> PathBuf {
+        let ottofile = match otto_seed().get_known_matches() {
+            Ok((matches, _)) => {
+                let result = matches.value_of("ottofile");
+                println!("result={:?}", result);
+                result.unwrap_or("./otto.yml").to_string()
+            }
+            Err(error) => {
+                println!("divine: error={}", error);
+                "./otto.yml".to_string()
+            }
+        };
+        PathBuf::from_str(&ottofile).unwrap()
     }
 
-    pub fn parse(&self, spec: &Spec) -> Vec<ArgMatches> {
-        let task_names = spec
-            .otto
-            .tasks
-            .keys()
-            .map(AsRef::as_ref)
-            .collect::<Vec<&str>>();
-        println!("task_names={:#?}", task_names);
-        let pa = PartitionedArgs::new(&task_names);
+    pub fn parse(&self) -> Vec<ArgMatches> {
+        println!("task_names={:#?}", self.task_names());
+        let pa = PartitionedArgs::new(&self.task_names());
         println!("pa={:#?}", pa);
         /*
         print_type_of(&args);
