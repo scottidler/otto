@@ -58,15 +58,13 @@ impl<'a> GetKnownMatches for Command<'a> {
                     ErrorKind::UnknownArgument => {
                         let items = error.context().find_map(extract);
                         match items {
-                            Some(x) => match x {
-                                ContextValue::String(s) => {
-                                    rem.push(s.to_owned());
-                                    args.retain(|a| a != s);
-                                }
-                                _ => {
-                                    return Err(error);
-                                }
-                            },
+                            Some(ContextValue::String(s)) => {
+                                rem.push(s.to_owned());
+                                args.retain(|a| a != s);
+                            }
+                            Some(&_) => {
+                                return Err(error);
+                            }
                             None => {
                                 return Err(error);
                             }
