@@ -16,6 +16,8 @@ use crate::cfg::spec::{Nargs, Otto, Param, Spec, Task, Value};
 use super::macros;
 use super::error;
 
+static OTTOFILE: &str = "./otto.yml";
+
 fn print_type_of<T: ?Sized>(t: &T)
 where
     T: Debug,
@@ -119,10 +121,10 @@ impl PartitionedArgs {
     }
 }
 
-fn otto_seed() -> Command<'static> {
+fn otto_seed(nerfed: bool) -> Command<'static> {
     Command::new("otto")
-        .disable_help_flag(true)
-        .disable_version_flag(true)
+        .disable_help_flag(nerfed)
+        .disable_version_flag(nerfed)
         .arg(
             Arg::new("ottofile")
                 .takes_value(true)
@@ -133,36 +135,47 @@ fn otto_seed() -> Command<'static> {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Parser<'a> {
-    spec: &'a Spec,
+pub struct Parser {
+    ottofile: PathBuf,
 }
 
-impl<'a> Parser<'a> {
-    pub fn new(spec: &'a Spec) -> Self {
-        Self { spec }
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
     }
+}
+
+impl Parser {
+    pub fn new() -> Self {
+        let ottofile = env::var("OTTOFILE").unwrap_or_else(|_| OTTOFILE.to_owned());
+        Self {
+            ottofile: PathBuf::from_str(&ottofile).unwrap(),
+        }
+    }
+    /*
     fn task_names(&self) -> Vec<&str> {
         self.spec.otto.tasks.keys().map(AsRef::as_ref).collect()
     }
-    pub fn divine_ottofile() -> PathBuf {
-        let ottofile = match otto_seed().get_known_matches() {
-            Ok((matches, _)) => {
-                let result = matches.value_of("ottofile");
-                println!("result={:?}", result);
-                result.unwrap_or("./otto.yml").to_string()
-            }
-            Err(error) => {
-                println!("divine: error={}", error);
-                "./otto.yml".to_string()
-            }
+    */
+    pub fn divine_ottofile(&self) -> PathBuf {
+        let ottofile = match otto_seed(true).get_known_matches() {
+            Ok((matches, _)) => match matches.value_of("ottofile").map(str::to_string) {
+                Some(s) => s,
+                None => OTTOFILE.to_owned(),
+            },
+            Err(error) => OTTOFILE.to_owned(),
         };
         PathBuf::from_str(&ottofile).unwrap()
     }
 
     pub fn parse(&self) -> Vec<ArgMatches> {
+        let ottofile = self.divine_ottofile();
+        println!("ottofile={:?}", ottofile);
+        /*
         println!("task_names={:#?}", self.task_names());
         let pa = PartitionedArgs::new(&self.task_names());
         println!("pa={:#?}", pa);
+        */
         /*
         print_type_of(&args);
         println!("otto_args={:#?}", otto_args);
