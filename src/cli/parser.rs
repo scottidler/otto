@@ -10,6 +10,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use crate::cfg::loader::Loader;
 use crate::cfg::spec::{Nargs, Otto, Param, Spec, Task, Value};
 
 #[macro_use]
@@ -80,7 +81,6 @@ impl<'a> GetKnownMatches for Command<'a> {
         }
     }
 }
-
 #[derive(Debug, Default, PartialEq, Clone)]
 struct PartitionedArgs {
     args: Vec<String>,
@@ -121,22 +121,9 @@ impl PartitionedArgs {
     }
 }
 
-fn otto_seed(nerfed: bool) -> Command<'static> {
-    Command::new("otto")
-        .disable_help_flag(nerfed)
-        .disable_version_flag(nerfed)
-        .arg(
-            Arg::new("ottofile")
-                .takes_value(true)
-                .short('o')
-                .long("ottofile")
-                .help("path to ottofile"),
-        )
-}
-
 #[derive(Debug, PartialEq)]
 pub struct Parser {
-    ottofile: PathBuf,
+    ottofile: String,
 }
 
 impl Default for Parser {
@@ -147,30 +134,50 @@ impl Default for Parser {
 
 impl Parser {
     pub fn new() -> Self {
-        let ottofile = env::var("OTTOFILE").unwrap_or_else(|_| OTTOFILE.to_owned());
         Self {
-            ottofile: PathBuf::from_str(&ottofile).unwrap(),
+            ottofile: env::var("OTTOFILE").unwrap_or_else(|_| OTTOFILE.to_owned()),
         }
     }
-    /*
-    fn task_names(&self) -> Vec<&str> {
-        self.spec.otto.tasks.keys().map(AsRef::as_ref).collect()
-    }
-    */
-    pub fn divine_ottofile(&self) -> PathBuf {
-        let ottofile = match otto_seed(true).get_known_matches() {
-            Ok((matches, _)) => match matches.value_of("ottofile").map(str::to_string) {
-                Some(s) => s,
-                None => OTTOFILE.to_owned(),
-            },
-            Err(error) => OTTOFILE.to_owned(),
-        };
-        PathBuf::from_str(&ottofile).unwrap()
+    fn otto_seed(&self, nerfed: bool) -> Command {
+        Command::new("otto")
+            .disable_help_flag(nerfed)
+            .disable_version_flag(nerfed)
+            .arg(
+                Arg::new("ottofile")
+                    .takes_value(true)
+                    .short('o')
+                    .long("ottofile")
+                    .help("override default path to ottofile"),
+            )
     }
 
+    pub fn divine_ottofile(&self) -> PathBuf {
+        let ottofile = match self.otto_seed(true).get_known_matches() {
+            Ok((matches, _)) => match matches.value_of("ottofile").map(str::to_string) {
+                Some(s) => s,
+                None => self.ottofile.clone(),
+            },
+            Err(error) => self.ottofile.clone(),
+        };
+        ottofile.into()
+    }
     pub fn parse(&self) -> Vec<ArgMatches> {
         let ottofile = self.divine_ottofile();
-        println!("ottofile={:?}", ottofile);
+        if ottofile.exists() {
+            let loader = Loader::new(&ottofile);
+            let spec = loader.load().unwrap();
+            let pa = PartitionedArgs::new(&spec.otto.task_names());
+            println!("task_names={:#?}", &spec.otto.task_names());
+            println!("pa={:#?}", pa);
+            println!("partitions={:#?}", pa.partitions());
+        } else {
+            let after_help = format!("ottofile={:?} does not exist!", ottofile);
+            let otto = self
+                .otto_seed(false)
+                .arg_required_else_help(true)
+                .after_help(after_help.as_str());
+            let matches = otto.get_matches_from(vec!["--help"]);
+        }
         /*
         println!("task_names={:#?}", self.task_names());
         let pa = PartitionedArgs::new(&self.task_names());

@@ -234,6 +234,9 @@ impl Otto {
             .insert(name.to_owned(), task)
             .ok_or(ConfigError::NameLookupError(name))
     }
+    pub fn task_names(&self) -> Vec<&str> {
+        self.tasks.keys().map(AsRef::as_ref).collect()
+    }
 }
 
 pub enum ParamType {
@@ -283,7 +286,7 @@ impl Param {
                 Some("true") | Some("false") => ParamType::FLG,
                 Some(_) | None => ParamType::OPT,
             },
-            Some(_) | None => ParamType::OPT,
+            Some(_) | None => ParamType::POS,
         }
     }
 }
