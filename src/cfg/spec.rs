@@ -313,15 +313,15 @@ where
                 param.flags = name.split('|').map(|f| f.to_string()).collect();
                 let short: Vec<String> = param
                     .flags
-                    .to_owned()
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .filter(|i| i.starts_with('-') && i.len() == 2)
                     //.map(|i| i.to_string())
                     .collect();
                 let long: Vec<String> = param
                     .flags
-                    .to_owned()
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .filter(|i| i.starts_with("--") && i.len() > 2)
                     //.map(|i| i.to_string())
                     .collect();
