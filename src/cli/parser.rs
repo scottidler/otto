@@ -167,6 +167,8 @@ impl Parser {
             let loader = Loader::new(&ottofile);
             let spec = loader.load().unwrap();
             let pa = PartitionedArgs::new(&spec.otto.task_names());
+            let punch = &spec.otto.tasks["punch"];
+            println!("hello={:#?}", punch);
             println!("task_names={:#?}", &spec.otto.task_names());
             println!("pa={:#?}", pa);
             println!("partitions={:#?}", pa.partitions());

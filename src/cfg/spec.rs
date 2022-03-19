@@ -7,6 +7,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt;
 use std::num::ParseIntError;
+use std::path::PathBuf;
 use std::vec::Vec;
 
 type Tasks = HashMap<String, Task>;
@@ -68,6 +69,13 @@ impl<'de> Deserialize<'de> for Nargs {
         };
         Ok(result)
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    Script(String),
+    File(PathBuf),
+    //URL(Url),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -307,28 +315,30 @@ where
         {
             let mut params = Params::new();
             while let Some((name, mut param)) = map.next_entry::<String, Param>()? {
-                param.flags = name.split('|').map(|f| f.to_string()).collect();
-                let short: Vec<String> = param
-                    .flags
-                    .iter()
-                    .cloned()
-                    .filter(|i| i.starts_with('-') && i.len() == 2)
-                    .collect();
-                let long: Vec<String> = param
-                    .flags
-                    .iter()
-                    .cloned()
-                    .filter(|i| i.starts_with("--") && i.len() > 2)
-                    .collect();
-                if param.dest.is_none() {
-                    let dest = match long.first() {
+                if name.contains('-') {
+                    param.flags = name.split('|').map(|f| f.to_string()).collect();
+                    let short: Vec<String> = param
+                        .flags
+                        .iter()
+                        .cloned()
+                        .filter(|i| i.starts_with('-') && i.len() == 2)
+                        .collect();
+                    let long: Vec<String> = param
+                        .flags
+                        .iter()
+                        .cloned()
+                        .filter(|i| i.starts_with("--") && i.len() > 2)
+                        .collect();
+                    let name = match long.first() {
                         Some(long) => String::from(long.trim_matches('-')),
                         None => match short.first() {
                             Some(short) => String::from(short.trim_matches('-')),
-                            None => param.name,
+                            None => param.name.to_owned(),
                         },
                     };
-                    param.dest = Some(dest);
+                }
+                if param.dest.is_none() {
+                    param.dest = Some(name.to_owned());
                 }
                 param.name = name.to_owned();
                 params.insert(name.to_owned(), param);
