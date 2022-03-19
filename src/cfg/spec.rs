@@ -8,10 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::num::ParseIntError;
 use std::vec::Vec;
-/*
-type Tasks = Vec<Task>;
-type Params = Vec<Param>;
-*/
+
 type Tasks = HashMap<String, Task>;
 type Params = HashMap<String, Param>;
 
