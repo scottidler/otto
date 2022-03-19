@@ -316,14 +316,12 @@ where
                     .iter()
                     .cloned()
                     .filter(|i| i.starts_with('-') && i.len() == 2)
-                    //.map(|i| i.to_string())
                     .collect();
                 let long: Vec<String> = param
                     .flags
                     .iter()
                     .cloned()
                     .filter(|i| i.starts_with("--") && i.len() > 2)
-                    //.map(|i| i.to_string())
                     .collect();
                 if param.dest.is_none() {
                     let dest = match long.first() {
