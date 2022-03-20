@@ -12,6 +12,9 @@ otto:
           - help
           default: bueller
           help: default="bueller"; override type
+        -f|--flag:
+          default: false
+          help: toggle flag to true
         pos:
           help: pos help
     hello:

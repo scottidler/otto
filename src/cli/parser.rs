@@ -168,7 +168,7 @@ impl Parser {
             let spec = loader.load().unwrap();
             let pa = PartitionedArgs::new(&spec.otto.task_names());
             let punch = &spec.otto.tasks["punch"];
-            println!("hello={:#?}", punch);
+            println!("punch={:#?}", punch);
             println!("task_names={:#?}", &spec.otto.task_names());
             println!("pa={:#?}", pa);
             println!("partitions={:#?}", pa.partitions());
@@ -180,43 +180,6 @@ impl Parser {
                 .after_help(after_help.as_str());
             let matches = otto.get_matches_from(vec!["--help"]);
         }
-        /*
-        println!("task_names={:#?}", self.task_names());
-        let pa = PartitionedArgs::new(&self.task_names());
-        println!("pa={:#?}", pa);
-        */
-        /*
-        print_type_of(&args);
-        println!("otto_args={:#?}", otto_args);
-        print_type_of(&otto_args);
-        let matches = self.otto_parser().get_matches_from(otto_args);
-        print_type_of(&matches);
-        let ottofile = matches.value_of("ottofile").unwrap_or("./");
-        print_type_of(&ottofile);
-        let mut pathbuf = PathBuf::new();
-        pathbuf.push(ottofile);
-        print_type_of(&pathbuf);
-        let exists = pathbuf.exists();
-        print_type_of(&exists);
-        */
         vec![]
     }
-    /*
-    fn tasks_to_commands(&self) -> Vec<Command> {
-        fn param_to_arg(param: &Param) -> Arg {
-            println!("param={:#?}", param);
-            let mut arg = Arg::new(&*param.name);
-            if let Some(help) = &param.help {
-                println!("help={:?}", help);
-                arg = arg.help(Some(&help[..]));
-            }
-            arg
-        }
-        fn task_to_command(task: &Task) -> Command {
-            let args: Vec<Arg> = task.params.values().map(param_to_arg).collect();
-            Command::new(task.name.to_owned()).args(args)
-        }
-        self.tasks().iter().map(|t| task_to_command(t)).collect()
-    }
-    */
 }

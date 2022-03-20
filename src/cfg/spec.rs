@@ -205,40 +205,6 @@ pub struct Otto {
 }
 
 impl Otto {
-    fn get_param_key(&self, flag: &str) -> Result<&String, ConfigError> {
-        for (key, param) in self.params.iter() {
-            if param.flags.iter().any(|f| f == flag) {
-                return Ok(key);
-            }
-        }
-        Err(ConfigError::FlagLookupError(flag.to_string()))
-    }
-    pub fn get_param(&self, name: &str) -> Result<&Param, ConfigError> {
-        self.params
-            .get(name)
-            .ok_or_else(|| ConfigError::NameLookupError(name.to_string()))
-    }
-    pub fn get_param_from_flag(&self, flag: &str) -> Result<&Param, ConfigError> {
-        let key = self.get_param_key(flag)?;
-        self.get_param(key)
-    }
-    pub fn set_param(&mut self, param: Param) -> Result<Param, ConfigError> {
-        let name = param.name.to_owned();
-        self.params
-            .insert(name.to_owned(), param)
-            .ok_or(ConfigError::NameLookupError(name))
-    }
-    pub fn get_task(&self, name: &str) -> Result<&Task, ConfigError> {
-        self.tasks
-            .get(name)
-            .ok_or_else(|| ConfigError::NameLookupError(name.to_string()))
-    }
-    pub fn set_task(&mut self, task: Task) -> Result<Task, ConfigError> {
-        let name = task.name.to_owned();
-        self.tasks
-            .insert(name.to_owned(), task)
-            .ok_or(ConfigError::NameLookupError(name))
-    }
     pub fn task_names(&self) -> Vec<&str> {
         self.tasks.keys().map(AsRef::as_ref).collect()
     }
@@ -253,7 +219,7 @@ pub enum ParamType {
 
 impl Default for ParamType {
     fn default() -> Self {
-        ParamType::FLG
+        ParamType::OPT
     }
 }
 
@@ -268,9 +234,6 @@ pub struct Param {
 
     #[serde(skip_deserializing)]
     pub long: Option<String>,
-
-    #[serde(skip_deserializing)]
-    pub flags: Vec<String>,
 
     #[serde(skip_deserializing, default)]
     pub param_type: ParamType,
@@ -295,18 +258,6 @@ pub struct Param {
 
     #[serde(default)]
     pub help: Option<String>,
-}
-
-impl Param {
-    pub fn param_type(&self) -> ParamType {
-        match self.name.chars().next() {
-            Some('-') => match self.default.as_deref() {
-                Some("true") | Some("false") => ParamType::FLG,
-                Some(_) | None => ParamType::OPT,
-            },
-            Some(_) | None => ParamType::POS,
-        }
-    }
 }
 
 fn divine(title: &str) -> (String, Option<String>, Option<String>) {
@@ -360,6 +311,15 @@ where
             let mut params = Params::new();
             while let Some((title, mut param)) = map.next_entry::<String, Param>()? {
                 (param.name, param.short, param.long) = divine(&title);
+                if param.long.is_some() || param.short.is_some() {
+                    if let Some(ref value) = param.default {
+                        if value == "true" || value == "false" {
+                            param.param_type = ParamType::FLG;
+                        }
+                    }
+                } else {
+                    param.param_type = ParamType::POS;
+                }
                 params.insert(title.to_owned(), param);
             }
             Ok(params)
@@ -410,29 +370,6 @@ impl Task {
             action,
             selected,
         }
-    }
-    fn get_param_key(&self, flag: &str) -> Result<&String, ConfigError> {
-        for (key, param) in self.params.iter() {
-            if param.flags.iter().any(|f| f == flag) {
-                return Ok(key);
-            }
-        }
-        Err(ConfigError::FlagLookupError(flag.to_string()))
-    }
-    pub fn get_param(&self, name: &str) -> Result<&Param> {
-        self.params
-            .get(name)
-            .ok_or_else(|| anyhow!("get_param: failed to get name={}", name))
-    }
-    pub fn get_param_from_flag(&self, flag: &str) -> Result<&Param> {
-        let key = self.get_param_key(flag)?;
-        self.get_param(key)
-    }
-    pub fn set_param(&mut self, param: Param) -> Result<Param> {
-        let name = param.name.to_owned();
-        self.params
-            .insert(name.to_owned(), param)
-            .ok_or_else(|| anyhow!("set_param: failed to set param.name={}", name))
     }
 }
 
