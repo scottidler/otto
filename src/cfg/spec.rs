@@ -244,10 +244,17 @@ impl Otto {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub enum ParamType {
     FLG,
     OPT,
     POS,
+}
+
+impl Default for ParamType {
+    fn default() -> Self {
+        ParamType::FLG
+    }
 }
 
 // FIXME: Flag, Named and Positional Args
@@ -257,10 +264,16 @@ pub struct Param {
     pub name: String,
 
     #[serde(skip_deserializing)]
-    pub flags: Vec<String>,
+    pub short: Option<String>,
 
     #[serde(skip_deserializing)]
-    pub value: Value,
+    pub long: Option<String>,
+
+    #[serde(skip_deserializing)]
+    pub flags: Vec<String>,
+
+    #[serde(skip_deserializing, default)]
+    pub param_type: ParamType,
 
     #[serde(default)]
     pub dest: Option<String>,
@@ -296,6 +309,37 @@ impl Param {
     }
 }
 
+fn divine(title: &str) -> (String, Option<String>, Option<String>) {
+    let flags: Vec<String> = title.split('|').map(|f| f.to_string()).collect();
+    let short = Some(String::from(
+        flags
+            .iter()
+            .cloned()
+            .filter(|i| i.starts_with('-') && i.len() == 2)
+            .collect::<String>()
+            .trim_matches('-'),
+    ))
+    .filter(|s| !s.is_empty());
+
+    let long = Some(String::from(
+        flags
+            .iter()
+            .cloned()
+            .filter(|i| i.starts_with("--") && i.len() > 2)
+            .collect::<String>()
+            .trim_matches('-'),
+    ))
+    .filter(|s| !s.is_empty());
+    let name = match long {
+        Some(ref long) => long.to_owned(),
+        None => match short {
+            Some(ref short) => short.to_owned(),
+            None => title.to_string(),
+        },
+    };
+    (name, short, long)
+}
+
 fn deserialize_param_map<'de, D>(deserializer: D) -> Result<Params, D::Error>
 where
     D: Deserializer<'de>,
@@ -314,34 +358,9 @@ where
             M: MapAccess<'de>,
         {
             let mut params = Params::new();
-            while let Some((name, mut param)) = map.next_entry::<String, Param>()? {
-                if name.contains('-') {
-                    param.flags = name.split('|').map(|f| f.to_string()).collect();
-                    let short: Vec<String> = param
-                        .flags
-                        .iter()
-                        .cloned()
-                        .filter(|i| i.starts_with('-') && i.len() == 2)
-                        .collect();
-                    let long: Vec<String> = param
-                        .flags
-                        .iter()
-                        .cloned()
-                        .filter(|i| i.starts_with("--") && i.len() > 2)
-                        .collect();
-                    let name = match long.first() {
-                        Some(long) => String::from(long.trim_matches('-')),
-                        None => match short.first() {
-                            Some(short) => String::from(short.trim_matches('-')),
-                            None => param.name.to_owned(),
-                        },
-                    };
-                }
-                if param.dest.is_none() {
-                    param.dest = Some(name.to_owned());
-                }
-                param.name = name.to_owned();
-                params.insert(name.to_owned(), param);
+            while let Some((title, mut param)) = map.next_entry::<String, Param>()? {
+                (param.name, param.short, param.long) = divine(&title);
+                params.insert(title.to_owned(), param);
             }
             Ok(params)
         }
