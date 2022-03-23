@@ -4,6 +4,7 @@ use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::Error;
 use clap::{arg, Arg, ArgMatches, Command};
 
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
 use std::ops::Range;
@@ -36,10 +37,7 @@ fn extract(item: (ContextKind, &ContextValue)) -> Option<&ContextValue> {
 
 pub trait GetKnownMatches {
     fn get_known_matches(&self) -> Result<(ArgMatches, Vec<String>), Error>;
-    fn get_known_matches_from(
-        &self,
-        args: &mut Vec<String>,
-    ) -> Result<(ArgMatches, Vec<String>), Error>;
+    fn get_known_matches_from(&self, args: &mut Vec<String>) -> Result<(ArgMatches, Vec<String>), Error>;
 }
 
 impl<'a> GetKnownMatches for Command<'a> {
@@ -47,10 +45,7 @@ impl<'a> GetKnownMatches for Command<'a> {
         let mut args: Vec<String> = env::args().collect();
         self.get_known_matches_from(&mut args)
     }
-    fn get_known_matches_from(
-        &self,
-        args: &mut Vec<String>,
-    ) -> Result<(ArgMatches, Vec<String>), Error> {
+    fn get_known_matches_from(&self, args: &mut Vec<String>) -> Result<(ArgMatches, Vec<String>), Error> {
         let mut rem: Vec<String> = vec![];
         loop {
             match self.clone().try_get_matches_from(&*args) {
@@ -105,10 +100,7 @@ impl PartitionedArgs {
         Self { args, partitions }
     }
     fn partitions(&self) -> Vec<&[String]> {
-        self.partitions
-            .iter()
-            .map(|p| &self.args[p.clone()])
-            .collect()
+        self.partitions.iter().map(|p| &self.args[p.clone()]).collect()
     }
     fn partition(&self, index: usize) -> Option<&[String]> {
         if index < self.len() {
@@ -166,12 +158,14 @@ impl Parser {
         if ottofile.exists() {
             let loader = Loader::new(&ottofile);
             let spec = loader.load().unwrap();
-            let pa = PartitionedArgs::new(&spec.otto.task_names());
-            let punch = &spec.otto.tasks["punch"];
-            println!("punch={:#?}", punch);
-            println!("task_names={:#?}", &spec.otto.task_names());
-            println!("pa={:#?}", pa);
-            println!("partitions={:#?}", pa.partitions());
+            let task_names = spec.otto.task_names();
+            let mut commands = HashMap::<String, Command>::new();
+            for task_name in task_names.clone() {
+                let task = &spec.otto.tasks[task_name.clone()];
+                let command = Parser::task_to_command(task);
+                *commands.get_mut(task_name.clone()).unwrap() = command;
+            }
+            let pa = PartitionedArgs::new(&task_names.clone());
         } else {
             let after_help = format!("ottofile={:?} does not exist!", ottofile);
             let otto = self
@@ -181,5 +175,22 @@ impl Parser {
             let matches = otto.get_matches_from(vec!["--help"]);
         }
         vec![]
+    }
+    fn task_to_command(task: &Task) -> Command {
+        let mut command = Command::new(&task.name);
+        for param in task.params.values() {
+            command = command.arg(Parser::param_to_arg(param));
+        }
+        command
+    }
+    fn param_to_arg(param: &Param) -> Arg {
+        let mut arg = Arg::new(&*param.name);
+        if let Some(short) = &param.short {
+            arg = arg.short(short.chars().next().unwrap());
+        }
+        if let Some(long) = &param.long {
+            arg = arg.long(long);
+        }
+        arg
     }
 }

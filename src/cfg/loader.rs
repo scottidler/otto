@@ -19,10 +19,8 @@ impl Loader {
 
     //pub fn load(&self, filename: &str) -> Result<Spec, Error> {
     pub fn load(&self) -> Result<Spec, Error> {
-        let content = fs::read_to_string(&self.ottofile)
-            .context(format!("Can't load ottofile={:?}", self.ottofile))?;
-        let spec: Spec =
-            serde_yaml::from_str(&content).context(format!("Can't load content={:?}", content))?;
+        let content = fs::read_to_string(&self.ottofile).context(format!("Can't load ottofile={:?}", self.ottofile))?;
+        let spec: Spec = serde_yaml::from_str(&content).context(format!("Can't load content={:?}", content))?;
         Ok(spec)
     }
 }

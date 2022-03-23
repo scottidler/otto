@@ -23,8 +23,7 @@ macro_rules! str_tuple3 {
             for ys in vec {
                 if let Some(tup) = ys.as_vec() {
                     debug_assert_eq!(3, tup.len());
-                    $app =
-                        $app.$method(str_str!(tup[0]), str_opt_str!(tup[1]), str_opt_str!(tup[2]));
+                    $app = $app.$method(str_str!(tup[0]), str_opt_str!(tup[1]), str_opt_str!(tup[2]));
                 } else {
                     panic!("Failed to convert YAML value to vec");
                 }
@@ -51,10 +50,7 @@ macro_rules! str_vec_or_str {
             if let Some(s) = $value.as_str() {
                 $app = $app.$method(s);
             } else {
-                panic!(
-                    "Failed to convert YAML value {:?} to either a vec or string",
-                    $value
-                );
+                panic!("Failed to convert YAML value {:?} to either a vec or string", $value);
             }
         }
         $app
@@ -84,9 +80,9 @@ macro_rules! str_opt_str {
     ($value:expr) => {{
         if !$value.is_null() {
             Some(
-                $value.as_str().unwrap_or_else(|| {
-                    panic!("failed to convert YAML {:?} value to a string", $value)
-                }),
+                $value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("failed to convert YAML {:?} value to a string", $value)),
             )
         } else {
             None
