@@ -159,11 +159,11 @@ impl Parser {
             let loader = Loader::new(&ottofile);
             let spec = loader.load().unwrap();
             let task_names = spec.otto.task_names();
-            let mut commands = HashMap::<String, Command>::new();
+            let mut commands = HashMap::<&str, Command>::new();
             for task_name in task_names.clone() {
-                let task = &spec.otto.tasks[<&str>::clone(&task_name)];
+                let task = &spec.otto.tasks[task_name];
                 let command = Parser::task_to_command(task);
-                *commands.get_mut(<&str>::clone(&task_name)).unwrap() = command;
+                commands.insert(task_name, command);
             }
             let pa = PartitionedArgs::new(&task_names.clone());
         } else {
