@@ -230,7 +230,7 @@ pub struct Param {
     pub name: String,
 
     #[serde(skip_deserializing)]
-    pub short: Option<String>,
+    pub short: Option<char>,
 
     #[serde(skip_deserializing)]
     pub long: Option<String>,
@@ -260,17 +260,16 @@ pub struct Param {
     pub help: Option<String>,
 }
 
-fn divine(title: &str) -> (String, Option<String>, Option<String>) {
+fn divine(title: &str) -> (String, Option<char>, Option<String>) {
     let flags: Vec<String> = title.split('|').map(|f| f.to_string()).collect();
-    let short = Some(String::from(
-        flags
-            .iter()
-            .cloned()
-            .filter(|i| i.starts_with('-') && i.len() == 2)
-            .collect::<String>()
-            .trim_matches('-'),
-    ))
-    .filter(|s| !s.is_empty());
+    let short = flags
+        .iter()
+        .cloned()
+        .filter(|i| i.starts_with('-') && i.len() == 2)
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .next();
 
     let long = Some(String::from(
         flags
@@ -281,10 +280,11 @@ fn divine(title: &str) -> (String, Option<String>, Option<String>) {
             .trim_matches('-'),
     ))
     .filter(|s| !s.is_empty());
+
     let name = match long {
         Some(ref long) => long.to_owned(),
         None => match short {
-            Some(ref short) => short.to_owned(),
+            Some(ref short) => short.to_string(),
             None => title.to_string(),
         },
     };

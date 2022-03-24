@@ -186,7 +186,7 @@ impl Parser {
     fn param_to_arg(param: &Param) -> Arg {
         let mut arg = Arg::new(&*param.name);
         if let Some(short) = &param.short {
-            arg = arg.short(short.chars().next().unwrap());
+            arg = arg.short(*short);
         }
         if let Some(long) = &param.long {
             arg = arg.long(long);
