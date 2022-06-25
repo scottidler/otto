@@ -1,4 +1,4 @@
-#![allow(unused_imports, unused_variables, unused_attributes, dead_code)]
+#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::Error;
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::cfg::loader::Loader;
-use crate::cfg::spec::{Nargs, Otto, Param, Spec, Task, Value};
+use crate::cfg::spec::{Nargs, Otto, Param, Params, Spec, Task, Tasks, Value};
 
 #[macro_use]
 use super::macros;
@@ -144,14 +144,13 @@ impl Parser {
     }
 
     pub fn divine_ottofile(&self) -> PathBuf {
-        let ottofile = match self.otto_seed(true).get_known_matches() {
+        (match GetKnownMatches::get_known_matches(&self.otto_seed(true)) {
             Ok((matches, _)) => match matches.value_of("ottofile").map(str::to_string) {
                 Some(s) => s,
                 None => self.ottofile.clone(),
             },
             Err(error) => self.ottofile.clone(),
-        };
-        ottofile.into()
+        }).into()
     }
     pub fn parse(&self) -> Vec<ArgMatches> {
         let ottofile = self.divine_ottofile();
@@ -162,7 +161,7 @@ impl Parser {
             let mut commands = HashMap::<&str, Command>::new();
             for task_name in task_names.clone() {
                 let task = &spec.otto.tasks[task_name];
-                let command = Parser::task_to_command(task);
+                let command = Parser::build_command(task.name.clone(), task.params.clone());
                 commands.insert(task_name, command);
             }
             let pa = PartitionedArgs::new(&task_names.clone());
@@ -179,14 +178,19 @@ impl Parser {
     fn task_to_command(task: &Task) -> Command {
         let mut command = Command::new(&task.name);
         for param in task.params.values() {
+            print_type_of(&param);
             command = command.arg(Parser::param_to_arg(param));
         }
         command
     }
+    fn build_command(name: String, params: Params) -> Command<'static> {
+        let mut command = Command::new(&name);
+        command
+    }
     fn param_to_arg(param: &Param) -> Arg {
         let mut arg = Arg::new(&*param.name);
-        if let Some(short) = &param.short {
-            arg = arg.short(*short);
+        if let Some(short) = param.short {
+            arg = arg.short(short);
         }
         if let Some(long) = &param.long {
             arg = arg.long(long);
