@@ -10,8 +10,8 @@ use std::num::ParseIntError;
 use std::path::PathBuf;
 use std::vec::Vec;
 
-type Tasks = HashMap<String, Task>;
-type Params = HashMap<String, Param>;
+pub(crate) type Tasks = HashMap<String, Task>;
+pub type Params = HashMap<String, Param>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Nargs {
@@ -281,12 +281,13 @@ fn divine(title: &str) -> (String, Option<char>, Option<String>) {
     ))
     .filter(|s| !s.is_empty());
 
-    let name = match long {
-        Some(ref long) => long.to_owned(),
-        None => match short {
-            Some(ref short) => short.to_string(),
-            None => title.to_string(),
-        },
+    let name = if let Some(ref long) = long {
+        long.to_owned()
+    } else {
+        match short {
+                Some(ref short) => short.to_string(),
+                None => title.to_string(),
+            }
     };
     (name, short, long)
 }
