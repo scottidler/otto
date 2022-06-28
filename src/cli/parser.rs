@@ -76,41 +76,50 @@ impl<'a> GetKnownMatches for Command<'a> {
         }
     }
 }
+
+/*
 #[derive(Debug, Default, PartialEq, Clone)]
-struct PartitionedArgs {
+struct Partition {
+    name: String,
     args: Vec<String>,
-    partitions: Vec<Range<usize>>,
 }
-impl PartitionedArgs {
-    fn new(tasknames: &[&str]) -> Self {
+impl Partition {
+    fn new(name: &str, args: &[String]) -> Self {
+        Self {
+            name: name.to_owned(),
+            args: args.to_vec(),
+        }
+    }
+    fn partition(tasknames: &[&str]) -> Vec<Partition> {
         let args: Vec<String> = env::args().collect();
-        let mut beg = 0;
         let mut partitions = vec![];
+        let mut beg: usize = 0;
         for (i, arg) in args.iter().skip(1).enumerate() {
-            if tasknames.iter().any(|t| t == arg) {
+            if tasknames.iter().any(|t: &&str| t == arg) {
                 let end = i + 1;
-                partitions.push(Range::<usize> { start: beg, end });
+                partitions.push(Partition::new(&args[beg..end].join(" "), &args[beg..end]));
                 beg = end;
             }
         }
-        partitions.push(Range::<usize> {
-            start: beg,
-            end: args.len(),
-        });
-        Self { args, partitions }
+        partitions.push(Partition::new("default", &args[beg..]));
+        partitions
     }
-    fn partitions(&self) -> Vec<&[String]> {
-        self.partitions.iter().map(|p| &self.args[p.clone()]).collect()
-    }
-    fn partition(&self, index: usize) -> Option<&[String]> {
-        if index < self.len() {
-            return Some(&self.args[self.partitions[index].clone()]);
+}
+*/
+
+fn partition(task_names: &[&str]) -> HashMap<String, Vec<String>> {
+    let args: Vec<String> = env::args().collect();
+    let mut partitions = HashMap::new();
+    let mut beg: usize = 0;
+    for (i, arg) in args.iter().skip(1).enumerate() {
+        if task_names.iter().any(|t: &&str| t == arg) {
+            let end = i + 1;
+            partitions.insert(arg.to_owned(), args[beg..end].to_vec());
+            beg = end;
         }
-        None
     }
-    fn len(&self) -> usize {
-        self.partitions.len()
-    }
+    partitions.insert("default".to_owned(), args[beg..].to_vec());
+    partitions
 }
 
 #[derive(Debug, PartialEq)]
@@ -142,7 +151,6 @@ impl Parser {
                     .help("override default path to ottofile"),
             )
     }
-
     pub fn divine_ottofile(&self) -> PathBuf {
         (match GetKnownMatches::get_known_matches(&self.otto_seed(true)) {
             Ok((matches, _)) => match matches.value_of("ottofile").map(str::to_string) {
@@ -154,17 +162,20 @@ impl Parser {
     }
     pub fn parse(&self) -> Vec<ArgMatches> {
         let ottofile = self.divine_ottofile();
+        let mut matches_vec: Vec<ArgMatches> = vec![];
         if ottofile.exists() {
             let loader = Loader::new(&ottofile);
             let spec = loader.load().unwrap();
             let task_names = spec.otto.task_names();
-            let mut commands = HashMap::<&str, Command>::new();
-            for task_name in task_names.clone() {
-                let task = &spec.otto.tasks[task_name];
-                let command = Parser::build_command(task.name.clone(), task.params.clone());
-                commands.insert(task_name, command);
+            let partitions = partition(&task_names);
+            for (name, args) in partitions {
+                let task = &spec.otto.tasks[&name];
+                let command = Parser::task_to_command(task);
+                let mut args = args.clone();
+                args.insert(0, name.to_owned());
+                let matches = command.clone().try_get_matches_from(&args).unwrap();
+                matches_vec.push(matches);
             }
-            let pa = PartitionedArgs::new(&task_names.clone());
         } else {
             let after_help = format!("ottofile={:?} does not exist!", ottofile);
             let otto = self
@@ -172,19 +183,15 @@ impl Parser {
                 .arg_required_else_help(true)
                 .after_help(after_help.as_str());
             let matches = otto.get_matches_from(vec!["--help"]);
+            matches_vec.push(matches);
         }
-        vec![]
+        matches_vec
     }
     fn task_to_command(task: &Task) -> Command {
         let mut command = Command::new(&task.name);
         for param in task.params.values() {
-            print_type_of(&param);
             command = command.arg(Parser::param_to_arg(param));
         }
-        command
-    }
-    fn build_command(name: String, params: Params) -> Command<'static> {
-        let mut command = Command::new(&name);
         command
     }
     fn param_to_arg(param: &Param) -> Arg {
@@ -193,7 +200,7 @@ impl Parser {
             arg = arg.short(short);
         }
         if let Some(long) = &param.long {
-            arg = arg.long(long);
+            arg = arg.long(long.as_str());
         }
         arg
     }
