@@ -8,15 +8,19 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
 use std::ops::Range;
+//use std::os::unix::raw::off_t;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::marker::PhantomData;
+use std::unimplemented;
 
 use crate::cfg::loader::Loader;
-use crate::cfg::spec::{Nargs, Otto, Param, Params, Spec, Task, Tasks, Value};
+use crate::cfg::spec::{Nargs, Otto, Param, Params, Spec, Task, Tasks, Value, ParamType};
 
 #[macro_use]
 use super::macros;
-use super::error;
+//use super::error;
+use std::error;
 
 static OTTOFILE: &str = "./otto.yml";
 
@@ -37,18 +41,19 @@ fn extract(item: (ContextKind, &ContextValue)) -> Option<&ContextValue> {
 
 pub trait GetKnownMatches {
     fn get_known_matches(&self) -> Result<(ArgMatches, Vec<String>), Error>;
-    fn get_known_matches_from(&self, args: &mut Vec<String>) -> Result<(ArgMatches, Vec<String>), Error>;
+    fn get_known_matches_from(&self, args: &Vec<String>) -> Result<(ArgMatches, Vec<String>), Error>;
 }
 
 impl<'a> GetKnownMatches for Command<'a> {
     fn get_known_matches(&self) -> Result<(ArgMatches, Vec<String>), Error> {
-        let mut args: Vec<String> = env::args().collect();
-        self.get_known_matches_from(&mut args)
+        let args: Vec<String> = env::args().collect();
+        self.get_known_matches_from(&args)
     }
-    fn get_known_matches_from(&self, args: &mut Vec<String>) -> Result<(ArgMatches, Vec<String>), Error> {
+    fn get_known_matches_from(&self, args: &Vec<String>) -> Result<(ArgMatches, Vec<String>), Error> {
+        let mut args_ = args.clone();
         let mut rem: Vec<String> = vec![];
         loop {
-            match self.clone().try_get_matches_from(&*args) {
+            match self.clone().try_get_matches_from(&*args_) {
                 Ok(matches) => {
                     return Ok((matches, rem));
                 }
@@ -58,7 +63,7 @@ impl<'a> GetKnownMatches for Command<'a> {
                         match items {
                             Some(ContextValue::String(s)) => {
                                 rem.push(s.to_owned());
-                                args.retain(|a| a != s);
+                                args_.retain(|a| a != s);
                             }
                             Some(&_) => {
                                 return Err(error);
@@ -77,69 +82,34 @@ impl<'a> GetKnownMatches for Command<'a> {
     }
 }
 
-/*
-#[derive(Debug, Default, PartialEq, Clone)]
-struct Partition {
-    name: String,
-    args: Vec<String>,
-}
-impl Partition {
-    fn new(name: &str, args: &[String]) -> Self {
-        Self {
-            name: name.to_owned(),
-            args: args.to_vec(),
-        }
-    }
-    fn partition(tasknames: &[&str]) -> Vec<Partition> {
-        let args: Vec<String> = env::args().collect();
-        let mut partitions = vec![];
-        let mut beg: usize = 0;
-        for (i, arg) in args.iter().skip(1).enumerate() {
-            if tasknames.iter().any(|t: &&str| t == arg) {
-                let end = i + 1;
-                partitions.push(Partition::new(&args[beg..end].join(" "), &args[beg..end]));
-                beg = end;
-            }
-        }
-        partitions.push(Partition::new("default", &args[beg..]));
-        partitions
-    }
-}
-*/
-
-fn partition(task_names: &[&str]) -> HashMap<String, Vec<String>> {
-    let args: Vec<String> = env::args().collect();
-    let mut partitions = HashMap::new();
-    let mut beg: usize = 0;
-    for (i, arg) in args.iter().skip(1).enumerate() {
-        if task_names.iter().any(|t: &&str| t == arg) {
-            let end = i + 1;
-            partitions.insert(arg.to_owned(), args[beg..end].to_vec());
-            beg = end;
-        }
-    }
-    partitions.insert("default".to_owned(), args[beg..].to_vec());
-    partitions
+fn get_ottofile() -> String {
+    env::var("OTTOFILE").unwrap_or_else(|_| OTTOFILE.to_owned())
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Parser {
-    ottofile: String,
+pub struct Parser<'a> {
+    args: Vec<String>,
+    ottofile: PathBuf,
+    phantom: PhantomData<&'a str>,
 }
 
-impl Default for Parser {
+impl<'a> Default for Parser<'a> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Parser {
+impl<'a> Parser<'a> {
     pub fn new() -> Self {
+        let args = env::args().collect();
+        let ottofile = Parser::divine_ottofile();
         Self {
-            ottofile: env::var("OTTOFILE").unwrap_or_else(|_| OTTOFILE.to_owned()),
+            args,
+            ottofile,
+            phantom: PhantomData,
         }
     }
-    fn otto_seed(&self, nerfed: bool) -> Command {
+    fn otto_command(nerfed: bool) -> Command<'a> {
         Command::new("otto")
             .disable_help_flag(nerfed)
             .disable_version_flag(nerfed)
@@ -151,42 +121,80 @@ impl Parser {
                     .help("override default path to ottofile"),
             )
     }
-    pub fn divine_ottofile(&self) -> PathBuf {
-        (match GetKnownMatches::get_known_matches(&self.otto_seed(true)) {
-            Ok((matches, _)) => match matches.value_of("ottofile").map(str::to_string) {
+    fn divine_ottofile() -> PathBuf {
+        let otto_cmd = Parser::otto_command(true);
+        let ottofile = match GetKnownMatches::get_known_matches(&otto_cmd) {
+            Ok((matches, args)) => match matches.value_of("ottofile").map(str::to_string) {
                 Some(s) => s,
-                None => self.ottofile.clone(),
+                None => get_ottofile(),
             },
-            Err(error) => self.ottofile.clone(),
-        }).into()
+            Err(error) => get_ottofile(),
+        };
+        PathBuf::from(ottofile)
     }
-    pub fn parse(&self) -> Vec<ArgMatches> {
-        let ottofile = self.divine_ottofile();
-        let mut matches_vec: Vec<ArgMatches> = vec![];
-        if ottofile.exists() {
-            let loader = Loader::new(&ottofile);
+    pub fn indices(&self, task_names: &[&str]) -> Result<Vec<usize>, Error> {
+        let mut indices: Vec<usize> = vec![0];
+        for (i, arg) in self.args.iter().enumerate() {
+            if task_names.contains(&arg.as_str()) {
+                indices.push(i);
+            }
+        }
+        Ok(indices)
+    }
+    pub fn partitions(&self, task_names: &[&str]) -> Result<Vec<Vec<String>>, Error> {
+        let mut partitions: Vec<Vec<String>> = vec![];
+        let mut end = self.args.len();
+        for index in self.indices(task_names)?.iter().rev() {
+            partitions.insert(0, self.args[*index..end].to_vec());
+            end = *index;
+        }
+        Ok(partitions)
+    }
+    pub fn parse(&self) -> Result<Vec<ArgMatches>, Error> {
+        println!("fn parse: self.args={:#?}", self.args);
+        let mut matches_vec = vec![];
+        if self.ottofile.exists() {
+            let loader = Loader::new(&self.ottofile);
             let spec = loader.load().unwrap();
-            let task_names = spec.otto.task_names();
-            let partitions = partition(&task_names);
-            for (name, args) in partitions {
-                let task = &spec.otto.tasks[&name];
-                let command = Parser::task_to_command(task);
-                let mut args = args.clone();
-                args.insert(0, name.to_owned());
-                let matches = command.clone().try_get_matches_from(&args).unwrap();
+            let task_names = &spec.otto.task_names();
+            if task_names.len() > 0 {
+                let partitions = self.partitions(task_names)?;
+                for partition in partitions.iter().skip(1) {
+                    let name = partition[0].clone();
+                    let args: Vec<String> = partition[1..].to_vec();
+                    let task = &spec.otto.tasks[&name];
+                    let command = Parser::task_to_command(task);
+                    println!("'--help' not in args");
+                    println!("{:*<1$}", "", 80);
+                    println!("command={:#?}", command);
+                    println!("{:*<1$}", "", 80);
+                    println!("name={} args={:?}", name, args);
+                    let matches = command.get_matches_from(&args);
+                    matches_vec.push(matches);
+                }
+            } else {
+                println!("no task names found");
+                println!("name={} args={:?}", "otto", self.args);
+                let matches = Parser::otto_command(false).get_matches();
                 matches_vec.push(matches);
             }
         } else {
-            let after_help = format!("ottofile={:?} does not exist!", ottofile);
-            let otto = self
-                .otto_seed(false)
+            println!("no ottofile found; ottofile={:?}", self.ottofile);
+            let after_help = format!("ottofile={:?} does not exist!", self.ottofile);
+            let otto = Parser::otto_command(false)
                 .arg_required_else_help(true)
                 .after_help(after_help.as_str());
             let matches = otto.get_matches_from(vec!["--help"]);
             matches_vec.push(matches);
         }
-        matches_vec
+        Ok(matches_vec)
     }
+
+    /*
+    fn otto_to_command(otto: &Otto) -> Command {
+        unimplemented!()
+    }
+    */
     fn task_to_command(task: &Task) -> Command {
         let mut command = Command::new(&task.name);
         for param in task.params.values() {
@@ -202,6 +210,14 @@ impl Parser {
         if let Some(long) = &param.long {
             arg = arg.long(long.as_str());
         }
+        if param.param_type == ParamType::OPT {
+            arg = arg.takes_value(true);
+        }
+        if let Some(help) = &param.help {
+            arg = arg.help(help.as_str());
+        }
+        println!("arg={:?}", arg);
         arg
     }
+    
 }

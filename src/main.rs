@@ -4,6 +4,13 @@ use otto::cli::parser::Parser;
 
 fn main() {
     let parser = Parser::new();
-    let matches = parser.parse();
-    println!("matches={:#?}", matches);
+    //println!("parser={:#?}", parser);
+    match parser.parse() {
+        Ok(matches) => {
+            println!("matches={:#?}", matches);
+        }
+        Err(error) => {
+            println!("error={:#?}", error);
+        }
+    }
 }
