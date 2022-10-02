@@ -285,9 +285,9 @@ fn divine(title: &str) -> (String, Option<char>, Option<String>) {
         long.to_owned()
     } else {
         match short {
-                Some(ref short) => short.to_string(),
-                None => title.to_string(),
-            }
+            Some(ref short) => short.to_string(),
+            None => title.to_string(),
+        }
     };
     (name, short, long)
 }
