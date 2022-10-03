@@ -172,7 +172,7 @@ impl<'a> Parser<'a> {
                 }
                 for partition in partitions.iter().skip(1) {
                     let name = partition[0].clone();
-                    let args: Vec<String> = partition[1..].to_vec();
+                    let args: Vec<String> = partition[0..].to_vec();
                     let task = &spec.otto.tasks[&name];
                     let command = Parser::task_to_command(task);
                     let matches = command.get_matches_from(&args);
