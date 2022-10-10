@@ -219,6 +219,9 @@ impl<'a> Parser<'a> {
         if let Some(help) = &param.help {
             arg = arg.help(help.as_str());
         }
+        if let Some(default) = &param.default {
+            arg = arg.default_value(default.as_str());
+        }
         arg
     }
 }
