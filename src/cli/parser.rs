@@ -13,6 +13,8 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::unimplemented;
+use std::fs::metadata;
+use std::path::Path;
 
 use crate::cfg::loader::Loader;
 use crate::cfg::spec::{Nargs, Otto, Param, ParamType, Params, Spec, Task, Tasks, Value};
@@ -23,6 +25,7 @@ use std::error;
 
 const OTTOFILES: &'static [&'static str] = &["otto.yml", "otto.yaml", ".otto.yml", ".otto.yaml"];
 
+static OTTOPATH: &str = "./";
 static OTTOFILE: &str = "./otto.yml";
 
 fn print_type_of<T: ?Sized>(t: &T)
@@ -30,6 +33,14 @@ where
     T: Debug,
 {
     println!("type={} value={:#?}", std::any::type_name::<T>(), t);
+}
+
+fn get_ottopath() -> String {
+    env::var("OTTOPATH").unwrap_or_else(|_| OTTOPATH.to_owned())
+}
+
+fn get_ottofile() -> String {
+    env::var("OTTOFILE").unwrap_or_else(|_| OTTOFILE.to_owned())
 }
 
 fn extract(item: (ContextKind, &ContextValue)) -> Option<&ContextValue> {
@@ -83,10 +94,6 @@ impl<'a> GetKnownMatches for Command<'a> {
     }
 }
 
-fn get_ottofile() -> String {
-    env::var("OTTOFILE").unwrap_or_else(|_| OTTOFILE.to_owned())
-}
-
 #[derive(Debug, PartialEq)]
 pub struct Parser<'a> {
     args: Vec<String>,
@@ -116,23 +123,39 @@ impl<'a> Parser<'a> {
             .disable_help_flag(nerfed)
             .disable_version_flag(nerfed)
             .arg(
-                Arg::new("ottofile")
+                Arg::new("ottopath")
                     .takes_value(true)
                     .short('o')
-                    .long("ottofile")
+                    .long("ottopath")
                     .value_name("PATH")
-                    .help("override default path to ottofile"),
+                    .help("override default ottopath"),
             )
     }
     fn divine_ottofile() -> PathBuf {
         let otto_cmd = Parser::otto_command(true);
-        let ottofile = match GetKnownMatches::get_known_matches(&otto_cmd) {
-            Ok((matches, args)) => match matches.value_of("ottofile").map(str::to_string) {
-                Some(s) => s,
-                None => get_ottofile(),
+        let ottopath = match GetKnownMatches::get_known_matches(&otto_cmd) {
+            Ok((matches, args)) => match matches.value_of("ottopath") {
+                Some(s) => s.to_owned(),
+                None => get_ottopath(),
             },
-            Err(error) => get_ottofile(),
+            Err(error) => get_ottopath(),
         };
+        let ottofile = match metadata(ottopath.clone()) {
+            Ok(d) if d.is_dir() => {
+                for f in OTTOFILES {
+                    let some = format!("{}/{}", ottopath, f);
+                    let path = Path::new(&some);
+                    if path.exists() {
+                        return path.to_path_buf();
+                    }
+                }
+                get_ottofile()
+            },
+            Ok(f) if f.is_file() => ottopath.to_owned(),
+            Ok(_) => get_ottofile(),
+            Err(e) => get_ottofile(),
+        };
+
         PathBuf::from(ottofile)
     }
     pub fn indices(&self, task_names: &[&str]) -> Result<Vec<usize>, Error> {
