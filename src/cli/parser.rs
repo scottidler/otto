@@ -110,7 +110,7 @@ impl<'a> Default for Parser<'a> {
 impl<'a> Parser<'a> {
     pub fn new() -> Self {
         let args = env::args().collect();
-        let ottofile = Parser::divine_ottofile();
+        let (ottofile, rem) = Parser::divine_ottofile();
         Self {
             args,
             ottofile,
@@ -131,14 +131,14 @@ impl<'a> Parser<'a> {
                     .help("override default ottopath"),
             )
     }
-    fn divine_ottofile() -> PathBuf {
+    fn divine_ottofile() -> (PathBuf, Vec<String>) {
         let otto_cmd = Parser::otto_command(true);
-        let ottopath = match GetKnownMatches::get_known_matches(&otto_cmd) {
-            Ok((matches, args)) => match matches.value_of("ottopath") {
-                Some(s) => s.to_owned(),
-                None => get_ottopath(),
+        let (ottopath, rem) = match GetKnownMatches::get_known_matches(&otto_cmd) {
+            Ok((matches, rem)) => match matches.value_of("ottopath") {
+                Some(s) => (s.to_owned(), rem),
+                None => (get_ottopath(), rem),
             },
-            Err(error) => get_ottopath(),
+            Err(error) => (get_ottopath(), vec![]),
         };
         let ottofile = match metadata(ottopath.clone()) {
             Ok(d) if d.is_dir() => {
@@ -146,7 +146,7 @@ impl<'a> Parser<'a> {
                     let some = format!("{}/{}", ottopath, f);
                     let path = Path::new(&some);
                     if path.exists() {
-                        return path.to_path_buf();
+                        return (path.to_path_buf(), rem);
                     }
                 }
                 get_ottofile()
@@ -156,7 +156,7 @@ impl<'a> Parser<'a> {
             Err(e) => get_ottofile(),
         };
 
-        PathBuf::from(ottofile)
+        (PathBuf::from(ottofile), rem)
     }
     pub fn indices(&self, task_names: &[&str]) -> Result<Vec<usize>, Error> {
         let mut indices: Vec<usize> = vec![0];
