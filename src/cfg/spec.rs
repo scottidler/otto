@@ -205,6 +205,9 @@ pub struct Otto {
 }
 
 impl Otto {
+    pub fn param_names(&self) -> Vec<&str> {
+        self.params.keys().map(AsRef::as_ref).collect()
+    }
     pub fn task_names(&self) -> Vec<&str> {
         self.tasks.keys().map(AsRef::as_ref).collect()
     }
