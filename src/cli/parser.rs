@@ -109,10 +109,15 @@ impl<'a> Default for Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub fn new() -> Self {
-        let args = env::args().collect();
-        let (ottofile, rem) = Parser::divine_ottofile();
+        let args: Vec<String> = env::args().collect();
+        let (ottofile, mut rem) = Parser::divine_ottofile();
+        println!("args={:?}, rem={:?}", args, rem);
+        //FIXME: this is a terrible hack, should be removed; not sure it works either
+        if args[0] != rem[0] {
+            rem.insert(0, args[0].clone());
+        }
         Self {
-            args,
+            args: rem,
             ottofile,
             phantom: PhantomData,
         }
@@ -183,17 +188,19 @@ impl<'a> Parser<'a> {
             println!("ottofile={:?}", self.ottofile);
             let loader = Loader::new(&self.ottofile);
             let spec = loader.load().unwrap();
-            let mut otto = Parser::otto_command(false);
-            let param_names = &spec.otto.param_names();
-            if  param_names.len() > 0 {
-                for param in spec.otto.params.values() {
-                    otto = otto.arg(Parser::param_to_arg(param));
-                }
-            }
             let task_names = &spec.otto.task_names();
             let partitions = self.partitions(task_names)?;
             println!("partitions={:?}", partitions);
             let partition = &partitions[0];
+            println!("first partition={:?}", partition);
+            let mut otto = Parser::otto_command(false);
+            let param_names = &spec.otto.param_names();
+            if  param_names.len() > 0 {
+                println!("param_names={:?}", param_names);
+                for param in spec.otto.params.values() {
+                    otto = otto.arg(Parser::param_to_arg(param));
+                }
+            }
             let name = partition[0].clone();
             let args: Vec<String> = partition[0..].to_vec();
             let matches = otto.clone().get_matches_from(&args[1..]);
@@ -209,7 +216,8 @@ impl<'a> Parser<'a> {
                     for task_name in task_names.iter() {
                         otto = otto.subcommand(Command::new(*task_name));
                     }
-                    let args: Vec<String> = partitions[0][1..].to_vec();
+                    //let args: Vec<String> = partitions[0][1..].to_vec();
+                    let args: Vec<String> = partitions[0].to_vec();
                     let matches = otto.get_matches_from(&args[1..]);
                     matches_vec.push(matches);
                 } else {
