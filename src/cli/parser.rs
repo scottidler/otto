@@ -1,20 +1,20 @@
 #![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
-use clap::error::{ContextKind, ContextValue, ErrorKind};
+//use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::Error;
 use clap::{arg, Arg, ArgMatches, Command};
+use thiserror::Error;
 
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
-use std::ops::Range;
-//use std::os::unix::raw::off_t;
+use std::fs;
+use std::fs::metadata;
 use std::marker::PhantomData;
-use std::path::PathBuf;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::unimplemented;
-use std::fs::metadata;
-use std::path::Path;
 
 use crate::cfg::loader::Loader;
 use crate::cfg::spec::{Nargs, Otto, Param, ParamType, Params, Spec, Task, Tasks, Value};
@@ -23,10 +23,17 @@ use crate::cfg::spec::{Nargs, Otto, Param, ParamType, Params, Spec, Task, Tasks,
 use super::macros;
 use std::error;
 
-const OTTOFILES: &'static [&'static str] = &["otto.yml", "otto.yaml", ".otto.yml", ".otto.yaml"];
+const OTTOFILES: &'static [&'static str] = &[
+    "otto.yml",
+    ".otto.yml",
+    "otto.yaml",
+    ".otto.yaml",
+    "Ottofile",
+    "OTTOFILE",
+];
 
-static OTTOPATH: &str = "./";
-static OTTOFILE: &str = "./otto.yml";
+//static OTTOPATH: &str = "./";
+//static OTTOFILE: &str = "./otto.yml";
 
 fn print_type_of<T: ?Sized>(t: &T)
 where
@@ -35,6 +42,7 @@ where
     println!("type={} value={:#?}", std::any::type_name::<T>(), t);
 }
 
+/*
 fn get_ottopath() -> String {
     env::var("OTTOPATH").unwrap_or_else(|_| OTTOPATH.to_owned())
 }
@@ -42,7 +50,8 @@ fn get_ottopath() -> String {
 fn get_ottofile() -> String {
     env::var("OTTOFILE").unwrap_or_else(|_| OTTOFILE.to_owned())
 }
-
+*/
+/*
 fn extract(item: (ContextKind, &ContextValue)) -> Option<&ContextValue> {
     let (k, v) = item;
     if k == ContextKind::InvalidArg {
@@ -93,7 +102,130 @@ impl<'a> GetKnownMatches for Command<'a> {
         }
     }
 }
+*/
 
+#[derive(Error, Debug)]
+pub enum OttofileError {
+    #[error("env var error: {0}")]
+    HomeUndefined(#[from] env::VarError),
+    #[error("canonicalize error")]
+    CanoncalizeError(#[from] std::io::Error),
+    #[error("divinie error; unable to find ottofile from path=[{0}]")]
+    DivineError(PathBuf),
+    #[error("relative path error")]
+    RelativePathError,
+    #[error("unknown error")]
+    Unknown,
+}
+
+// This routine is adapted from the *old* Path's `path_relative_from`
+// function, which works differently from the new `relative_from` function.
+// In particular, this handles the case on unix where both paths are
+// absolute but with only the root as the common directory.
+// url: https://stackoverflow.com/a/39343127
+fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+
+    if path.is_absolute() != base.is_absolute() {
+        if path.is_absolute() {
+            Some(PathBuf::from(path))
+        } else {
+            None
+        }
+    } else {
+        let mut ita = path.components();
+        let mut itb = base.components();
+        let mut comps: Vec<Component> = vec![];
+        loop {
+            match (ita.next(), itb.next()) {
+                (None, None) => break,
+                (Some(a), None) => {
+                    comps.push(a);
+                    comps.extend(ita.by_ref());
+                    break;
+                }
+                (None, _) => comps.push(Component::ParentDir),
+                (Some(a), Some(b)) if comps.is_empty() && a == b => (),
+                (Some(a), Some(b)) if b == Component::CurDir => comps.push(a),
+                (Some(_), Some(b)) if b == Component::ParentDir => return None,
+                (Some(a), Some(_)) => {
+                    comps.push(Component::ParentDir);
+                    for _ in itb {
+                        comps.push(Component::ParentDir);
+                    }
+                    comps.push(a);
+                    comps.extend(ita.by_ref());
+                    break;
+                }
+            }
+        }
+        let val: PathBuf = comps.iter().map(|c| c.as_os_str()).collect();
+        if val == Path::new("") {
+            Some(PathBuf::from(path))
+        } else {
+            Some(comps.iter().map(|c| c.as_os_str()).collect())
+        }
+    }
+}
+
+fn find_ottofile_old(path: &Path) -> Option<PathBuf> {
+    for ottofile in OTTOFILES {
+        let ottofile_path = path.join(ottofile);
+        if ottofile_path.exists() {
+            return Some(ottofile_path);
+        }
+    }
+    None
+}
+
+fn find_ottofile(path: &Path) -> Option<PathBuf> {
+    for ottofile in OTTOFILES {
+        let ottofile_path = path.join(ottofile);
+        if ottofile_path.exists() {
+            return Some(ottofile_path);
+        }
+    }
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => return None,
+    };
+    if parent == Path::new("/") {
+        return None;
+    }
+    find_ottofile(parent)
+}
+
+fn divine_ottofile(value: String) -> Result<PathBuf, OttofileError> {
+    let cwd = env::current_dir()?;
+    let home = env::var("HOME")?;
+    let mut path = PathBuf::from(value.replace("~", home.as_str()));
+    path = fs::canonicalize(path)?;
+    if path.is_dir() {
+        if let Some(ottofile) = find_ottofile(&path) {
+            path = ottofile;
+        } else {
+            return Err(OttofileError::DivineError(path));
+        }
+    }
+    path = path_relative_from(&path, &cwd).ok_or(OttofileError::RelativePathError)?;
+    Ok(path)
+}
+
+fn get_ottofile_args() -> Result<(PathBuf, Vec<String>), OttofileError> {
+    let mut args: Vec<String> = env::args().collect();
+    let index = args.iter().position(|x| x == "--ottofile");
+    let value = match index {
+        Some(index) => {
+            let value = args[index + 1].clone();
+            args.remove(index);
+            args.remove(index);
+            value
+        }
+        None => env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
+    };
+    let ottofile = divine_ottofile(value)?;
+    Ok((ottofile, args))
+}
 #[derive(Debug, PartialEq)]
 pub struct Parser<'a> {
     args: Vec<String>,
@@ -109,15 +241,29 @@ impl<'a> Default for Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub fn new() -> Self {
-        let args: Vec<String> = env::args().collect();
-        let (ottofile, mut rem) = Parser::divine_ottofile();
-        println!("args={:?}, rem={:?}", args, rem);
+        //let args: Vec<String> = env::args().collect();
+        //let (ottofile, mut rem) = Parser::divine_ottofile();
+        //println!("args={:?}, rem={:?}", args, rem);
+        /*
+        match get_ottofile_args() {
+            Ok((ottofile, args)) => {
+                println!("ottofile: {:?}", ottofile);
+                println!("args: {:?}", args);
+            },
+            Err(e) => {
+                println!("Error: {:?}", e);
+            },
+        }
+        */
+        let (ottofile, mut args) = get_ottofile_args().unwrap();
+        /*
         //FIXME: this is a terrible hack, should be removed; not sure it works either
         if args[0] != rem[0] {
             rem.insert(0, args[0].clone());
         }
+        */
         Self {
-            args: rem,
+            args,
             ottofile,
             phantom: PhantomData,
         }
@@ -136,6 +282,7 @@ impl<'a> Parser<'a> {
                     .help("override default ottopath"),
             )
     }
+    /*
     fn divine_ottofile() -> (PathBuf, Vec<String>) {
         let otto_cmd = Parser::otto_command(true);
         let (ottopath, rem) = match GetKnownMatches::get_known_matches(&otto_cmd) {
@@ -163,6 +310,7 @@ impl<'a> Parser<'a> {
 
         (PathBuf::from(ottofile), rem)
     }
+    */
     pub fn indices(&self, task_names: &[&str]) -> Result<Vec<usize>, Error> {
         let mut indices: Vec<usize> = vec![0];
         for (i, arg) in self.args.iter().enumerate() {
@@ -195,7 +343,7 @@ impl<'a> Parser<'a> {
             println!("first partition={:?}", partition);
             let mut otto = Parser::otto_command(false);
             let param_names = &spec.otto.param_names();
-            if  param_names.len() > 0 {
+            if param_names.len() > 0 {
                 println!("param_names={:?}", param_names);
                 for param in spec.otto.params.values() {
                     otto = otto.arg(Parser::param_to_arg(param));
