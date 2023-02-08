@@ -205,6 +205,7 @@ impl<'a> Parser<'a> {
                 None => "".to_owned(),
             })).collect();
         let mut otto = Parser::otto_command(true)
+            .disable_help_subcommand(true)
             .arg_required_else_help(true)
             .after_help("after_help");
         for (name, help) in tasks.iter() {
