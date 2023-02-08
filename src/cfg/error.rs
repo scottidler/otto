@@ -1,13 +1,28 @@
-#![allow(unused_imports, unused_variables, dead_code)]
-use std::error::Error;
+#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+
+use std::io;
 use std::fmt;
 
-#[derive(Debug)]
+use std::fmt::{Debug, Display, Formatter};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("config load error: {0}")]
+    ConfigLoadError(#[from] std::io::Error),
+    #[error("serde yaml error: {0}")]
+    SerdeYamlError(#[from] serde_yaml::Error),
+    /*
+    #[error("flag lookup error; flag={0} not found")]
     FlagLookupError(String),
+    #[error("name lookup error; name={0} not found")]
     NameLookupError(String),
+    */
 }
 
+
+
+/*
 impl Error for ConfigError {
     fn description(&self) -> &str {
         match *self {
@@ -29,3 +44,4 @@ impl fmt::Display for ConfigError {
         }
     }
 }
+*/

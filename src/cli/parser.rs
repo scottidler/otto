@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use std::collections::HashMap;
 use std::env;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use std::fs;
 use std::fs::metadata;
 use std::marker::PhantomData;
@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::unimplemented;
 
+use expanduser::expanduser;
+
+use super::error::OttoParseError;
 use crate::cfg::loader::Loader;
 use crate::cfg::spec::{Nargs, Otto, Param, ParamType, Params, Spec, Task, Tasks, Value};
 
@@ -37,20 +40,6 @@ where
     T: Debug,
 {
     println!("type={} value={:#?}", std::any::type_name::<T>(), t);
-}
-
-#[derive(Error, Debug)]
-pub enum OttofileError {
-    #[error("env var error: {0}")]
-    HomeUndefined(#[from] env::VarError),
-    #[error("canonicalize error")]
-    CanoncalizeError(#[from] std::io::Error),
-    #[error("divinie error; unable to find ottofile from path=[{0}]")]
-    DivineError(PathBuf),
-    #[error("relative path error")]
-    RelativePathError,
-    #[error("unknown error")]
-    Unknown,
 }
 
 // This routine is adapted from the *old* Path's `path_relative_from`
@@ -103,21 +92,15 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
     }
 }
 
-fn find_ottofile_old(path: &Path) -> Option<PathBuf> {
-    for ottofile in OTTOFILES {
-        let ottofile_path = path.join(ottofile);
-        if ottofile_path.exists() {
-            return Some(ottofile_path);
-        }
-    }
-    None
-}
-
 fn find_ottofile(path: &Path) -> Option<PathBuf> {
+    let cwd = env::current_dir().unwrap(); //FIXME: should I handle the possible error?
     for ottofile in OTTOFILES {
         let ottofile_path = path.join(ottofile);
         if ottofile_path.exists() {
-            return Some(ottofile_path);
+            match path_relative_from(path, &cwd) {
+                Some(p) => return Some(p),
+                None => return None,
+            }
         }
     }
     let parent = match path.parent() {
@@ -130,23 +113,19 @@ fn find_ottofile(path: &Path) -> Option<PathBuf> {
     find_ottofile(parent)
 }
 
-fn divine_ottofile(value: String) -> Result<PathBuf, OttofileError> {
-    let cwd = env::current_dir()?;
-    let home = env::var("HOME")?;
-    let mut path = PathBuf::from(value.replace("~", home.as_str()));
-    path = fs::canonicalize(path)?;
+fn divine_ottofile(value: String) -> Option<PathBuf> {
+    let mut path = expanduser(&value).unwrap(); //FIXME: should I handle the possible error?
+    path = fs::canonicalize(path).unwrap(); //FIXME: should I handle the possible error?
     if path.is_dir() {
-        if let Some(ottofile) = find_ottofile(&path) {
-            path = ottofile;
-        } else {
-            return Err(OttofileError::DivineError(path));
+        match find_ottofile(&path) {
+            Some(path) => return Some(path),
+            None => return None,
         }
     }
-    path = path_relative_from(&path, &cwd).ok_or(OttofileError::RelativePathError)?;
-    Ok(path)
+    Some(path)
 }
 
-fn get_ottofile_args() -> Result<(PathBuf, Vec<String>), OttofileError> {
+    fn get_ottofile_args() -> (Option<PathBuf>, Vec<String>) {
     let mut args: Vec<String> = env::args().collect();
     let index = args.iter().position(|x| x == "--ottofile");
     let value = match index {
@@ -158,11 +137,13 @@ fn get_ottofile_args() -> Result<(PathBuf, Vec<String>), OttofileError> {
         }
         None => env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
     };
-    let ottofile = divine_ottofile(value)?;
-    Ok((ottofile, args))
+    let ottofile = divine_ottofile(value);
+    (ottofile, args)
 }
 #[derive(Debug, PartialEq)]
 pub struct Parser<'a> {
+    ottofile: Option<PathBuf>,
+    args: Vec<String>,
     phantom: PhantomData<&'a str>,
 }
 
@@ -174,7 +155,10 @@ impl<'a> Default for Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub fn new() -> Self {
+        let (ottofile, args) = get_ottofile_args();
         Self {
+            ottofile,
+            args,
             phantom: PhantomData,
         }
     }
@@ -186,7 +170,6 @@ impl<'a> Parser<'a> {
             .arg(
                 Arg::new("ottopath")
                     .takes_value(true)
-                    .short('o')
                     .long("ottopath")
                     .value_name("PATH")
                     .help("override default ottopath"),
@@ -211,10 +194,91 @@ impl<'a> Parser<'a> {
         }
         Ok(partitions)
     }
-    pub fn parse(&self) -> Result<Vec<ArgMatches>, Error> {
+
+    pub fn build_clap_for_otto_and_tasks(&self, spec: &Spec, args: &Vec<String>) -> ArgMatches {
+        //tasks to vector of name, help tuples; convert help: Option<String> to String with default ""
+        // this has to be done BEFORE the clap app is built
+        let mut tasks: Vec<(String, String)> = spec.otto.tasks
+            .iter()
+            .map(|(name, task)| (name.clone(), match &task.help {
+                Some(help) => help.to_owned(),
+                None => "".to_owned(),
+            })).collect();
+        let mut otto = Parser::otto_command(true)
+            .arg_required_else_help(true)
+            .after_help("after_help");
+        for (name, help) in tasks.iter() {
+            let s_slice: &str = &*name;
+            otto = otto.subcommand(
+            Command::new(name.clone())
+                .about(help.as_str()) //this help.as_str() will cause lifetime issues
+                .about(s_slice)
+                .arg(Arg::new("args").multiple_values(true))
+            );
+        }
+        otto.get_matches_from(args)
+    }
+    pub fn parse(&self) -> Result<Vec<ArgMatches>, OttoParseError> {
         let mut matches_vec = vec![];
-        let (ottofile, mut args) = get_ottofile_args().unwrap();
-        if ottofile.exists() {
+        match &self.ottofile {
+            Some(ottofile) => {
+                let loader = Loader::new(&ottofile);
+                let spec = loader.load()?;
+                let task_names = &spec.otto.task_names();
+                let partitions = self.partitions(&self.args, task_names)?;
+                let mut otto = Parser::otto_command(true);
+
+                if task_names.len() > 0 {
+                    //we have tasks in the ottofile
+                    if partitions.len() == 1 {
+                        /*
+                        // we have a single partition, the main one
+                        // we need to parse the args for the otto main command
+                        let mut otto = Parser::otto_command(false)
+                            .arg_required_else_help(true)
+                            .after_help("after_help");
+                        // add the task names as subcommands
+                        fn default_help(name: &str) -> String {
+                            format!("{} help", name)
+                        }
+                        for (name, task) in spec.otto.tasks {
+                            let help_string = match task.help {
+                                Some(ref help_string) => help_string.to_owned(),
+                                None => "".to_owned(),
+                            };
+                            otto = otto.subcommand(
+                                Command::new(name.clone())
+                                    .about(move |_| help_string.as_str()),
+                            );
+                        }
+                        let matches  = otto.get_matches_from(partitions[0].clone());
+                        println!("just added tasks: {:#?}", matches);
+                        */
+                        let matches = self.build_clap_for_otto_and_tasks(&spec, &partitions[0]);
+                        matches_vec.push(matches);
+                    }
+                    else {
+                        // we have multiple partitions
+                        // we need to add the task name to the command
+                        // and then parse the args
+                    }
+                }
+            },
+            None => {
+                // if we DON't have an ottofile
+                // force the help message
+                let mut otto = Parser::otto_command(false);
+                // list ottofiles that can't be found
+                let after_help = format!("ottofile not found in path or OTTOFILE env var\nOTTOFILES:\n- {0}", OTTOFILES.join("\n- "));
+                let otto = Parser::otto_command(false)
+                    .arg_required_else_help(true)
+                    .after_help(after_help.as_str());
+                let matches = otto.get_matches_from(vec!["--help"]);
+            }
+        }
+        Ok(matches_vec)
+        /*
+        if ottofile.is_some() {
             // if we have an ottofile
             println!("ottofile={:?}", ottofile);
             let loader = Loader::new(&ottofile);
@@ -277,7 +341,7 @@ impl<'a> Parser<'a> {
             let matches = otto.get_matches_from(vec!["--help"]);
             matches_vec.push(matches);
         }
-        Ok(matches_vec)
+        */
     }
 
     /*
