@@ -209,11 +209,9 @@ impl<'a> Parser<'a> {
             .arg_required_else_help(true)
             .after_help("after_help");
         for (name, help) in tasks.iter() {
-            let s_slice: &str = &*name;
             otto = otto.subcommand(
             Command::new(name.clone())
                 .about(help.as_str()) //this help.as_str() will cause lifetime issues
-                .about(s_slice)
                 .arg(Arg::new("args").multiple_values(true))
             );
         }
@@ -232,29 +230,6 @@ impl<'a> Parser<'a> {
                 if task_names.len() > 0 {
                     //we have tasks in the ottofile
                     if partitions.len() == 1 {
-                        /*
-                        // we have a single partition, the main one
-                        // we need to parse the args for the otto main command
-                        let mut otto = Parser::otto_command(false)
-                            .arg_required_else_help(true)
-                            .after_help("after_help");
-                        // add the task names as subcommands
-                        fn default_help(name: &str) -> String {
-                            format!("{} help", name)
-                        }
-                        for (name, task) in spec.otto.tasks {
-                            let help_string = match task.help {
-                                Some(ref help_string) => help_string.to_owned(),
-                                None => "".to_owned(),
-                            };
-                            otto = otto.subcommand(
-                                Command::new(name.clone())
-                                    .about(move |_| help_string.as_str()),
-                            );
-                        }
-                        let matches  = otto.get_matches_from(partitions[0].clone());
-                        println!("just added tasks: {:#?}", matches);
-                        */
                         let matches = self.build_clap_for_otto_and_tasks(&spec, &partitions[0]);
                         matches_vec.push(matches);
                     }
@@ -278,71 +253,6 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(matches_vec)
-        /*
-        if ottofile.is_some() {
-            // if we have an ottofile
-            println!("ottofile={:?}", ottofile);
-            let loader = Loader::new(&ottofile);
-            let spec = loader.load().unwrap();
-            let task_names = &spec.otto.task_names();
-            let partitions = self.partitions(&args, task_names)?;
-            println!("partitions={:?}", partitions);
-            let partition = &partitions[0];
-            println!("first partition={:?}", partition);
-            let mut otto = Parser::otto_command(false);
-            let param_names = &spec.otto.param_names();
-            if param_names.len() > 0 {
-                println!("param_names={:?}", param_names);
-                for param in spec.otto.params.values() {
-                    otto = otto.arg(Parser::param_to_arg(param));
-                }
-            }
-            let name = partition[0].clone();
-            let args: Vec<String> = partition[0..].to_vec();
-            let matches = otto.clone().get_matches_from(&args[1..]);
-            matches_vec.push(matches);
-            println!("name={:?} args={:?}", name, args);
-            if task_names.len() > 0 {
-                // if we have tasks in ottofile
-                //let partitions = self.partitions(task_names)?;
-                if partitions.len() == 1 {
-                    // if we have't matched any task partitions
-                    //let mut otto = Parser::otto_command(false).subcommand(Command::new("help").hide(true));
-                    otto = otto.subcommand(Command::new("help").hide(true));
-                    for task_name in task_names.iter() {
-                        otto = otto.subcommand(Command::new(*task_name));
-                    }
-                    //let args: Vec<String> = partitions[0][1..].to_vec();
-                    let args: Vec<String> = partitions[0].to_vec();
-                    let matches = otto.get_matches_from(&args[1..]);
-                    matches_vec.push(matches);
-                } else {
-                    // we have matched some task partitions
-                    for partition in partitions.iter().skip(1) {
-                        let name = partition[0].clone();
-                        let args: Vec<String> = partition[0..].to_vec();
-                        let task = &spec.otto.tasks[&name];
-                        let command = Parser::task_to_command(task);
-                        let matches = command.get_matches_from(&args);
-                        matches_vec.push(matches);
-                    }
-                }
-            }
-            /*else {
-                // FIXME: should allow the parser to not have tasks
-                let matches = Parser::otto_command(false).get_matches();
-                matches_vec.push(matches);
-            }*/
-        } else {
-            // if we DON't have an ottofile
-            let after_help = format!("ottofile={:?} does not exist!", ottofile);
-            let otto = Parser::otto_command(false)
-                .arg_required_else_help(true)
-                .after_help(after_help.as_str());
-            let matches = otto.get_matches_from(vec!["--help"]);
-            matches_vec.push(matches);
-        }
-        */
     }
 
     /*
