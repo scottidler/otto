@@ -17,6 +17,7 @@ otto:
           help: toggle flag to true
         pos:
           help: pos help
+      help: punch task help
     hello:
       params:
         -g|--greeting:
@@ -28,7 +29,7 @@ otto:
       action: |
         #!/bin/bash
         echo "${greeting:-hello}"
-      help: hello task
+      help: hello task help
     world:
       before:
       - hello
@@ -39,4 +40,4 @@ otto:
       action: |
         #!/bin/bash
         echo "$name"
-      help: world task
+      help: world task help
