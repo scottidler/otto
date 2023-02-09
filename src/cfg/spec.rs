@@ -181,7 +181,7 @@ pub struct Defaults {
     pub tasks: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct Otto {
     #[serde(skip_deserializing, default = "default_otto")]
     pub name: String,
@@ -332,7 +332,7 @@ where
     deserializer.deserialize_map(ParamMap)
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct Task {
     #[serde(skip_deserializing)]
     pub name: String,

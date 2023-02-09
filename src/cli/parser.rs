@@ -53,11 +53,11 @@ where
     };
     //if pre is not None, then prepend with pre
     if let Some(pre) = pre {
-        s = format!("{}{}", pre, s);
+        s = format!("{pre}{s}");
     }
     //if post is not None, then append with post
     if let Some(post) = post {
-        s = format!("{}{}", s, post);
+        s = format!("{s}{post}");
     }
     s
 }
@@ -282,7 +282,7 @@ impl<'a> Parser<'a> {
                     //OTTOFILES.join("\n- ")
                     "--ottofile arg not specified, nor OTTOFILE env var, nor one of 'OTTOFILES' discovered in path={0}\nOTTOFILES: {1}",
                     self.cwd.display(),
-                    decor(&OTTOFILES, Some(&dash), Some(&dash), None)
+                    decor(OTTOFILES, Some(dash), Some(dash), None)
                 );
                 let otto = Parser::otto_command(false)
                     .arg_required_else_help(true)
