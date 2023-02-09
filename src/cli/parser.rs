@@ -141,7 +141,7 @@ fn get_ottofile_args() -> (Option<PathBuf>, Vec<String>) {
     (ottofile, args)
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Parser<'a> {
     ottofile: Option<PathBuf>,
     args: Vec<String>,
@@ -155,7 +155,7 @@ impl<'a> Default for Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new() -> Self {
+    #[must_use] pub fn new() -> Self {
         let (ottofile, args) = get_ottofile_args();
         Self {
             ottofile,
@@ -196,7 +196,7 @@ impl<'a> Parser<'a> {
         Ok(partitions)
     }
 
-    pub fn build_clap_for_otto_and_tasks(&self, spec: &Spec, args: &Vec<String>) -> ArgMatches {
+    #[must_use] pub fn build_clap_for_otto_and_tasks(&self, spec: &Spec, args: &Vec<String>) -> ArgMatches {
         //tasks to vector of name, help tuples; convert help: Option<String> to String with default ""
         // this has to be done BEFORE the clap app is built
         let mut tasks: Vec<(String, String)> = spec
@@ -207,8 +207,8 @@ impl<'a> Parser<'a> {
                 (
                     name.clone(),
                     match &task.help {
-                        Some(help) => help.to_owned(),
-                        None => "".to_owned(),
+                        Some(help) => help.clone(),
+                        None => String::new(),
                     },
                 )
             })
@@ -217,7 +217,7 @@ impl<'a> Parser<'a> {
             .disable_help_subcommand(true)
             .arg_required_else_help(true)
             .after_help("after_help");
-        for (name, help) in tasks.iter() {
+        for (name, help) in &tasks {
             otto = otto.subcommand(
                 Command::new(name.clone())
                     .about(help.as_str()) //this help.as_str() will cause lifetime issues

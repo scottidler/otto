@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use super::error::ConfigError;
 use super::spec::{Param, Spec, Task};
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Loader {
     ottofile: PathBuf,
 }
 
 impl Loader {
-    pub fn new(ottofile: &Path) -> Self {
+    #[must_use] pub fn new(ottofile: &Path) -> Self {
         Self {
             ottofile: ottofile.to_path_buf(),
         }

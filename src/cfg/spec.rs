@@ -13,7 +13,7 @@ use std::vec::Vec;
 pub(crate) type Tasks = HashMap<String, Task>;
 pub type Params = HashMap<String, Param>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Nargs {
     One,
     Zero,
@@ -26,19 +26,19 @@ pub enum Nargs {
 impl fmt::Display for Nargs {
     fn fmt(&self, fmtr: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Nargs::One => write!(fmtr, "Nargs::One[1]"),
-            Nargs::Zero => write!(fmtr, "Nargs::Zero[0]"),
-            Nargs::OneOrZero => write!(fmtr, "Nargs::OneOrZero[?]"),
-            Nargs::OneOrMore => write!(fmtr, "Nargs::OneOrMore[+]"),
-            Nargs::ZeroOrMore => write!(fmtr, "Nargs::ZeroOrMore[*]"),
-            Nargs::Range(min, max) => write!(fmtr, "Nargs::Range[{}, {}]", min + 1, max),
+            Self::One => write!(fmtr, "Nargs::One[1]"),
+            Self::Zero => write!(fmtr, "Nargs::Zero[0]"),
+            Self::OneOrZero => write!(fmtr, "Nargs::OneOrZero[?]"),
+            Self::OneOrMore => write!(fmtr, "Nargs::OneOrMore[+]"),
+            Self::ZeroOrMore => write!(fmtr, "Nargs::ZeroOrMore[*]"),
+            Self::Range(min, max) => write!(fmtr, "Nargs::Range[{}, {}]", min + 1, max),
         }
     }
 }
 
 impl Default for Nargs {
     fn default() -> Self {
-        Nargs::One
+        Self::One
     }
 }
 
@@ -49,21 +49,21 @@ impl<'de> Deserialize<'de> for Nargs {
     {
         let s = String::deserialize(deserializer)?;
         let result = match &s[..] {
-            "1" => Nargs::One,
-            "0" => Nargs::Zero,
-            "?" => Nargs::OneOrZero,
-            "+" => Nargs::OneOrMore,
-            "*" => Nargs::ZeroOrMore,
+            "1" => Self::One,
+            "0" => Self::Zero,
+            "?" => Self::OneOrZero,
+            "+" => Self::OneOrMore,
+            "*" => Self::ZeroOrMore,
             _ => {
                 println!("s={s}");
                 if s.contains(':') {
                     let parts: Vec<&str> = s.split(':').collect();
                     let min = parts[0].parse::<usize>().map_err(Error::custom)?;
                     let max = parts[1].parse::<usize>().map_err(Error::custom)?;
-                    Nargs::Range(min - 1, max)
+                    Self::Range(min - 1, max)
                 } else {
                     let num = s.parse::<usize>().map_err(Error::custom)?;
-                    Nargs::Range(0, num)
+                    Self::Range(0, num)
                 }
             }
         };
@@ -71,14 +71,14 @@ impl<'de> Deserialize<'de> for Nargs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Script(String),
     File(PathBuf),
     //URL(Url),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Item(String),
     List(Vec<String>),
@@ -89,17 +89,17 @@ pub enum Value {
 impl fmt::Display for Value {
     fn fmt(&self, fmtr: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Item(s) => write!(fmtr, "Values::Item({s})"),
-            Value::List(vs) => write!(fmtr, "Values::List([{}])", vs.join(", ")),
-            Value::Dict(ds) => write!(fmtr, "Values::Dict[NOT IMPLEMENTED]"),
-            Value::Empty => write!(fmtr, "Value::Empty(\"\")"),
+            Self::Item(s) => write!(fmtr, "Values::Item({s})"),
+            Self::List(vs) => write!(fmtr, "Values::List([{}])", vs.join(", ")),
+            Self::Dict(ds) => write!(fmtr, "Values::Dict[NOT IMPLEMENTED]"),
+            Self::Empty => write!(fmtr, "Value::Empty(\"\")"),
         }
     }
 }
 
 impl Default for Value {
     fn default() -> Self {
-        Value::Empty
+        Self::Empty
     }
 }
 
@@ -166,7 +166,7 @@ pub struct Spec {
     pub otto: Otto,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct Defaults {
     #[serde(default = "default_api")]
     pub api: i32,
@@ -213,7 +213,7 @@ impl Otto {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParamType {
     FLG,
     OPT,
@@ -222,12 +222,12 @@ pub enum ParamType {
 
 impl Default for ParamType {
     fn default() -> Self {
-        ParamType::OPT
+        Self::OPT
     }
 }
 
 // FIXME: Flag, Named and Positional Args
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct Param {
     #[serde(skip_deserializing)]
     pub name: String,
@@ -264,7 +264,7 @@ pub struct Param {
 }
 
 fn divine(title: &str) -> (String, Option<char>, Option<String>) {
-    let flags: Vec<String> = title.split('|').map(|f| f.to_string()).collect();
+    let flags: Vec<String> = title.split('|').map(std::string::ToString::to_string).collect();
     let short = flags
         .iter()
         .cloned()
@@ -285,7 +285,7 @@ fn divine(title: &str) -> (String, Option<char>, Option<String>) {
     .filter(|s| !s.is_empty());
 
     let name = if let Some(ref long) = long {
-        long.to_owned()
+        long.clone()
     } else {
         match short {
             Some(ref short) => short.to_string(),
@@ -324,7 +324,7 @@ where
                 } else {
                     param.param_type = ParamType::POS;
                 }
-                params.insert(title.to_owned(), param);
+                params.insert(title.clone(), param);
             }
             Ok(params)
         }
@@ -356,7 +356,7 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn new(
+    #[must_use] pub fn new(
         name: String,
         help: Option<String>,
         after: Vec<String>,
@@ -396,8 +396,8 @@ where
         {
             let mut tasks = Tasks::new();
             while let Some((name, mut task)) = map.next_entry::<String, Task>()? {
-                task.name = name.to_owned();
-                tasks.insert(name.to_owned(), task);
+                task.name = name.clone();
+                tasks.insert(name.clone(), task);
             }
             Ok(tasks)
         }
