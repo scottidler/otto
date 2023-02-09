@@ -7,10 +7,10 @@ fn main() {
     //println!("parser={:#?}", parser);
     match parser.parse() {
         Ok(matches) => {
-            println!("matches={:#?}", matches);
+            println!("matches={matches:#?}");
         }
         Err(error) => {
-            println!("error={:#?}", error);
+            println!("error={error:#?}");
         }
     }
 }

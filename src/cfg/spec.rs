@@ -55,7 +55,7 @@ impl<'de> Deserialize<'de> for Nargs {
             "+" => Nargs::OneOrMore,
             "*" => Nargs::ZeroOrMore,
             _ => {
-                println!("s={}", s);
+                println!("s={s}");
                 if s.contains(':') {
                     let parts: Vec<&str> = s.split(':').collect();
                     let min = parts[0].parse::<usize>().map_err(Error::custom)?;
@@ -89,7 +89,7 @@ pub enum Value {
 impl fmt::Display for Value {
     fn fmt(&self, fmtr: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Item(s) => write!(fmtr, "Values::Item({})", s),
+            Value::Item(s) => write!(fmtr, "Values::Item({s})"),
             Value::List(vs) => write!(fmtr, "Values::List([{}])", vs.join(", ")),
             Value::Dict(ds) => write!(fmtr, "Values::Dict[NOT IMPLEMENTED]"),
             Value::Empty => write!(fmtr, "Value::Empty(\"\")"),

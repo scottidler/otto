@@ -26,7 +26,7 @@ use crate::cfg::spec::{Nargs, Otto, Param, ParamType, Params, Spec, Task, Tasks,
 use super::macros;
 use std::error;
 
-const OTTOFILES: &'static [&'static str] = &[
+const OTTOFILES: &[&str] = &[
     "otto.yml",
     ".otto.yml",
     "otto.yaml",
@@ -114,7 +114,7 @@ fn find_ottofile(path: &Path) -> Option<PathBuf> {
 }
 
 fn divine_ottofile(value: String) -> Option<PathBuf> {
-    let mut path = expanduser(&value).unwrap(); //FIXME: should I handle the possible error?
+    let mut path = expanduser(value).unwrap(); //FIXME: should I handle the possible error?
     path = fs::canonicalize(path).unwrap(); //FIXME: should I handle the possible error?
     if path.is_dir() {
         match find_ottofile(&path) {
@@ -230,13 +230,13 @@ impl<'a> Parser<'a> {
         let mut matches_vec = vec![];
         match &self.ottofile {
             Some(ottofile) => {
-                let loader = Loader::new(&ottofile);
+                let loader = Loader::new(ottofile);
                 let spec = loader.load()?;
                 let task_names = &spec.otto.task_names();
                 let partitions = self.partitions(&self.args, task_names)?;
                 let mut otto = Parser::otto_command(true);
 
-                if task_names.len() > 0 {
+                if !task_names.is_empty() {
                     //we have tasks in the ottofile
                     if partitions.len() == 1 {
                         let matches = self.build_clap_for_otto_and_tasks(&spec, &partitions[0]);
