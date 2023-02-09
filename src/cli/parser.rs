@@ -125,7 +125,7 @@ fn divine_ottofile(value: String) -> Option<PathBuf> {
     Some(path)
 }
 
-    fn get_ottofile_args() -> (Option<PathBuf>, Vec<String>) {
+fn get_ottofile_args() -> (Option<PathBuf>, Vec<String>) {
     let mut args: Vec<String> = env::args().collect();
     let index = args.iter().position(|x| x == "--ottofile");
     let value = match index {
@@ -140,6 +140,7 @@ fn divine_ottofile(value: String) -> Option<PathBuf> {
     let ottofile = divine_ottofile(value);
     (ottofile, args)
 }
+
 #[derive(Debug, PartialEq)]
 pub struct Parser<'a> {
     ottofile: Option<PathBuf>,
@@ -198,21 +199,29 @@ impl<'a> Parser<'a> {
     pub fn build_clap_for_otto_and_tasks(&self, spec: &Spec, args: &Vec<String>) -> ArgMatches {
         //tasks to vector of name, help tuples; convert help: Option<String> to String with default ""
         // this has to be done BEFORE the clap app is built
-        let mut tasks: Vec<(String, String)> = spec.otto.tasks
+        let mut tasks: Vec<(String, String)> = spec
+            .otto
+            .tasks
             .iter()
-            .map(|(name, task)| (name.clone(), match &task.help {
-                Some(help) => help.to_owned(),
-                None => "".to_owned(),
-            })).collect();
+            .map(|(name, task)| {
+                (
+                    name.clone(),
+                    match &task.help {
+                        Some(help) => help.to_owned(),
+                        None => "".to_owned(),
+                    },
+                )
+            })
+            .collect();
         let mut otto = Parser::otto_command(true)
             .disable_help_subcommand(true)
             .arg_required_else_help(true)
             .after_help("after_help");
         for (name, help) in tasks.iter() {
             otto = otto.subcommand(
-            Command::new(name.clone())
-                .about(help.as_str()) //this help.as_str() will cause lifetime issues
-                .arg(Arg::new("args").multiple_values(true))
+                Command::new(name.clone())
+                    .about(help.as_str()) //this help.as_str() will cause lifetime issues
+                    .arg(Arg::new("args").multiple_values(true)),
             );
         }
         otto.get_matches_from(args)
@@ -232,20 +241,22 @@ impl<'a> Parser<'a> {
                     if partitions.len() == 1 {
                         let matches = self.build_clap_for_otto_and_tasks(&spec, &partitions[0]);
                         matches_vec.push(matches);
-                    }
-                    else {
+                    } else {
                         // we have multiple partitions
                         // we need to add the task name to the command
                         // and then parse the args
                     }
                 }
-            },
+            }
             None => {
                 // if we DON't have an ottofile
                 // force the help message
                 let mut otto = Parser::otto_command(false);
                 // list ottofiles that can't be found
-                let after_help = format!("ottofile not found in path or OTTOFILE env var\nOTTOFILES:\n- {0}", OTTOFILES.join("\n- "));
+                let after_help = format!(
+                    "ottofile not found in path or OTTOFILE env var\nOTTOFILES:\n- {0}",
+                    OTTOFILES.join("\n- ")
+                );
                 let otto = Parser::otto_command(false)
                     .arg_required_else_help(true)
                     .after_help(after_help.as_str());

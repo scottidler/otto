@@ -1,7 +1,7 @@
 #![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
-use std::io;
 use std::fmt;
+use std::io;
 
 use std::fmt::{Debug, Display, Formatter};
 use thiserror::Error;
@@ -19,8 +19,6 @@ pub enum ConfigError {
     NameLookupError(String),
     */
 }
-
-
 
 /*
 impl Error for ConfigError {

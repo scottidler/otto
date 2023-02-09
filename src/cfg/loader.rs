@@ -22,7 +22,7 @@ impl Loader {
     //pub fn load(&self, filename: &str) -> Result<Spec, Error> {
     pub fn load(&self) -> Result<Spec, ConfigError> {
         //let content = fs::read_to_string(&self.ottofile).context(format!("Can't load ottofile={:?}", self.ottofile))?;
-        let content = fs::read_to_string(&self.ottofile)?; 
+        let content = fs::read_to_string(&self.ottofile)?;
         //let spec: Spec = serde_yaml::from_str(&content).context(format!("Can't load content={:?}", content))?;
         let spec: Spec = serde_yaml::from_str(&content)?;
         //return Err(ConfigError::ConfigLoadError(io::Error::new(io::ErrorKind::Other, "test")));
