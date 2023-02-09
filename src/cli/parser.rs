@@ -42,6 +42,26 @@ where
     println!("type={} value={:#?}", std::any::type_name::<T>(), t);
 }
 
+fn decor(items: &[&str], pre: Option<&str>, mid: Option<&str>, post: Option<&str>) -> String
+where
+{
+    //if mid is not None, then join with mid
+    //if mid is None, then join with ""
+    let mut s = match mid {
+        Some(mid) => items.join(mid),
+        None => items.join(""),
+    };
+    //if pre is not None, then prepend with pre
+    if let Some(pre) = pre {
+        s = format!("{}{}", pre, s);
+    }
+    //if post is not None, then append with post
+    if let Some(post) = post {
+        s = format!("{}{}", s, post);
+    }
+    s
+}
+
 // This routine is adapted from the *old* Path's `path_relative_from`
 // function, which works differently from the new `relative_from` function.
 // In particular, this handles the case on unix where both paths are
@@ -144,6 +164,7 @@ fn get_ottofile_args() -> (Option<PathBuf>, Vec<String>) {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Parser<'a> {
     ottofile: Option<PathBuf>,
+    cwd: PathBuf,
     args: Vec<String>,
     phantom: PhantomData<&'a str>,
 }
@@ -157,9 +178,11 @@ impl<'a> Default for Parser<'a> {
 impl<'a> Parser<'a> {
     #[must_use] pub fn new() -> Self {
         let (ottofile, args) = get_ottofile_args();
+        let cwd = env::current_dir().unwrap(); //FIXME: should I handle the possible error?
         Self {
             ottofile,
             args,
+            cwd,
             phantom: PhantomData,
         }
     }
@@ -253,9 +276,13 @@ impl<'a> Parser<'a> {
                 // force the help message
                 let mut otto = Parser::otto_command(false);
                 // list ottofiles that can't be found
+                let dash = "\n- ";
                 let after_help = format!(
-                    "ottofile not found in path or OTTOFILE env var\nOTTOFILES:\n- {0}",
-                    OTTOFILES.join("\n- ")
+                    //"ottofile not found in path or OTTOFILE env var\nOTTOFILES:\n- {0}",
+                    //OTTOFILES.join("\n- ")
+                    "--ottofile arg not specified, nor OTTOFILE env var, nor one of 'OTTOFILES' discovered in path={0}\nOTTOFILES: {1}",
+                    self.cwd.display(),
+                    decor(&OTTOFILES, Some(&dash), Some(&dash), None)
                 );
                 let otto = Parser::otto_command(false)
                     .arg_required_else_help(true)
@@ -265,6 +292,7 @@ impl<'a> Parser<'a> {
         }
         Ok(matches_vec)
     }
+
 
     /*
     fn otto_to_command(otto: &Otto) -> Command {
