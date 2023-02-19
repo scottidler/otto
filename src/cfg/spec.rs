@@ -187,6 +187,9 @@ pub struct Otto {
     pub name: String,
 
     #[serde(default)]
+    pub help: Option<String>,
+
+    #[serde(default)]
     pub author: Option<String>,
 
     #[serde(default)]
@@ -356,7 +359,8 @@ pub struct Task {
 }
 
 impl Task {
-    #[must_use] pub fn new(
+    #[must_use]
+    pub fn new(
         name: String,
         help: Option<String>,
         after: Vec<String>,

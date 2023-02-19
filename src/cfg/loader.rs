@@ -13,7 +13,8 @@ pub struct Loader {
 }
 
 impl Loader {
-    #[must_use] pub fn new(ottofile: &Path) -> Self {
+    #[must_use]
+    pub fn new(ottofile: &Path) -> Self {
         Self {
             ottofile: ottofile.to_path_buf(),
         }

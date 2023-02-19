@@ -176,7 +176,8 @@ impl<'a> Default for Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    #[must_use] pub fn new() -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         let (ottofile, args) = get_ottofile_args();
         let cwd = env::current_dir().unwrap(); //FIXME: should I handle the possible error?
         Self {
@@ -219,9 +220,12 @@ impl<'a> Parser<'a> {
         Ok(partitions)
     }
 
-    #[must_use] pub fn build_clap_for_otto_and_tasks(&self, spec: &Spec, args: &Vec<String>) -> ArgMatches {
+    #[must_use]
+    pub fn build_clap_for_otto_and_tasks(&self, spec: &Spec, args: &Vec<String>) -> ArgMatches {
         //tasks to vector of name, help tuples; convert help: Option<String> to String with default ""
         // this has to be done BEFORE the clap app is built
+        // get the task name from args, run basename on it
+        let task_name = args[0].clone();
         let mut tasks: Vec<(String, String)> = spec
             .otto
             .tasks
@@ -249,25 +253,62 @@ impl<'a> Parser<'a> {
         }
         otto.get_matches_from(args)
     }
+    pub fn build_clap_for_partition_with_help(&self, spec: &Spec, args: &Vec<String>) -> ArgMatches {
+        let task_name = args[0].clone();
+        let task = spec.otto.tasks.get(&task_name).unwrap();
+        let command = Self::task_to_command(task)
+            .disable_help_subcommand(true)
+            .arg_required_else_help(true)
+            .after_help("after_help");
+        command.get_matches_from(["--help"])
+    }
     pub fn parse(&self) -> Result<Vec<ArgMatches>, OttoParseError> {
         let mut matches_vec = vec![];
         match &self.ottofile {
             Some(ottofile) => {
+                // we have an ottofile so lets load it, get the task names and the partitions
                 let loader = Loader::new(ottofile);
                 let spec = loader.load()?;
                 let task_names = &spec.otto.task_names();
                 let partitions = self.partitions(&self.args, task_names)?;
                 let mut otto = Parser::otto_command(true);
-
                 if !task_names.is_empty() {
                     //we have tasks in the ottofile
                     if partitions.len() == 1 {
+                        // we only have the main otto partition; no tasks
                         let matches = self.build_clap_for_otto_and_tasks(&spec, &partitions[0]);
                         matches_vec.push(matches);
                     } else {
                         // we have multiple partitions
                         // we need to add the task name to the command
                         // and then parse the args
+
+                        fn contains_help(partition: &Vec<String>) -> bool {
+                            partition.contains(&"-h".to_owned()) || partition.contains(&"--help".to_owned())
+                        }
+                        // if any partion has '-h' or '--help' build command and force help message
+                        // search for '-h' or '--help' in each partition
+                        if let Some(index) = partitions.iter().position(|p| contains_help(p)) {
+                            // we have a partition with help
+                            // build the clap command for the partition with help
+                            // and then parse the args
+                            let partition = partitions[index].clone();
+                            let matches = self.build_clap_for_partition_with_help(&spec, &partition);
+                            matches_vec.push(matches);
+                        } else {
+                            // we don't have a partition with help
+                            // build the clap command for the otto and tasks
+                            // and then parse the args(partition) for each task
+
+                            /*
+                            let mut otto = Self::otto_command(false);
+                            for param in spec.otto.params.values() {
+                                otto = otto.arg(Self::param_to_arg(&param));
+                            }
+                            let matches = otto.get_matches_from(&partitions[0]);
+                            matches_vec.push(matches);
+                            */
+                        }
                     }
                 }
             }
@@ -292,7 +333,6 @@ impl<'a> Parser<'a> {
         }
         Ok(matches_vec)
     }
-
 
     /*
     fn otto_to_command(otto: &Otto) -> Command {
