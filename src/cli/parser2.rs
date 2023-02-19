@@ -37,15 +37,6 @@ const OTTOFILES: &[&str] = &[
     "Ottofile",
     "OTTOFILE",
 ];
-/*
-
-const OTTO_NAME: &str = "otto";
-const OTTO_ARG: &str = "ottofile";
-const OTTO_VAL: &str = "PATH";
-const OTTO_LONG: &str = "--ottofile";
-const OTTO_HELP: &str = "path to the ottofile";
-
-*/
 
 fn print_type_of<T: ?Sized>(t: &T)
 where
@@ -182,67 +173,6 @@ fn prog() -> Result<String> {
         .to_owned())
 }
 
-/*
-impl Default for Parser2 {
-    fn default() -> Self {
-        let (ottofile, args) = get_ottofile_args();
-        let cwd = env::current_dir().unwrap(); //FIXME: should I handle the possible error?
-        Self {
-            ottofile,
-            cwd,
-            args,
-        }
-    }
-}
-*/
-
-/*
-#[derive(Debug, PartialEq)]
-struct OttoCommandParams {
-    name: String,
-    arg: String,
-    val: String,
-    long: String,
-    help: String,
-}
-
-impl OttoCommandParams {
-    fn new(nerfed: bool, name: String, arg: String, val: String, long: String, help: String) -> Self {
-        Self {
-            name,
-            arg,
-            val,
-            long,
-            help,
-        }
-    }
-}
-
-fn otto_command(params: &OttoCommandParams, nerfed: bool) -> Command {
-    Command::new(params.name.as_str())
-        .bin_name(params.name.as_str())
-        .disable_help_flag(nerfed)
-        .disable_version_flag(nerfed)
-        .arg(
-            Arg::new(params.arg.as_str())
-                .takes_value(true)
-                .value_name(params.val.as_str())
-                .long(params.long.as_str())
-                .help(params.help.as_str())
-        )
-}
-*/
-/*
-fn build_clap_command_from_task(task: &Task, partition: &Vec<String>) -> Command {
-    let mut command = Command::new(task.name.as_str())
-        .bin_name(task.name.as_str())
-        .about(task.help.as_str());
-        for param in &task.params {
-        }
-    command
-}
-*/
-
 fn otto_to_command(otto: &Otto, with_subcommands: bool) -> Command {
     let mut command = Command::new(&otto.name)
         .bin_name(&otto.name);
@@ -343,31 +273,7 @@ impl Parser2 {
         const OTTO_VAL: &str = "PATH";
         const OTTO_LONG: &str = "--ottofile";
         const OTTO_HELP: &str = "path to the ottofile";
-        /*
-        fn otto_command(params: &OttoCommandParams, nerfed: bool) -> Command {
-            Command::new(params.name.as_str())
-                .bin_name(params.name.as_str())
-                .disable_help_flag(nerfed)
-                .disable_version_flag(nerfed)
-                .arg(
-                    Arg::new(params.arg.as_str())
-                        .takes_value(true)
-                        .value_name(params.val.as_str())
-                        .long(params.long.as_str())
-                        .help(params.help.as_str())
-                )
-        }
-        */
-        /*
-        let params = OttoCommandParams::new(
-            true,
-            "otto".to_owned(),
-            "ottofile".to_owned(),
-            "PATH".to_owned(),
-            "--ottofile".to_owned(),
-            "path to the ottofile".to_owned(),
-        );
-        */
+
         if let Some(ottofile) = &self.ottofile {
             //we have an ottofile, so let's load it
             let loader = Loader::new(ottofile);
@@ -434,16 +340,6 @@ impl Parser2 {
         } else {
             // if we don't have an ottofile
             // force the help message
-            /*
-            let params = OttoCommandParams::new(
-                true,
-                "otto".to_owned(),
-                "ottofile".to_owned(),
-                "PATH".to_owned(),
-                "--ottofile".to_owned(),
-                "path to the ottofile".to_owned(),
-            );
-            */
             let dash = "\n- ";
             let after_help = format!(
                 "--ottofile arg not specified, nor OTTOFILE env var, not one of 'OTTOFILES' discovered in path={0}\nOTTOFILES: {1}",
