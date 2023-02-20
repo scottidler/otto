@@ -2,7 +2,7 @@
 
 //use clap::error::{ContextKind, ContextValue, ErrorKind};
 use eyre::{eyre, Result};
-use clap::Error;
+//use clap::Error;
 use clap::{arg, Arg, ArgMatches, Command};
 use thiserror::Error;
 
@@ -21,7 +21,7 @@ use std::ffi::OsStr;
 use expanduser::expanduser;
 use array_tool::vec::Intersect;
 
-use super::error::OttoParseError;
+use super::error::{OttoParseError, OttofileError};
 use crate::cfg::loader::Loader;
 use crate::cfg::spec::{Nargs, Otto, Param, ParamType, Params, Spec, Task, Tasks, Value};
 
@@ -115,64 +115,6 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
     }
 }
 
-fn find_ottofile(path: &Path) -> Option<PathBuf> {
-    let cwd = env::current_dir().unwrap(); //FIXME: should I handle the possible error?
-    for ottofile in OTTOFILES {
-        let ottofile_path = path.join(ottofile);
-        if ottofile_path.exists() {
-            match path_relative_from(path, &cwd) {
-                Some(p) => return Some(p),
-                None => return None,
-            }
-        }
-    }
-    let parent = match path.parent() {
-        Some(p) => p,
-        None => return None,
-    };
-    if parent == Path::new("/") {
-        return None;
-    }
-    find_ottofile(parent)
-}
-
-fn divine_ottofile(value: String) -> Option<PathBuf> {
-    let mut path = expanduser(value).unwrap(); //FIXME: should I handle the possible error?
-    path = fs::canonicalize(path).unwrap(); //FIXME: should I handle the possible error?
-    if path.is_dir() {
-        match find_ottofile(&path) {
-            Some(path) => return Some(path),
-            None => return None,
-        }
-    }
-    Some(path)
-}
-
-fn get_ottofile_args() -> (Option<PathBuf>, Vec<String>) {
-    let mut args: Vec<String> = env::args().collect();
-    let index = args.iter().position(|x| x == "--ottofile");
-    let value = match index {
-        Some(index) => {
-            let value = args[index + 1].clone();
-            args.remove(index);
-            args.remove(index);
-            value
-        }
-        None => env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
-    };
-    let ottofile = divine_ottofile(value);
-    (ottofile, args)
-}
-
-fn prog() -> Result<String> {
-    Ok(std::env::current_exe()?
-        .file_name()
-        .ok_or_else(|| eyre::eyre!("could not get file name"))?
-        .to_str()
-        .ok_or_else(|| eyre::eyre!("could not convert to str"))?
-        .to_owned())
-}
-
 fn otto_to_command(otto: &Otto, with_subcommands: bool) -> Command {
     let mut command = Command::new(&otto.name)
         .bin_name(&otto.name);
@@ -233,10 +175,14 @@ pub struct Parser2 {
 impl Parser2 {
 
     pub fn new() -> Result<Self> {
-        let prog = prog()?;
+        let prog = std::env::current_exe()?
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "otto".to_string());
         let cwd = env::current_dir()?;
         let user = env::var("USER")?;
-        let (ottofile, args) = get_ottofile_args();
+        let (ottofile, args) = Self::get_ottofile_args()?;
         Ok(Self {
             prog,
             cwd,
@@ -246,7 +192,55 @@ impl Parser2 {
         })
     }
 
-    pub fn indices(&self, args: &Vec<String>, task_names: &[&str]) -> Result<Vec<usize>> {
+    fn find_ottofile(path: &Path) -> Result<Option<PathBuf>> {
+        let cwd = env::current_dir()?;
+        for ottofile in OTTOFILES {
+            let ottofile_path = path.join(ottofile);
+            if ottofile_path.exists() {
+                let p = path_relative_from(path, &cwd)
+                    .ok_or_else(|| eyre!("could not find relative path"))?;
+                return Ok(Some(p));
+            }
+        }
+        let parent = match path.parent() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        if parent == Path::new("/") {
+            return Ok(None);
+        }
+        Self::find_ottofile(parent)
+    }
+
+    fn divine_ottofile(value: String) -> Result<PathBuf> {
+        let mut path = expanduser(value)?;
+        path = fs::canonicalize(path)?;
+        if path.is_dir() {
+            match Self::find_ottofile(&path)? {
+                Some(path) => return Ok(path),
+                None => return Err(OttofileError::DivineError(path).into())
+            }
+        }
+        Ok(path)
+    }
+
+    fn get_ottofile_args() -> Result<(Option<PathBuf>, Vec<String>)> {
+        let mut args: Vec<String> = env::args().collect();
+        let index = args.iter().position(|x| x == "--ottofile");
+        let value = match index {
+            Some(index) => {
+                let value = args[index + 1].clone();
+                args.remove(index);
+                args.remove(index);
+                value
+            }
+            None => env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
+        };
+        let ottofile = Self::divine_ottofile(value)?;
+        Ok((Some(ottofile), args))
+    }
+
+    fn indices(&self, args: &Vec<String>, task_names: &[&str]) -> Result<Vec<usize>> {
         let mut indices = vec![0];
         for (i, arg) in args.iter().enumerate() {
             if task_names.contains(&arg.as_str()) {
@@ -256,7 +250,7 @@ impl Parser2 {
         Ok(indices)
     }
 
-    pub fn partitions(&self, args: &Vec<String>, task_names: &[&str]) -> Result<Vec<Vec<String>>> {
+    fn partitions(&self, args: &Vec<String>, task_names: &[&str]) -> Result<Vec<Vec<String>>> {
         let mut partitions = vec![];
         let mut end = args.len();
         for index in self.indices(args, task_names)?.iter().rev() {
@@ -344,7 +338,7 @@ impl Parser2 {
             let after_help = format!(
                 "--ottofile arg not specified, nor OTTOFILE env var, not one of 'OTTOFILES' discovered in path={0}\nOTTOFILES: {1}",
                 self.cwd.display(),
-                decor(OTTOFILES, Some(dash), Some(dash), None)
+                format_items(OTTOFILES, Some(dash), Some(dash), None)
             );
             let otto = Command::new(OTTO_NAME)
                 .bin_name(OTTO_NAME)
