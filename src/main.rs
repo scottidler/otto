@@ -2,11 +2,9 @@
 
 use eyre::Result;
 use otto::cli::parser::Parser;
-use otto::cli::parser2::Parser2;
 
 fn main() -> Result<()> {
-    //let parser = Parser::new();
-    let parser = Parser2::new()?;
+    let parser = Parser::new()?;
     //println!("parser={:#?}", parser);
     match parser.parse() {
         Ok(matches) => {
