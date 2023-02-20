@@ -38,7 +38,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["--ottofile", "examples/ex1/otto.yml"],
+            "args": ["--ottofile", "examples/ex1/"],
             "cwd": "${workspaceFolder}"
         },
         {

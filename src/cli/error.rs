@@ -16,6 +16,8 @@ pub enum OttofileError {
     DivineError(PathBuf),
     #[error("relative path error")]
     RelativePathError,
+    #[error("current exe filename error")]
+    CurrentExeFilenameError,
     #[error("unknown error")]
     Unknown,
 }

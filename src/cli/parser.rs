@@ -116,8 +116,20 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
 }
 
 fn otto_to_command(otto: &Otto, with_subcommands: bool) -> Command {
+    const OTTO_NAME: &str = "otto";
+    const OTTO_ARG: &str = "ottofile";
+    const OTTO_VAL: &str = "PATH";
+    const OTTO_LONG: &str = "--ottofile";
+    const OTTO_HELP: &str = "path to the ottofile";
     let mut command = Command::new(&otto.name)
-        .bin_name(&otto.name);
+        .bin_name(&otto.name)
+        .arg_required_else_help(true)
+            .arg(Arg::new(OTTO_ARG)
+            .takes_value(true)
+            .value_name(OTTO_VAL)
+            .long(OTTO_LONG)
+            .help(OTTO_HELP)
+        );
     if let Some(otto_help) = &otto.help {
         command = command.about(otto_help.as_str());
     }
@@ -197,7 +209,7 @@ impl Parser {
         for ottofile in OTTOFILES {
             let ottofile_path = path.join(ottofile);
             if ottofile_path.exists() {
-                let p = path_relative_from(path, &cwd)
+                let p = path_relative_from(&ottofile_path, &cwd)
                     .ok_or_else(|| eyre!("could not find relative path"))?;
                 return Ok(Some(p));
             }
@@ -289,7 +301,7 @@ impl Parser {
                 //we have tasks in the ottofile
                 if partitions.len() == 1 {
                     //we only have the main otto partition; no tasks
-                    let otto = otto_to_command(&spec.otto, false)
+                    let otto = otto_to_command(&spec.otto, true)
                         .disable_help_subcommand(true)
                         .arg_required_else_help(true)
                         .after_help("after_help");
