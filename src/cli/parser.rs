@@ -115,66 +115,6 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
     }
 }
 
-fn otto_to_command(otto: &Otto, with_subcommands: bool) -> Command {
-    const OTTO_NAME: &str = "otto";
-    const OTTO_ARG: &str = "ottofile";
-    const OTTO_VAL: &str = "PATH";
-    const OTTO_LONG: &str = "--ottofile";
-    const OTTO_HELP: &str = "path to the ottofile";
-    let mut command = Command::new(&otto.name)
-        .bin_name(&otto.name)
-        .arg_required_else_help(true)
-            .arg(Arg::new(OTTO_ARG)
-            .takes_value(true)
-            .value_name(OTTO_VAL)
-            .long(OTTO_LONG)
-            .help(OTTO_HELP)
-        );
-    if let Some(otto_help) = &otto.help {
-        command = command.about(otto_help.as_str());
-    }
-    for param in otto.params.values() {
-        command = command.arg(param_to_arg(param));
-    }
-    if with_subcommands {
-        for (name, task) in &otto.tasks {
-            command = command.subcommand(task_to_command(task));
-        }
-    }
-    command
-}
-
-fn task_to_command(task: &Task) -> Command {
-    let mut command = Command::new(&task.name)
-        .bin_name(&task.name);
-    if let Some(task_help) = &task.help {
-        command = command.about(task_help.as_str());
-    }
-    for param in task.params.values() {
-        command = command.arg(param_to_arg(param));
-    }
-    command
-}
-fn param_to_arg(param: &Param) -> Arg {
-    let mut arg = Arg::new(&*param.name);
-    if let Some(short) = param.short {
-        arg = arg.short(short);
-    }
-    if let Some(long) = &param.long {
-        arg = arg.long(long.as_str());
-    }
-    if param.param_type == ParamType::OPT {
-        arg = arg.takes_value(true);
-    }
-    if let Some(help) = &param.help {
-        arg = arg.help(help.as_str());
-    }
-    if let Some(default) = &param.default {
-        arg = arg.default_value(default.as_str());
-    }
-    arg
-}
-
 #[derive(Debug, PartialEq)]
 pub struct Parser {
     prog: String,
@@ -272,6 +212,66 @@ impl Parser {
         Ok(partitions)
     }
 
+    fn otto_to_command(otto: &Otto, with_subcommands: bool) -> Command {
+        const OTTO_NAME: &str = "otto";
+        const OTTO_ARG: &str = "ottofile";
+        const OTTO_VAL: &str = "PATH";
+        const OTTO_LONG: &str = "--ottofile";
+        const OTTO_HELP: &str = "path to the ottofile";
+        let mut command = Command::new(&otto.name)
+            .bin_name(&otto.name)
+            .arg_required_else_help(true)
+                .arg(Arg::new(OTTO_ARG)
+                .takes_value(true)
+                .value_name(OTTO_VAL)
+                .long(OTTO_LONG)
+                .help(OTTO_HELP)
+            );
+        if let Some(otto_help) = &otto.help {
+            command = command.about(otto_help.as_str());
+        }
+        for param in otto.params.values() {
+            command = command.arg(Self::param_to_arg(param));
+        }
+        if with_subcommands {
+            for (name, task) in &otto.tasks {
+                command = command.subcommand(Self::task_to_command(task));
+            }
+        }
+        command
+    }
+
+    fn task_to_command(task: &Task) -> Command {
+        let mut command = Command::new(&task.name)
+            .bin_name(&task.name);
+        if let Some(task_help) = &task.help {
+            command = command.about(task_help.as_str());
+        }
+        for param in task.params.values() {
+            command = command.arg(Self::param_to_arg(param));
+        }
+        command
+    }
+    fn param_to_arg(param: &Param) -> Arg {
+        let mut arg = Arg::new(&*param.name);
+        if let Some(short) = param.short {
+            arg = arg.short(short);
+        }
+        if let Some(long) = &param.long {
+            arg = arg.long(long.as_str());
+        }
+        if param.param_type == ParamType::OPT {
+            arg = arg.takes_value(true);
+        }
+        if let Some(help) = &param.help {
+            arg = arg.help(help.as_str());
+        }
+        if let Some(default) = &param.default {
+            arg = arg.default_value(default.as_str());
+        }
+        arg
+    }
+
     pub fn parse(&self) -> Result<Vec<ArgMatches>> {
         let mut matches_vec = vec![];
         const OTTO_NAME: &str = "otto";
@@ -301,7 +301,7 @@ impl Parser {
                 //we have tasks in the ottofile
                 if partitions.len() == 1 {
                     //we only have the main otto partition; no tasks
-                    let otto = otto_to_command(&spec.otto, true)
+                    let otto = Self::otto_to_command(&spec.otto, true)
                         .disable_help_subcommand(true)
                         .arg_required_else_help(true)
                         .after_help("after_help");
@@ -324,7 +324,7 @@ impl Parser {
                         // and the parse the args
                         let partition = &partitions[index];
                         let task = &spec.otto.tasks[&partition[0]];
-                        let command = task_to_command(task)
+                        let command = Self::task_to_command(task)
                             .disable_help_subcommand(true)
                             .arg_required_else_help(true)
                             .after_help("after_help");
