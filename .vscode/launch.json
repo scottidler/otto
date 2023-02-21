@@ -26,7 +26,25 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'otto'",
+            "name": "otto --help",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=otto",
+                    "--package=otto"
+                ],
+                "filter": {
+                    "name": "otto",
+                    "kind": "bin"
+                }
+            },
+            "args": ["--help"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "otto --ottofile DIR",
             "cargo": {
                 "args": [
                     "build",

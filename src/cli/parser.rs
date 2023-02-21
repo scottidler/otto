@@ -164,16 +164,13 @@ impl Parser {
         Self::find_ottofile(parent)
     }
 
-    fn divine_ottofile(value: String) -> Result<PathBuf> {
+    fn divine_ottofile(value: String) -> Result<Option<PathBuf>> {
         let mut path = expanduser(value)?;
         path = fs::canonicalize(path)?;
         if path.is_dir() {
-            match Self::find_ottofile(&path)? {
-                Some(path) => return Ok(path),
-                None => return Err(OttofileError::DivineError(path).into())
-            }
+            return Ok(Self::find_ottofile(&path)?);
         }
-        Ok(path)
+        Ok(Some(path))
     }
 
     fn get_ottofile_args() -> Result<(Option<PathBuf>, Vec<String>)> {
@@ -189,7 +186,7 @@ impl Parser {
             None => env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
         };
         let ottofile = Self::divine_ottofile(value)?;
-        Ok((Some(ottofile), args))
+        Ok((ottofile, args))
     }
 
     fn indices(&self, args: &Vec<String>, task_names: &[&str]) -> Result<Vec<usize>> {
@@ -221,7 +218,7 @@ impl Parser {
         let mut command = Command::new(&otto.name)
             .bin_name(&otto.name)
             .arg_required_else_help(true)
-                .arg(Arg::new(OTTO_ARG)
+            .arg(Arg::new(OTTO_ARG)
                 .takes_value(true)
                 .value_name(OTTO_VAL)
                 .long(OTTO_LONG)
@@ -290,7 +287,7 @@ impl Parser {
             let otto = Command::new(OTTO_NAME)
                 .bin_name(OTTO_NAME)
                 .arg_required_else_help(true)
-                    .arg(Arg::new(OTTO_ARG)
+                .arg(Arg::new(OTTO_ARG)
                     .takes_value(true)
                     .value_name(OTTO_VAL)
                     .long(OTTO_LONG)
@@ -331,7 +328,7 @@ impl Parser {
                         let matches = command.get_matches_from(partition);
                         matches_vec.push(matches);
                     } else {
-                        // we don't have a partition with help
+                        // we don't have a partition with
                         // build the clap command for the otto and tasks, respectively
                         // and then parse the args (partition) for each task
 
