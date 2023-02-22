@@ -62,6 +62,24 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "otto hello -g howdy",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=otto",
+                    "--package=otto"
+                ],
+                "filter": {
+                    "name": "otto",
+                    "kind": "bin"
+                }
+            },
+            "args": ["--ottofile", "examples/ex1/", "hello", "-g", "howdy"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug unit tests in executable 'otto'",
             "cargo": {
                 "args": [
