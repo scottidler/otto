@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter};
 use std::fs;
 use std::fs::metadata;
@@ -16,10 +17,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::unimplemented;
-use std::ffi::OsStr;
 
-use expanduser::expanduser;
 use array_tool::vec::Intersect;
+use expanduser::expanduser;
 
 use super::error::{OttoParseError, OttofileError};
 use crate::cfg::loader::Loader;
@@ -125,7 +125,6 @@ pub struct Parser {
 }
 
 impl Parser {
-
     pub fn new() -> Result<Self> {
         let prog = std::env::current_exe()?
             .file_name()
@@ -149,8 +148,8 @@ impl Parser {
         for ottofile in OTTOFILES {
             let ottofile_path = path.join(ottofile);
             if ottofile_path.exists() {
-                let p = path_relative_from(&ottofile_path, &cwd)
-                    .ok_or_else(|| eyre!("could not find relative path"))?;
+                let p =
+                    path_relative_from(&ottofile_path, &cwd).ok_or_else(|| eyre!("could not find relative path"))?;
                 return Ok(Some(p));
             }
         }
@@ -168,7 +167,7 @@ impl Parser {
         let mut path = expanduser(value)?;
         path = fs::canonicalize(path)?;
         if path.is_dir() {
-            return Ok(Self::find_ottofile(&path)?);
+            return Self::find_ottofile(&path);
         }
         Ok(Some(path))
     }
@@ -189,7 +188,7 @@ impl Parser {
         Ok((ottofile, args))
     }
 
-    fn indices(&self, args: &Vec<String>, task_names: &[&str]) -> Result<Vec<usize>> {
+    fn indices(&self, args: &[String], task_names: &[&str]) -> Result<Vec<usize>> {
         let mut indices = vec![0];
         for (i, arg) in args.iter().enumerate() {
             if task_names.contains(&arg.as_str()) {
@@ -217,12 +216,13 @@ impl Parser {
         const OTTO_HELP: &str = "path to the ottofile";
         let mut command = Command::new(&otto.name)
             .bin_name(&otto.name)
-            .arg_required_else_help(true)
-            .arg(Arg::new(OTTO_ARG)
-                .takes_value(true)
-                .value_name(OTTO_VAL)
-                .long(OTTO_LONG)
-                .help(OTTO_HELP)
+            //.arg_required_else_help(true)
+            .arg(
+                Arg::new(OTTO_ARG)
+                    .takes_value(true)
+                    .value_name(OTTO_VAL)
+                    .long(OTTO_LONG)
+                    .help(OTTO_HELP),
             );
         if let Some(otto_help) = &otto.help {
             command = command.about(otto_help.as_str());
@@ -239,8 +239,7 @@ impl Parser {
     }
 
     fn task_to_command(task: &Task) -> Command {
-        let mut command = Command::new(&task.name)
-            .bin_name(&task.name);
+        let mut command = Command::new(&task.name).bin_name(&task.name);
         if let Some(task_help) = &task.help {
             command = command.about(task_help.as_str());
         }
@@ -287,11 +286,12 @@ impl Parser {
             let otto = Command::new(OTTO_NAME)
                 .bin_name(OTTO_NAME)
                 .arg_required_else_help(true)
-                .arg(Arg::new(OTTO_ARG)
-                    .takes_value(true)
-                    .value_name(OTTO_VAL)
-                    .long(OTTO_LONG)
-                    .help(OTTO_HELP)
+                .arg(
+                    Arg::new(OTTO_ARG)
+                        .takes_value(true)
+                        .value_name(OTTO_VAL)
+                        .long(OTTO_LONG)
+                        .help(OTTO_HELP),
                 );
 
             if !task_names.is_empty() {
@@ -308,14 +308,10 @@ impl Parser {
                     // we have multiple partions
                     // we need to add the task name to the command
                     // and then parse the args for each task
-
-                    fn contains_help(partition: &Vec<String>) -> bool {
-                        !partition
-                            .intersect(vec!["-h".to_owned(), "--help".to_owned()])
-                            .is_empty()
-                    }
-
-                    if let Some(index) = partitions.iter().position(|p| contains_help(p)) {
+                    if let Some(index) = partitions
+                        .iter()
+                        .position(|p| !p.intersect(vec!["-h".to_owned(), "--help".to_owned()]).is_empty())
+                    {
                         // we have a partition with help
                         // build the clap command for the partition with help
                         // and the parse the args
@@ -331,11 +327,17 @@ impl Parser {
                         // we don't have a partition with
                         // build the clap command for the otto and tasks, respectively
                         // and then parse the args (partition) for each task
-
+                        let otto = Self::otto_to_command(&spec.otto, false).after_help("otto!");
+                        let otto_matches = otto.get_matches_from(&partitions[0]);
+                        matches_vec.push(otto_matches);
+                        for partition in &partitions[1..] {
+                            let task = &spec.otto.tasks[&partition[0]];
+                            let command = Self::task_to_command(task).after_help("task!");
+                            let matches = command.get_matches_from(partition);
+                            matches_vec.push(matches);
+                        }
                     }
-
                 }
-
             } else {
                 // we don't have tasks in the ottofile
                 panic!("no tasks in ottofile");
@@ -353,15 +355,28 @@ impl Parser {
                 .bin_name(OTTO_NAME)
                 .arg_required_else_help(true)
                 .after_help(after_help.as_str())
-                .arg(Arg::new(OTTO_ARG)
-                    .takes_value(true)
-                    .value_name(OTTO_VAL)
-                    .long(OTTO_LONG)
-                    .help(OTTO_HELP)
+                .arg(
+                    Arg::new(OTTO_ARG)
+                        .takes_value(true)
+                        .value_name(OTTO_VAL)
+                        .long(OTTO_LONG)
+                        .help(OTTO_HELP),
                 );
             let matches = otto.get_matches_from(vec!["--help"]);
             matches_vec.push(matches);
         }
         Ok(matches_vec)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_format_items() {
+        let items = vec!["a", "b", "c"];
+        let expected = "?a|b|c!";
+        let formatted = format_items(&items, Some("?"), Some("|"), Some("!"));
+        assert_eq!(expected, formatted);
     }
 }
