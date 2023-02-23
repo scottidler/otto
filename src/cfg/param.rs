@@ -112,11 +112,11 @@ impl<'de> Deserialize<'de> for Nargs {
                 println!("s={s}");
                 if s.contains(':') {
                     let parts: Vec<&str> = s.split(':').collect();
-                    let min = parts[0].parse::<usize>().map_err(Error::custom)?;
-                    let max = parts[1].parse::<usize>().map_err(Error::custom)?;
+                    let min: usize = parts[0].parse().map_err(Error::custom)?;
+                    let max: usize= parts[1].parse().map_err(Error::custom)?;
                     Self::Range(min - 1, max)
                 } else {
-                    let num = s.parse::<usize>().map_err(Error::custom)?;
+                    let num = s.parse().map_err(Error::custom)?;
                     Self::Range(0, num)
                 }
             }
