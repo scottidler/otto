@@ -4,9 +4,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::error::ConfigError;
-use super::param::Param;
-use super::spec::{Spec, Task};
+use crate::cfg::error::ConfigError;
+use crate::cfg::param::Param;
+use crate::cfg::spec::Spec;
+use crate::cfg::task::Task;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Loader {

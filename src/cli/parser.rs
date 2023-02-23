@@ -19,10 +19,11 @@ use std::unimplemented;
 use array_tool::vec::Intersect;
 use expanduser::expanduser;
 
-use super::error::{OttoParseError, OttofileError};
 use crate::cfg::loader::Loader;
 use crate::cfg::param::{Param, ParamType, Params, Value};
-use crate::cfg::spec::{Otto, Spec, Task, Tasks};
+use crate::cfg::spec::{Otto, Spec};
+use crate::cfg::task::{Task, Tasks};
+use crate::cli::error::{OttoParseError, OttofileError};
 
 #[macro_use]
 use super::macros;

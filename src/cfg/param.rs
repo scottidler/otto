@@ -1,14 +1,22 @@
-use serde::de::{Deserializer, Error, SeqAccess, Visitor};
+use serde::de::{Deserializer, Error, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt;
 use std::vec::Vec;
+
+pub type Params = HashMap<String, Param>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParamType {
     FLG,
     OPT,
     POS,
+}
+
+impl Default for ParamType {
+    fn default() -> Self {
+        Self::OPT
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,7 +121,7 @@ impl<'de> Deserialize<'de> for Nargs {
                 if s.contains(':') {
                     let parts: Vec<&str> = s.split(':').collect();
                     let min: usize = parts[0].parse().map_err(Error::custom)?;
-                    let max: usize= parts[1].parse().map_err(Error::custom)?;
+                    let max: usize = parts[1].parse().map_err(Error::custom)?;
                     Self::Range(min - 1, max)
                 } else {
                     let num = s.parse().map_err(Error::custom)?;
@@ -124,8 +132,6 @@ impl<'de> Deserialize<'de> for Nargs {
         Ok(result)
     }
 }
-
-pub type Params = HashMap<String, Param>;
 
 // FIXME: Flag, Named and Positional Args
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -162,4 +168,73 @@ pub struct Param {
 
     #[serde(default)]
     pub help: Option<String>,
+}
+
+fn divine(title: &str) -> (String, Option<char>, Option<String>) {
+    let flags: Vec<String> = title.split('|').map(std::string::ToString::to_string).collect();
+    let short = flags
+        .iter()
+        .cloned()
+        .filter(|i| i.starts_with('-') && i.len() == 2)
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .next();
+
+    let long = Some(String::from(
+        flags
+            .iter()
+            .cloned()
+            .filter(|i| i.starts_with("--") && i.len() > 2)
+            .collect::<String>()
+            .trim_matches('-'),
+    ))
+    .filter(|s| !s.is_empty());
+
+    let name = if let Some(ref long) = long {
+        long.clone()
+    } else {
+        match short {
+            Some(ref short) => short.to_string(),
+            None => title.to_string(),
+        }
+    };
+    (name, short, long)
+}
+
+pub fn deserialize_param_map<'de, D>(deserializer: D) -> Result<Params, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ParamMap;
+
+    impl<'de> Visitor<'de> for ParamMap {
+        type Value = Params;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a map of name to Param")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut params = Params::new();
+            while let Some((title, mut param)) = map.next_entry::<String, Param>()? {
+                (param.name, param.short, param.long) = divine(&title);
+                if param.long.is_some() || param.short.is_some() {
+                    if let Some(ref value) = param.default {
+                        if value == "true" || value == "false" {
+                            param.param_type = ParamType::FLG;
+                        }
+                    }
+                } else {
+                    param.param_type = ParamType::POS;
+                }
+                params.insert(title.clone(), param);
+            }
+            Ok(params)
+        }
+    }
+    deserializer.deserialize_map(ParamMap)
 }
