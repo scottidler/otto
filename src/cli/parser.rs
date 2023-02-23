@@ -1,9 +1,7 @@
 #![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
-//use clap::error::{ContextKind, ContextValue, ErrorKind};
-use eyre::{eyre, Result};
-//use clap::Error;
 use clap::{arg, Arg, ArgMatches, Command};
+use eyre::{eyre, Result};
 use thiserror::Error;
 
 use std::collections::HashMap;
@@ -23,7 +21,8 @@ use expanduser::expanduser;
 
 use super::error::{OttoParseError, OttofileError};
 use crate::cfg::loader::Loader;
-use crate::cfg::spec::{Nargs, Otto, Param, ParamType, Params, Spec, Task, Tasks, Value};
+use crate::cfg::param::{Param, ParamType, Params, Value};
+use crate::cfg::spec::{Otto, Spec, Task, Tasks};
 
 #[macro_use]
 use super::macros;
