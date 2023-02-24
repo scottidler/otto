@@ -133,41 +133,91 @@ impl<'de> Deserialize<'de> for Nargs {
     }
 }
 
+pub trait IParam {
+    fn name(&self) -> &str;
+    fn short(&self) -> Option<char>;
+    fn long(&self) -> Option<&str>;
+    fn param_type(&self) -> &ParamType;
+    fn dest(&self) -> Option<&str>;
+    fn metavar(&self) -> Option<&str>;
+    fn default(&self) -> Option<&str>;
+    fn constant(&self) -> &Value;
+    fn choices(&self) -> &[String];
+    fn nargs(&self) -> &Nargs;
+    fn help(&self) -> Option<&str>;
+}
+
 // FIXME: Flag, Named and Positional Args
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct Param {
     #[serde(skip_deserializing)]
-    pub name: String,
+    name: String,
 
     #[serde(skip_deserializing)]
-    pub short: Option<char>,
+    short: Option<char>,
 
     #[serde(skip_deserializing)]
-    pub long: Option<String>,
+    long: Option<String>,
 
     #[serde(skip_deserializing, default)]
-    pub param_type: ParamType,
+    param_type: ParamType,
 
     #[serde(default)]
-    pub dest: Option<String>,
+    dest: Option<String>,
 
     #[serde(default)]
-    pub metavar: Option<String>,
+    metavar: Option<String>,
 
     #[serde(default)]
-    pub default: Option<String>,
+    default: Option<String>,
 
     #[serde(default, deserialize_with = "deserialize_value")]
-    pub constant: Value,
+    constant: Value,
 
     #[serde(default)]
-    pub choices: Vec<String>,
+    choices: Vec<String>,
 
     #[serde(default)]
-    pub nargs: Nargs,
+    nargs: Nargs,
 
     #[serde(default)]
-    pub help: Option<String>,
+    help: Option<String>,
+}
+
+impl IParam for Param {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn short(&self) -> Option<char> {
+        self.short
+    }
+    fn long(&self) -> Option<&str> {
+        self.long.as_deref()
+    }
+    fn param_type(&self) -> &ParamType {
+        &self.param_type
+    }
+    fn dest(&self) -> Option<&str> {
+        self.dest.as_deref()
+    }
+    fn metavar(&self) -> Option<&str> {
+        self.metavar.as_deref()
+    }
+    fn default(&self) -> Option<&str> {
+        self.default.as_deref()
+    }
+    fn constant(&self) -> &Value {
+        &self.constant
+    }
+    fn choices(&self) -> &[String] {
+        &self.choices
+    }
+    fn nargs(&self) -> &Nargs {
+        &self.nargs
+    }
+    fn help(&self) -> Option<&str> {
+        self.help.as_deref()
+    }
 }
 
 fn divine(title: &str) -> (String, Option<char>, Option<String>) {

@@ -20,9 +20,9 @@ use array_tool::vec::Intersect;
 use expanduser::expanduser;
 
 use crate::cfg::loader::Loader;
-use crate::cfg::param::{Param, ParamType, Params, Value};
+use crate::cfg::param::{IParam, Param, ParamType, Params, Value};
 use crate::cfg::spec::{Otto, Spec};
-use crate::cfg::task::{Task, Tasks};
+use crate::cfg::task::{ITask, Task, Tasks};
 use crate::cli::error::{OttoParseError, OttofileError};
 
 #[macro_use]
@@ -239,31 +239,31 @@ impl Parser {
     }
 
     fn task_to_command(task: &Task) -> Command {
-        let mut command = Command::new(&task.name).bin_name(&task.name);
-        if let Some(task_help) = &task.help {
-            command = command.about(task_help.as_str());
+        let mut command = Command::new(task.name()).bin_name(task.name());
+        if let Some(task_help) = task.help() {
+            command = command.about(task.help());
         }
-        for param in task.params.values() {
+        for param in task.params().values() {
             command = command.arg(Self::param_to_arg(param));
         }
         command
     }
-    fn param_to_arg(param: &Param) -> Arg {
-        let mut arg = Arg::new(&*param.name);
-        if let Some(short) = param.short {
+    fn param_to_arg(param: &dyn IParam) -> Arg {
+        let mut arg = Arg::new(param.name());
+        if let Some(short) = param.short() {
             arg = arg.short(short);
         }
-        if let Some(long) = &param.long {
-            arg = arg.long(long.as_str());
+        if let Some(long) = param.long() {
+            arg = arg.long(long);
         }
-        if param.param_type == ParamType::OPT {
+        if *param.param_type() == ParamType::OPT {
             arg = arg.takes_value(true);
         }
-        if let Some(help) = &param.help {
-            arg = arg.help(help.as_str());
+        if let Some(help) = param.help() {
+            arg = arg.help(help);
         }
-        if let Some(default) = &param.default {
-            arg = arg.default_value(default.as_str());
+        if let Some(default) = param.default() {
+            arg = arg.default_value(default);
         }
         arg
     }

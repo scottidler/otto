@@ -8,32 +8,51 @@ use crate::cfg::param::{deserialize_param_map, Params};
 
 pub type Tasks = HashMap<String, Task>;
 
+pub trait ITask {
+    fn new(
+        name: String,
+        help: Option<String>,
+        after: Vec<String>,
+        before: Vec<String>,
+        params: Params,
+        action: Option<String>,
+        selected: bool,
+    ) -> Self;
+    fn name(&self) -> &str;
+    fn help(&self) -> Option<&str>;
+    fn after(&self) -> &[String];
+    fn before(&self) -> &[String];
+    fn params(&self) -> &Params;
+    fn action(&self) -> Option<&str>;
+    fn selected(&self) -> bool;
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct Task {
     #[serde(skip_deserializing)]
-    pub name: String,
+    name: String,
 
     #[serde(default)]
-    pub help: Option<String>,
+    help: Option<String>,
 
     #[serde(default)]
-    pub after: Vec<String>,
+    after: Vec<String>,
 
     #[serde(default)]
-    pub before: Vec<String>,
+    before: Vec<String>,
 
     #[serde(default, deserialize_with = "deserialize_param_map")]
-    pub params: Params,
+    params: Params,
 
-    pub action: Option<String>,
+    action: Option<String>,
 
     #[serde(skip_deserializing)]
-    pub selected: bool,
+    selected: bool,
 }
 
-impl Task {
+impl ITask for Task {
     #[must_use]
-    pub fn new(
+    fn new(
         name: String,
         help: Option<String>,
         after: Vec<String>,
@@ -51,6 +70,34 @@ impl Task {
             action,
             selected,
         }
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn help(&self) -> Option<&str> {
+        self.help.as_deref()
+    }
+
+    fn after(&self) -> &[String] {
+        &self.after
+    }
+
+    fn before(&self) -> &[String] {
+        &self.before
+    }
+
+    fn params(&self) -> &Params {
+        &self.params
+    }
+
+    fn action(&self) -> Option<&str> {
+        self.action.as_deref()
+    }
+
+    fn selected(&self) -> bool {
+        self.selected
     }
 }
 
