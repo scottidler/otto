@@ -24,18 +24,18 @@ fn default_otto() -> String {
     "otto".to_string()
 }
 
-fn default_verbosity() -> i32 {
+const fn default_verbosity() -> i32 {
     1
 }
 
-fn default_api() -> i32 {
+const fn default_api() -> i32 {
     1
 }
 
-fn default_jobs() -> i32 {
+const fn default_jobs() -> i32 {
     12
 }
-fn default_defaults() -> Defaults {
+const fn default_defaults() -> Defaults {
     Defaults {
         api: default_api(),
         verbosity: default_verbosity(),

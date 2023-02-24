@@ -244,7 +244,7 @@ fn divine(title: &str) -> (String, Option<char>, Option<String>) {
     //calculate the name to be long if exists, or short, or default to title
     let name = long
         .clone()
-        .unwrap_or_else(|| short.map(|c| c.to_string()).unwrap_or_else(|| title.to_string()));
+        .unwrap_or_else(|| short.map_or_else(|| title.to_string(), |c| c.to_string()));
 
     /*
     let name = if let Some(ref long) = long {
