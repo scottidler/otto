@@ -50,10 +50,7 @@ where
 {
     //if between is not None, then join with between
     //if between is None, then join with ""
-    let mut s = match between {
-        Some(between) => items.join(between),
-        None => items.join(""),
-    };
+    let mut s = between.map_or_else(|| items.join(""), |between| items.join(between));
     //if before is not None, then prepend with before
     if let Some(before) = before {
         s = format!("{before}{s}");
