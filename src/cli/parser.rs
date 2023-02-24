@@ -275,7 +275,10 @@ impl Parser {
             let spec = loader.load()?;
             let task_names = &spec.otto.task_names();
             let partitions = self.partitions(task_names);
-            if !task_names.is_empty() {
+            if task_names.is_empty() {
+                // we don't have tasks in the ottofile
+                panic!("no tasks in ottofile");
+            } else {
                 //we have tasks in the ottofile
                 if partitions.len() == 1 {
                     //we only have the main otto partition; no tasks
@@ -319,9 +322,6 @@ impl Parser {
                         }
                     }
                 }
-            } else {
-                // we don't have tasks in the ottofile
-                panic!("no tasks in ottofile");
             }
         } else {
             // if we don't have an ottofile
