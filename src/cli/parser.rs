@@ -38,9 +38,9 @@ const OTTOFILES: &[&str] = &[
     "OTTOFILE",
 ];
 
-fn print_type_of<T: ?Sized>(t: &T)
+fn print_type_of<T>(t: &T)
 where
-    T: Debug,
+    T: ?Sized + Debug,
 {
     println!("type={} value={:#?}", std::any::type_name::<T>(), t);
 }
