@@ -184,9 +184,9 @@ impl Parser {
         Ok((ottofile, args))
     }
 
-    fn indices(&self, args: &[String], task_names: &[&str]) -> Vec<usize> {
+    fn indices(&self, task_names: &[&str]) -> Vec<usize> {
         let mut indices = vec![0];
-        for (i, arg) in args.iter().enumerate() {
+        for (i, arg) in self.args.iter().enumerate() {
             if task_names.contains(&arg.as_str()) {
                 indices.push(i);
             }
@@ -194,11 +194,11 @@ impl Parser {
         indices
     }
 
-    fn partitions(&self, args: &Vec<String>, task_names: &[&str]) -> Vec<Vec<String>> {
+    fn partitions(&self, task_names: &[&str]) -> Vec<Vec<String>> {
         let mut partitions = vec![];
-        let mut end = args.len();
-        for index in self.indices(args, task_names).iter().rev() {
-            partitions.insert(0, args[*index..end].to_vec());
+        let mut end = self.args.len();
+        for index in self.indices(task_names).iter().rev() {
+            partitions.insert(0, self.args[*index..end].to_vec());
             end = *index;
         }
         partitions
@@ -277,7 +277,7 @@ impl Parser {
             let loader = Loader::new(ottofile);
             let spec = loader.load()?;
             let task_names = &spec.otto.task_names();
-            let partitions = self.partitions(&self.args, task_names);
+            let partitions = self.partitions(task_names);
             if !task_names.is_empty() {
                 //we have tasks in the ottofile
                 if partitions.len() == 1 {
