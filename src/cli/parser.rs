@@ -171,15 +171,6 @@ impl Parser {
     fn get_ottofile_args() -> Result<(Option<PathBuf>, Vec<String>)> {
         let mut args: Vec<String> = env::args().collect();
         let index = args.iter().position(|x| x == "--ottofile");
-        let value = match index {
-            Some(index) => {
-                let value = args[index + 1].clone();
-                args.remove(index);
-                args.remove(index);
-                value
-            }
-            None => env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
-        };
         let value = index.map_or_else(
             || env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
             |index| {
