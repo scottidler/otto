@@ -115,7 +115,7 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Parser {
     prog: String,
     cwd: PathBuf,
@@ -128,9 +128,8 @@ impl Parser {
     pub fn new() -> Result<Self> {
         let prog = std::env::current_exe()?
             .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "otto".to_string());
+            .and_then(OsStr::to_str)
+            .map_or_else(|| "otto".to_string(), std::string::ToString::to_string);
         let cwd = env::current_dir()?;
         let user = env::var("USER")?;
         let (ottofile, args) = Self::get_ottofile_args()?;

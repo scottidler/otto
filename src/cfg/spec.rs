@@ -44,7 +44,7 @@ fn default_defaults() -> Defaults {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct Spec {
     #[serde(default = "default_defaults")]
     pub defaults: Defaults,
