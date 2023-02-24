@@ -1,5 +1,6 @@
 #![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
+use eyre::Result;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ impl Loader {
         }
     }
 
-    pub fn load(&self) -> Result<Spec, ConfigError> {
+    pub fn load(&self) -> Result<Spec> {
         let content = fs::read_to_string(&self.ottofile)?;
         let spec: Spec = serde_yaml::from_str(&content)?;
         Ok(spec)
