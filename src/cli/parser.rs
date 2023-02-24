@@ -184,20 +184,20 @@ impl Parser {
         Ok((ottofile, args))
     }
 
-    fn indices(&self, args: &[String], task_names: &[&str]) -> Result<Vec<usize>> {
+    fn indices(&self, args: &[String], task_names: &[&str]) -> Vec<usize> {
         let mut indices = vec![0];
         for (i, arg) in args.iter().enumerate() {
             if task_names.contains(&arg.as_str()) {
                 indices.push(i);
             }
         }
-        Ok(indices)
+        indices
     }
 
     fn partitions(&self, args: &Vec<String>, task_names: &[&str]) -> Result<Vec<Vec<String>>> {
         let mut partitions = vec![];
         let mut end = args.len();
-        for index in self.indices(args, task_names)?.iter().rev() {
+        for index in self.indices(args, task_names).iter().rev() {
             partitions.insert(0, args[*index..end].to_vec());
             end = *index;
         }
