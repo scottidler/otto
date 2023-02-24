@@ -260,12 +260,12 @@ impl Parser {
     }
 
     pub fn parse(&self) -> Result<Vec<ArgMatches>> {
-        let mut matches_vec = vec![];
         const OTTO_NAME: &str = "otto";
         const OTTO_ARG: &str = "ottofile";
         const OTTO_VAL: &str = "PATH";
         const OTTO_LONG: &str = "--ottofile";
         const OTTO_HELP: &str = "path to the ottofile";
+        let mut matches_vec = vec![];
 
         if let Some(ottofile) = &self.ottofile {
             //we have an ottofile, so let's load it
