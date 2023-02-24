@@ -149,10 +149,7 @@ impl Parser {
                 return Ok(Some(p));
             }
         }
-        let parent = match path.parent() {
-            Some(p) => p,
-            None => return Ok(None),
-        };
+        let Some(parent) = path.parent() else { return Ok(None)};
         if parent == Path::new("/") {
             return Ok(None);
         }
