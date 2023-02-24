@@ -246,17 +246,6 @@ fn divine(title: &str) -> (String, Option<char>, Option<String>) {
         .clone()
         .unwrap_or_else(|| short.map_or_else(|| title.to_string(), |c| c.to_string()));
 
-    /*
-    let name = if let Some(ref long) = long {
-        long.clone()
-    } else {
-        match short {
-            Some(ref short) => short.to_string(),
-            None => title.to_string(),
-        }
-    };
-    */
-
     (name, short, long)
 }
 

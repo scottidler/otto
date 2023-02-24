@@ -180,6 +180,15 @@ impl Parser {
             }
             None => env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
         };
+        let value = index.map_or_else(
+            || env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
+            |index| {
+                let value = args[index + 1].clone();
+                args.remove(index);
+                args.remove(index);
+                value
+            },
+        );
         let ottofile = Self::divine_ottofile(value)?;
         Ok((ottofile, args))
     }
