@@ -278,18 +278,6 @@ impl Parser {
             let spec = loader.load()?;
             let task_names = &spec.otto.task_names();
             let partitions = self.partitions(&self.args, task_names);
-            //let mut otto = otto_command(&params, true);
-            let otto = Command::new(OTTO_NAME)
-                .bin_name(OTTO_NAME)
-                .arg_required_else_help(true)
-                .arg(
-                    Arg::new(OTTO_ARG)
-                        .takes_value(true)
-                        .value_name(OTTO_VAL)
-                        .long(OTTO_LONG)
-                        .help(OTTO_HELP),
-                );
-
             if !task_names.is_empty() {
                 //we have tasks in the ottofile
                 if partitions.len() == 1 {
