@@ -70,13 +70,7 @@ where
 fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
     use std::path::Component;
 
-    if path.is_absolute() != base.is_absolute() {
-        if path.is_absolute() {
-            Some(PathBuf::from(path))
-        } else {
-            None
-        }
-    } else {
+    if path.is_absolute() == base.is_absolute() {
         let mut ita = path.components();
         let mut itb = base.components();
         let mut comps: Vec<Component> = vec![];
@@ -109,6 +103,10 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
         } else {
             Some(comps.iter().map(|c| c.as_os_str()).collect())
         }
+    } else if path.is_absolute() {
+        Some(PathBuf::from(path))
+    } else {
+        None
     }
 }
 
