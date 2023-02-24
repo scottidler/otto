@@ -194,14 +194,14 @@ impl Parser {
         indices
     }
 
-    fn partitions(&self, args: &Vec<String>, task_names: &[&str]) -> Result<Vec<Vec<String>>> {
+    fn partitions(&self, args: &Vec<String>, task_names: &[&str]) -> Vec<Vec<String>> {
         let mut partitions = vec![];
         let mut end = args.len();
         for index in self.indices(args, task_names).iter().rev() {
             partitions.insert(0, args[*index..end].to_vec());
             end = *index;
         }
-        Ok(partitions)
+        partitions
     }
 
     fn otto_to_command(otto: &Otto, with_subcommands: bool) -> Command {
@@ -277,7 +277,7 @@ impl Parser {
             let loader = Loader::new(ottofile);
             let spec = loader.load()?;
             let task_names = &spec.otto.task_names();
-            let partitions = self.partitions(&self.args, task_names)?;
+            let partitions = self.partitions(&self.args, task_names);
             //let mut otto = otto_command(&params, true);
             let otto = Command::new(OTTO_NAME)
                 .bin_name(OTTO_NAME)
