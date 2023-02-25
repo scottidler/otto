@@ -120,6 +120,11 @@ pub struct Parser {
 }
 
 impl Parser {
+    const OTTO_NAME: &str = "otto";
+    const OTTO_ARG: &str = "ottofile";
+    const OTTO_VAL: &str = "PATH";
+    const OTTO_LONG: &str = "--ottofile";
+    const OTTO_HELP: &str = "path to the ottofile";
     pub fn new() -> Result<Self> {
         let prog = std::env::current_exe()?
             .file_name()
@@ -200,20 +205,15 @@ impl Parser {
     }
 
     fn otto_to_command(otto: &Otto, with_subcommands: bool) -> Command {
-        const OTTO_NAME: &str = "otto";
-        const OTTO_ARG: &str = "ottofile";
-        const OTTO_VAL: &str = "PATH";
-        const OTTO_LONG: &str = "--ottofile";
-        const OTTO_HELP: &str = "path to the ottofile";
         let mut command = Command::new(&otto.name)
             .bin_name(&otto.name)
             //.arg_required_else_help(true)
             .arg(
-                Arg::new(OTTO_ARG)
+                Arg::new(Self::OTTO_ARG)
                     .takes_value(true)
-                    .value_name(OTTO_VAL)
-                    .long(OTTO_LONG)
-                    .help(OTTO_HELP),
+                    .value_name(Self::OTTO_VAL)
+                    .long(Self::OTTO_LONG)
+                    .help(Self::OTTO_HELP),
             );
         if let Some(otto_help) = &otto.help {
             command = command.about(otto_help.as_str());
@@ -260,13 +260,7 @@ impl Parser {
     }
 
     pub fn parse(&self) -> Result<Vec<ArgMatches>> {
-        const OTTO_NAME: &str = "otto";
-        const OTTO_ARG: &str = "ottofile";
-        const OTTO_VAL: &str = "PATH";
-        const OTTO_LONG: &str = "--ottofile";
-        const OTTO_HELP: &str = "path to the ottofile";
         let mut matches_vec = vec![];
-
         if let Some(ottofile) = &self.ottofile {
             //we have an ottofile, so let's load it
             let loader = Loader::new(ottofile);
@@ -330,16 +324,16 @@ impl Parser {
                 self.cwd.display(),
                 format_items(OTTOFILES, Some(dash), Some(dash), None)
             );
-            let otto = Command::new(OTTO_NAME)
-                .bin_name(OTTO_NAME)
+            let otto = Command::new(Self::OTTO_NAME)
+                .bin_name(Self::OTTO_NAME)
                 .arg_required_else_help(true)
                 .after_help(after_help.as_str())
                 .arg(
-                    Arg::new(OTTO_ARG)
+                    Arg::new(Self::OTTO_ARG)
                         .takes_value(true)
-                        .value_name(OTTO_VAL)
-                        .long(OTTO_LONG)
-                        .help(OTTO_HELP),
+                        .value_name(Self::OTTO_VAL)
+                        .long(Self::OTTO_LONG)
+                        .help(Self::OTTO_HELP),
                 );
             let matches = otto.get_matches_from(vec!["--help"]);
             matches_vec.push(matches);
