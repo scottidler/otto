@@ -31,13 +31,13 @@ impl Error for ConfigError {
 }
 
 impl fmt::Display for ConfigError {
-    fn fmt(&self, fmtr: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             ConfigError::FlagLookupError(ref flag) => {
-                write!(fmtr, "flag lookup error; flag={} not found", flag)
+                write!(formatter, "flag lookup error; flag={} not found", flag)
             }
             ConfigError::NameLookupError(ref name) => {
-                write!(fmtr, "name lookup error; name={} not found", name)
+                write!(formatter, "name lookup error; name={} not found", name)
             }
         }
     }

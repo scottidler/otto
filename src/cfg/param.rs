@@ -28,12 +28,12 @@ pub enum Value {
 }
 
 impl fmt::Display for Value {
-    fn fmt(&self, fmtr: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Item(s) => write!(fmtr, "Values::Item({s})"),
-            Self::List(vs) => write!(fmtr, "Values::List([{}])", vs.join(", ")),
-            Self::Dict(_ds) => write!(fmtr, "Values::Dict[NOT IMPLEMENTED]"),
-            Self::Empty => write!(fmtr, "Value::Empty(\"\")"),
+            Self::Item(s) => write!(formatter, "Values::Item({s})"),
+            Self::List(vs) => write!(formatter, "Values::List([{}])", vs.join(", ")),
+            Self::Dict(_ds) => write!(formatter, "Values::Dict[NOT IMPLEMENTED]"),
+            Self::Empty => write!(formatter, "Value::Empty(\"\")"),
         }
     }
 }
@@ -52,8 +52,8 @@ where
     impl<'de> Visitor<'de> for ValueEnum {
         type Value = Value;
 
-        fn expecting(&self, fmtr: &mut fmt::Formatter) -> fmt::Result {
-            fmtr.write_str("string or list of strings")
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("string or list of strings")
         }
         fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
         where
@@ -86,14 +86,14 @@ pub enum Nargs {
 }
 
 impl fmt::Display for Nargs {
-    fn fmt(&self, fmtr: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::One => write!(fmtr, "Nargs::One[1]"),
-            Self::Zero => write!(fmtr, "Nargs::Zero[0]"),
-            Self::OneOrZero => write!(fmtr, "Nargs::OneOrZero[?]"),
-            Self::OneOrMore => write!(fmtr, "Nargs::OneOrMore[+]"),
-            Self::ZeroOrMore => write!(fmtr, "Nargs::ZeroOrMore[*]"),
-            Self::Range(min, max) => write!(fmtr, "Nargs::Range[{}, {}]", min + 1, max),
+            Self::One => write!(formatter, "Nargs::One[1]"),
+            Self::Zero => write!(formatter, "Nargs::Zero[0]"),
+            Self::OneOrZero => write!(formatter, "Nargs::OneOrZero[?]"),
+            Self::OneOrMore => write!(formatter, "Nargs::OneOrMore[+]"),
+            Self::ZeroOrMore => write!(formatter, "Nargs::ZeroOrMore[*]"),
+            Self::Range(min, max) => write!(formatter, "Nargs::Range[{}, {}]", min + 1, max),
         }
     }
 }
