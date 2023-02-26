@@ -1,9 +1,9 @@
-otto:
+defaults:
   version: 1
-  defaults:
-    jobs: 12
-    tasks:
-    - opt1
+  jobs: 12
+  tasks:
+  - opt1
+otto:
   params:
     --opt1:
       metavar: OPT

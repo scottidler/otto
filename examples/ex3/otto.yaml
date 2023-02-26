@@ -1,5 +1,6 @@
-otto:
+defaults:
   version: 1
+otto:
   tasks:
     example1:
       name: rename_task
