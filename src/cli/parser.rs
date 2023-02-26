@@ -20,9 +20,9 @@ use array_tool::vec::Intersect;
 use expanduser::expanduser;
 
 use crate::cfg::loader::Loader;
-use crate::cfg::param::{IParam, Param, ParamType, Params, Value};
-use crate::cfg::spec::{Otto, Spec};
-use crate::cfg::task::{ITask, Task, Tasks};
+//use crate::cfg::param::{IParam, Param, ParamType, Params, Value};
+use crate::cfg::spec::{Spec, Task, Param, ParamType, Value};
+//use crate::cfg::task::{ITask, Task, Tasks};
 use crate::cli::error::{OttoParseError, OttofileError};
 
 #[macro_use]
@@ -204,62 +204,105 @@ impl Parser {
         partitions
     }
 
-    fn otto_to_command(otto: &Otto, with_subcommands: bool) -> Command {
-        let mut command = Command::new(&otto.name)
-            .bin_name(&otto.name)
-            //.arg_required_else_help(true)
-            .arg(
-                Arg::new(Self::OTTO_ARG)
-                    .takes_value(true)
-                    .value_name(Self::OTTO_VAL)
-                    .long(Self::OTTO_LONG)
-                    .help(Self::OTTO_HELP),
-            );
-        if let Some(otto_help) = &otto.help {
-            command = command.about(otto_help.as_str());
-        }
-        for param in otto.params.values() {
-            command = command.arg(Self::param_to_arg(param));
-        }
-        if with_subcommands {
-            for (name, task) in &otto.tasks {
-                command = command.subcommand(Self::task_to_command(task));
-            }
-        }
-        command
-    }
-
     fn task_to_command(task: &Task) -> Command {
-        let mut command = Command::new(task.name()).bin_name(task.name());
-        if let Some(task_help) = task.help() {
-            command = command.about(task.help());
+        let mut command = Command::new(&task.name).bin_name(&task.name);
+        if let Some(task_help) = &task.help {
+            command = command.about(task_help.as_str());
         }
-        for param in task.params().values() {
+        for param in task.params.values() {
             command = command.arg(Self::param_to_arg(param));
         }
         command
     }
-    fn param_to_arg(param: &dyn IParam) -> Arg {
-        let mut arg = Arg::new(param.name());
-        if let Some(short) = param.short() {
+    fn param_to_arg(param: &Param) -> Arg {
+        let mut arg = Arg::new(&*param.name);
+        if let Some(short) = param.short {
             arg = arg.short(short);
         }
-        if let Some(long) = param.long() {
+        if let Some(long) = &param.long {
             arg = arg.long(long);
         }
-        if *param.param_type() == ParamType::OPT {
+        if param.param_type == ParamType::OPT {
             arg = arg.takes_value(true);
         }
-        if let Some(help) = param.help() {
-            arg = arg.help(help);
+        if let Some(help) = &param.help {
+            arg = arg.help(help.as_str());
         }
-        if let Some(default) = param.default() {
-            arg = arg.default_value(default);
+        if let Some(default) = &param.default {
+            arg = arg.default_value(default.as_str());
         }
         arg
     }
 
     pub fn parse(&self) -> Result<Vec<ArgMatches>> {
+        let mut matches_vec = vec![];
+        if let Some(ottofile) = &self.ottofile {
+            //we have an ottofile, so let's load it
+            let loader = Loader::new(ottofile);
+            let spec = loader.load()?;
+            println!("{:#?}", spec);
+            let task_names: Vec<&str> = spec.tasks.keys().map(|x| x.as_str()).collect();
+            let partitions = self.partitions(&task_names);
+            if task_names.is_empty() {
+                // we don't have tasks in the ottofile
+                panic!("no tasks in ottofile");
+            } else {
+                // we have multiple partions
+                // we need to add the task name to the command
+                // and then parse the args for each task
+                if let Some(index) = partitions
+                    .iter()
+                    .position(|p| !p.intersect(vec!["-h".to_owned(), "--help".to_owned()]).is_empty())
+                {
+                    // we have a partition with help
+                    // build the clap command for the partition with help
+                    // and the parse the args
+                    let partition = &partitions[index];
+                    let task = &spec.tasks[&partition[0]];
+                    let command = Self::task_to_command(task)
+                        .disable_help_subcommand(true)
+                        .arg_required_else_help(true)
+                        .after_help("after_help");
+                    let matches = command.get_matches_from(partition);
+                    matches_vec.push(matches);
+                } else {
+                    // we don't have a partition with
+                    // and then parse the args (partition) for each task
+                    for partition in &partitions {
+                        let task = &spec.tasks[&partition[0]];
+                        let command = Self::task_to_command(task).after_help("task!");
+                        let matches = command.get_matches_from(partition);
+                        matches_vec.push(matches);
+                    }
+                }
+            }
+        } else {
+            // if we don't have an ottofile
+            // force the help message
+            let dash = "\n- ";
+            let after_help = format!(
+                "--ottofile arg not specified, nor OTTOFILE env var, not one of 'OTTOFILES' discovered in path={0}\nOTTOFILES: {1}",
+                self.cwd.display(),
+                format_items(OTTOFILES, Some(dash), Some(dash), None)
+            );
+            let otto = Command::new(Self::OTTO_NAME)
+                .bin_name(Self::OTTO_NAME)
+                .arg_required_else_help(true)
+                .after_help(after_help.as_str())
+                .arg(
+                    Arg::new(Self::OTTO_ARG)
+                        .takes_value(true)
+                        .value_name(Self::OTTO_VAL)
+                        .long(Self::OTTO_LONG)
+                        .help(Self::OTTO_HELP),
+                );
+            let matches = otto.get_matches_from(vec!["--help"]);
+            matches_vec.push(matches);
+        }
+        Ok(matches_vec)
+
+
+        /*
         let mut matches_vec = vec![];
         if let Some(ottofile) = &self.ottofile {
             //we have an ottofile, so let's load it
@@ -339,6 +382,7 @@ impl Parser {
             matches_vec.push(matches);
         }
         Ok(matches_vec)
+        */
     }
 }
 

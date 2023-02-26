@@ -1,43 +1,42 @@
-defaults:
-  version: 1
+otto:
+  api: 1
   tasks:
   - world
-otto:
-  tasks:
-    punch:
-      params:
-        -t|--type:
-          choices:
-          - howdy
-          - help
-          default: bueller
-          help: default="bueller"; override type
-        -f|--flag:
-          default: false
-          help: toggle flag to true
-        pos:
-          help: pos help
-      help: punch task help
-    hello:
-      params:
-        -g|--greeting:
-          choices:
-          - howdy
-          - help
-          default: hello
-          help: default="hello"; override greeting
-      action: |
-        #!/bin/bash
-        echo "${greeting:-hello}"
-      help: hello task help
-    world:
-      before:
-      - hello
-      params:
-        -n|--name:
-          default: world
-          help: default="world"; override name
-      action: |
-        #!/bin/bash
-        echo "$name"
-      help: world task help
+tasks:
+  punch:
+    params:
+      -t|--type:
+        choices:
+        - howdy
+        - help
+        default: bueller
+        help: default="bueller"; override type
+      -f|--flag:
+        default: false
+        help: toggle flag to true
+      pos:
+        help: pos help
+    help: punch task help
+  hello:
+    params:
+      -g|--greeting:
+        choices:
+        - howdy
+        - help
+        default: hello
+        help: default="hello"; override greeting
+    action: |
+      #!/bin/bash
+      echo "${greeting:-hello}"
+    help: hello task help
+  world:
+    before:
+    - hello
+    params:
+      -n|--name:
+        default: world
+        help: default="world"; override name
+    action: |
+      #!/bin/bash
+      echo "$name"
+    help: world task help

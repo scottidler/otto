@@ -6,9 +6,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::cfg::error::ConfigError;
-use crate::cfg::param::Param;
-use crate::cfg::spec::Spec;
-use crate::cfg::task::Task;
+//use crate::cfg::param::Param;
+//use crate::cfg::spec::Spec;
+//use crate::cfg::task::Task;
+use crate::cfg::spec::{Spec, Task, Param};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Loader {
