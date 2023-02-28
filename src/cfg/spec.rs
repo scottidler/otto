@@ -21,18 +21,18 @@ pub enum Action {
     //URL(Url),
 }
 
-const fn default_verbosity() -> i32 {
-    1
+fn default_verbosity() -> String {
+    "1".to_string()
 }
 
-const fn default_api() -> i32 {
-    1
+fn default_api() -> String {
+    "1".to_string()
 }
 
-const fn default_jobs() -> i32 {
-    12
+fn default_jobs() -> String {
+    "12".to_string()
 }
-const fn default_otto() -> Otto {
+fn default_otto() -> Otto {
     Otto {
         api: default_api(),
         verbosity: default_verbosity(),
@@ -44,13 +44,13 @@ const fn default_otto() -> Otto {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct Otto {
     #[serde(default = "default_api")]
-    pub api: i32,
+    pub api: String,
 
     #[serde(default = "default_verbosity")]
-    pub verbosity: i32,
+    pub verbosity: String,
 
     #[serde(default = "default_jobs")]
-    pub jobs: i32,
+    pub jobs: String,
 
     #[serde(default)]
     pub tasks: Vec<String>,
@@ -141,7 +141,6 @@ where
     deserializer.deserialize_map(TaskMap)
 }
 
-
 pub type Params = HashMap<String, Param>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -212,7 +211,14 @@ impl fmt::Display for Value {
         match self {
             Value::Item(s) => write!(f, "Value::Item({s})"),
             Value::List(l) => write!(f, "Value::List([{}])", l.join(", ")),
-            Value::Dict(d) => write!(f, "Value::Dict({{ {} }})", d.iter().map(|(k, v)| format!("{}: {}", k, v)).collect::<Vec<String>>().join(", ")),
+            Value::Dict(d) => write!(
+                f,
+                "Value::Dict({{ {} }})",
+                d.iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            ),
             Value::Empty => write!(f, "Value::Empty"),
         }
     }
@@ -372,66 +378,3 @@ where
     }
     deserializer.deserialize_map(ParamMap)
 }
-
-
-
-
-/*
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-pub struct Spec {
-    #[serde(default = "default_defaults")]
-    pub defaults: Defaults,
-
-    pub otto: Otto,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-pub struct Defaults {
-    #[serde(default = "default_api")]
-    pub api: i32,
-
-    #[serde(default = "default_verbosity")]
-    pub verbosity: i32,
-
-    #[serde(default = "default_jobs")]
-    pub jobs: i32,
-
-    #[serde(default)]
-    pub tasks: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-pub struct Otto {
-    #[serde(skip_deserializing, default = "default_otto")]
-    pub name: String,
-
-    #[serde(default)]
-    pub help: Option<String>,
-
-    #[serde(default)]
-    pub author: Option<String>,
-
-    #[serde(default)]
-    pub about: Option<String>,
-
-    #[serde(default)]
-    pub version: Option<String>,
-
-    #[serde(default, deserialize_with = "deserialize_param_map")]
-    pub params: Params,
-
-    #[serde(default, deserialize_with = "deserialize_task_map")]
-    pub tasks: Tasks,
-
-    pub action: Option<String>,
-}
-
-impl Otto {
-    pub fn param_names(&self) -> Vec<&str> {
-        self.params.keys().map(AsRef::as_ref).collect()
-    }
-    pub fn task_names(&self) -> Vec<&str> {
-        self.tasks.keys().map(AsRef::as_ref).collect()
-    }
-}
-*/

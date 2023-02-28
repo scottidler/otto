@@ -9,7 +9,7 @@ use crate::cfg::error::ConfigError;
 //use crate::cfg::param::Param;
 //use crate::cfg::spec::Spec;
 //use crate::cfg::task::Task;
-use crate::cfg::spec::{Spec, Task, Param};
+use crate::cfg::spec::{Param, Spec, Task};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Loader {
