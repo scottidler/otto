@@ -209,17 +209,17 @@ impl Default for Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Item(s) => write!(f, "Value::Item({s})"),
-            Value::List(l) => write!(f, "Value::List([{}])", l.join(", ")),
-            Value::Dict(d) => write!(
+            Self::Item(s) => write!(f, "Value::Item({s})"),
+            Self::List(l) => write!(f, "Value::List([{}])", l.join(", ")),
+            Self::Dict(d) => write!(
                 f,
                 "Value::Dict({{ {} }})",
                 d.iter()
-                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .map(|(k, v)| format!("{k}: {v}"))
                     .collect::<Vec<String>>()
                     .join(", ")
             ),
-            Value::Empty => write!(f, "Value::Empty"),
+            Self::Empty => write!(f, "Value::Empty"),
         }
     }
 }

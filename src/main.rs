@@ -9,8 +9,8 @@ fn main() -> Result<()> {
     //println!("parser={:#?}", parser);
     match parser.parse() {
         Ok(matches_vec) => {
-            for matches in matches_vec.iter() {
-                println!("matches={:#?}", matches);
+            for matches in &matches_vec {
+                println!("matches={matches:#?}");
                 println!("{}", "*".repeat(80));
             }
         }

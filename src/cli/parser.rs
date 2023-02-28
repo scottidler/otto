@@ -285,7 +285,7 @@ impl Parser {
                     .long(Self::TASKS_LONG)
                     .takes_value(true)
                     .value_name(Self::TASKS_VAL)
-                    .default_values(otto.tasks.iter().map(|x| x.as_str()).collect::<Vec<_>>().as_slice())
+                    .default_values(otto.tasks.iter().map(String::as_str).collect::<Vec<_>>().as_slice())
                     .help(Self::TASKS_HELP)
                     .hide(true),
             );
@@ -333,7 +333,7 @@ impl Parser {
             let loader = Loader::new(ottofile);
             let spec = loader.load()?;
             //println!("{:#?}", spec);
-            let task_names: Vec<&str> = spec.tasks.keys().map(|x| x.as_str()).collect();
+            let task_names: Vec<&str> = spec.tasks.keys().map(String::as_str).collect();
             let partitions = self.partitions(&task_names);
             if task_names.is_empty() {
                 // we don't have tasks in the ottofile
