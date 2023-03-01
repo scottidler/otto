@@ -402,8 +402,8 @@ mod tests {
     #[test]
     fn test_format_items() {
         let items = vec!["a", "b", "c"];
-        let expected = "?a|b|c!";
-        let formatted = format_items(&items, Some("?"), Some("|"), Some("!"));
-        assert_eq!(expected, formatted);
+        let expect = "?a|b|c!";
+        let actual = format_items(&items, Some("?"), Some("|"), Some("!"));
+        assert_eq!(expect, atual);
     }
 }
