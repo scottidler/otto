@@ -404,6 +404,6 @@ mod tests {
         let items = vec!["a", "b", "c"];
         let expect = "?a|b|c!";
         let actual = format_items(&items, Some("?"), Some("|"), Some("!"));
-        assert_eq!(expect, atual);
+        assert_eq!(expect, actual);
     }
 }
