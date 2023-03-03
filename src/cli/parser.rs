@@ -121,45 +121,6 @@ pub struct Parser {
 }
 
 impl Parser {
-    const OTTO_NAME: &str = "otto";
-    const OTTO_HELP: &str = "otto is a tool for managing your development environment";
-    const OTTO_VERSION: &str = "0.1.0";
-
-    const OTTOFILE_ARG: &str = "ottofile";
-    const OTTOFILE_VAL: &str = "PATH";
-    const OTTOFILE_SHORT: char = 'f';
-    const OTTOFILE_LONG: &str = "--ottofile";
-    const OTTOFILE_HELP: &str = "path to the ottofile";
-    const OTTOFILE_DEFAULT: &str = "./";
-
-    const VERBOSITY_ARG: &str = "verbosity";
-    const VERBOSITY_VAL: &str = "VERBOSITY";
-    const VERBOSITY_SHORT: char = 'v';
-    const VERBOSITY_LONG: &str = "--verbosity";
-    const VERBOSITY_HELP: &str = "verbosity level";
-    //const VERBOSITY_DEFAULT: &str = "0";
-
-    const API_ARG: &str = "api";
-    const API_VAL: &str = "API";
-    const API_SHORT: char = 'a';
-    const API_LONG: &str = "--api";
-    const API_HELP: &str = "api version to use";
-    //const API_DEFAULT: &str = "v1";
-
-    const JOBS_ARG: &str = "jobs";
-    const JOBS_VAL: &str = "JOBS";
-    const JOBS_SHORT: char = 'j';
-    const JOBS_LONG: &str = "--jobs";
-    const JOBS_HELP: &str = "number of jobs to run in parallel";
-    //const JOBS_DEFAULT: &str = "1";
-
-    const TASKS_ARG: &str = "tasks";
-    const TASKS_VAL: &str = "TASKS";
-    const TASKS_SHORT: char = 't';
-    const TASKS_LONG: &str = "--tasks";
-    const TASKS_HELP: &str = "tasks to run";
-    //const TASKS_DEFAULT: &str = "all";
-
     pub fn new() -> Result<Self> {
         let prog = std::env::current_exe()?
             .file_name()
@@ -240,53 +201,53 @@ impl Parser {
     }
 
     fn otto_to_command<'a>(otto: &'a Otto, tasks: Vec<&'a Task>) -> Command<'a> {
-        let mut command = Command::new(Self::OTTO_NAME)
-            .bin_name(Self::OTTO_NAME)
-            .about(Self::OTTO_HELP)
+        let mut command = Command::new(&otto.name)
+            .bin_name(&otto.name)
+            .about(&*otto.about)
             .arg(
-                Arg::new(Self::OTTOFILE_ARG)
-                    .short(Self::OTTOFILE_SHORT)
-                    .long(Self::OTTOFILE_LONG)
+                Arg::new("ottofile")
+                    .short('o')
+                    .long("ottofile")
                     .takes_value(true)
-                    .value_name(Self::OTTOFILE_VAL)
-                    .default_value(Self::OTTOFILE_DEFAULT)
-                    .help(Self::OTTOFILE_HELP),
+                    .value_name("PATH")
+                    .default_value("./")
+                    .help("path to the ottofile"),
             )
             .arg(
-                Arg::new(Self::VERBOSITY_ARG)
-                    .short(Self::VERBOSITY_SHORT)
-                    .long(Self::VERBOSITY_LONG)
+                Arg::new("verbosity")
+                    .short('v')
+                    .long("verbosity")
                     .takes_value(true)
-                    .value_name(Self::VERBOSITY_VAL)
-                    .default_value(&otto.verbosity)
-                    .help(Self::VERBOSITY_HELP),
+                    .value_name("LEVEL")
+                    .default_value("1")
+                    .help("verbosity level"),
             )
             .arg(
-                Arg::new(Self::API_ARG)
-                    .short(Self::API_SHORT)
-                    .long(Self::API_LONG)
+                Arg::new("api")
+                    .short('a')
+                    .long("api")
                     .takes_value(true)
-                    .value_name(Self::API_VAL)
+                    .value_name("NUM")
                     .default_value(&otto.api)
-                    .help(Self::API_HELP),
+                    .help("api version to use"),
             )
             .arg(
-                Arg::new(Self::JOBS_ARG)
-                    .short(Self::JOBS_SHORT)
-                    .long(Self::JOBS_LONG)
+                Arg::new("jobs")
+                    .short('j')
+                    .long("jobs")
                     .takes_value(true)
-                    .value_name(Self::JOBS_VAL)
+                    .value_name("NUM")
                     .default_value(&otto.jobs)
-                    .help(Self::JOBS_HELP),
+                    .help("number of jobs to run in parallel"),
             )
             .arg(
-                Arg::new(Self::TASKS_ARG)
-                    .short(Self::TASKS_SHORT)
-                    .long(Self::TASKS_LONG)
+                Arg::new("tasks)")
+                    .short('t')
+                    .long("tasks")
                     .takes_value(true)
-                    .value_name(Self::TASKS_VAL)
+                    .value_name("TASKS")
                     .default_values(otto.tasks.iter().map(String::as_str).collect::<Vec<_>>().as_slice())
-                    .help(Self::TASKS_HELP)
+                    .help("tasks to run")
                     .hide(true),
             );
 

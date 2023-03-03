@@ -21,6 +21,14 @@ pub enum Action {
     //URL(Url),
 }
 
+fn default_name() -> String {
+    "otto".to_string()
+}
+
+fn default_about() -> String {
+    "a tool for managing a DAG of tasks".to_string()
+}
+
 fn default_verbosity() -> String {
     "1".to_string()
 }
@@ -30,10 +38,12 @@ fn default_api() -> String {
 }
 
 fn default_jobs() -> String {
-    "12".to_string()
+    num_cpus::get().to_string()
 }
 fn default_otto() -> Otto {
     Otto {
+        name: default_name(),
+        about: default_about(),
         api: default_api(),
         verbosity: default_verbosity(),
         jobs: default_jobs(),
@@ -41,8 +51,14 @@ fn default_otto() -> Otto {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Otto {
+    #[serde(default = "default_name")]
+    pub name: String,
+
+    #[serde(default = "default_about")]
+    pub about: String,
+
     #[serde(default = "default_api")]
     pub api: String,
 
@@ -54,6 +70,12 @@ pub struct Otto {
 
     #[serde(default)]
     pub tasks: Vec<String>,
+}
+
+impl Default for Otto {
+    fn default() -> Self {
+        default_otto()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
