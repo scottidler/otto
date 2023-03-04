@@ -241,7 +241,7 @@ impl Parser {
                     .help("number of jobs to run in parallel"),
             )
             .arg(
-                Arg::new("tasks)")
+                Arg::new("tasks")
                     .short('t')
                     .long("tasks")
                     .takes_value(true)
@@ -287,7 +287,43 @@ impl Parser {
         arg
     }
 
-    pub fn parse(&self) -> Result<Vec<ArgMatches>> {
+    fn matches_to_otto(matches: &ArgMatches) -> Otto {
+        let mut otto = Otto::default();
+        println!("{:#?}", matches);
+        if let Some(verbosity) = matches.value_of("verbosity") {
+            otto.verbosity = verbosity.to_owned();
+        }
+        if let Some(api) = matches.value_of("api") {
+            otto.api = api.to_owned();
+        }
+        if let Some(jobs) = matches.value_of("jobs") {
+            otto.jobs = jobs.to_owned();
+        }
+        if let Some(tasks) = matches.values_of("tasks") {
+            otto.tasks = tasks.map(String::from).collect();
+        }
+        otto
+    }
+
+    fn matches_to_task(matches: &ArgMatches) -> Task {
+        let mut task = Task::default();
+        task
+    }
+
+    pub fn parse(&self) -> Result<Spec> {
+        let matches_vec = self.get_matches()?;
+        let mut spec = Spec::default();
+
+        if let Some((o, ts)) = matches_vec.split_first() {
+            let otto = Self::matches_to_otto(o);
+            println!("{:#?}", otto);
+            let tasks: Vec<Task> = ts.iter().map(Self::matches_to_task).collect();
+            println!("{:#?}", tasks);
+        }
+        Ok(spec)
+    }
+
+    pub fn get_matches(&self) -> Result<Vec<ArgMatches>> {
         let mut matches_vec = vec![];
         if let Some(ottofile) = &self.ottofile {
             //we have an ottofile, so let's load it

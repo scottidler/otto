@@ -1,5 +1,6 @@
 otto:
   api: 1
+  jobs: 16
   tasks:
   - world
 tasks:

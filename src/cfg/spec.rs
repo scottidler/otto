@@ -78,13 +78,22 @@ impl Default for Otto {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Spec {
     #[serde(default = "default_otto")]
     pub otto: Otto,
 
     #[serde(default, deserialize_with = "deserialize_task_map")]
     pub tasks: Tasks,
+}
+
+impl Default for Spec {
+    fn default() -> Self {
+        Self {
+            otto: default_otto(),
+            tasks: Tasks::new(),
+        }
+    }
 }
 
 pub type Tasks = HashMap<String, Task>;
