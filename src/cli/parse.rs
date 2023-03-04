@@ -20,7 +20,7 @@ use std::unimplemented;
 use array_tool::vec::Intersect;
 use expanduser::expanduser;
 
-use crate::cfg::loader::Loader;
+use crate::cfg::load::Loader;
 //use crate::cfg::param::{IParam, Param, ParamType, Params, Value};
 use crate::cfg::spec::{Otto, Param, ParamType, Spec, Task, Value};
 //use crate::cfg::task::{ITask, Task, Tasks};
