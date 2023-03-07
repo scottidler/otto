@@ -5,7 +5,7 @@ use otto::cli::parse::Parser;
 use std::str;
 
 fn main() -> Result<()> {
-    let parser = Parser::new()?;
+    let mut parser = Parser::new()?;
     //println!("parser={:#?}", parser);
     let spec = parser.parse();
     Ok(())
