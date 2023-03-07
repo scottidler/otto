@@ -10,10 +10,9 @@ use std::path::PathBuf;
 use std::vec::Vec;
 
 use crate::cfg::error::ConfigError;
-/*
-use crate::cfg::param::{deserialize_param_map, Param, Params, Value};
-use crate::cfg::task::{deserialize_task_map, Task, Tasks};
-*/
+
+type Values = HashMap<String, String>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Script(String),
@@ -119,7 +118,7 @@ pub struct Task {
     pub action: Option<String>,
 
     #[serde(skip_deserializing)]
-    pub selected: bool,
+    pub values: Values,
 }
 
 impl Task {
@@ -131,7 +130,7 @@ impl Task {
         before: Vec<String>,
         params: Params,
         action: Option<String>,
-        selected: bool,
+        values: Values,
     ) -> Self {
         Self {
             name,
@@ -140,7 +139,7 @@ impl Task {
             before,
             params,
             action,
-            selected,
+            values,
         }
     }
 }
