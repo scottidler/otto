@@ -110,50 +110,13 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct PartitionedArgs {
-    pub args: Vec<String>,
-    pub indices: Vec<usize>,
-}
-
-impl PartitionedArgs {
-    fn indices(args: &Vec<String>, task_names: &[&str]) -> Vec<usize> {
-        let mut indices = vec![0];
-        for (i, arg) in args.iter().enumerate() {
-            if task_names.contains(&arg.as_str()) {
-                indices.push(i);
-            }
-        }
-        indices
-    }
-    pub fn new(names: &[&str]) -> Self {
-        let args = env::args().collect();
-        let indices = Self::indices(&args, names);
-        Self { 
-            args,
-            indices,
-        }
-    }
-    pub fn partitions(&self) -> Vec<&[String]> {
-        let mut partitions: Vec<&[String]> = vec![];
-        let mut end = self.args.len();
-        for index in self.indices.iter().rev() {
-            partitions.push(&self.args[*index..end]);
-            end = *index;
-        }
-        partitions
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
 pub struct Parser {
     prog: String,
     cwd: PathBuf,
     user: String,
     spec: Spec,
-    pargs: PartitionedArgs,
-    pargs2: Vec<Vec<String>>, //FIXME: remove this
-    ottofile: Option<PathBuf>, //FIXME: remove this
-    args: Vec<String>, //FIXME: remove this
+    args: Vec<String>,
+    pargs: Vec<Vec<String>>,
 }
 
 fn indices(args: Vec<String>, task_names: &[&str]) -> Vec<usize> {
@@ -186,23 +149,15 @@ impl Parser {
         let user = env::var("USER")?;
         let spec = Self::load_spec()?;
         let task_names: Vec<&str> = spec.tasks.keys().map(|k| k.as_str()).collect();
-        println!("task_names={:#?}", task_names);
-        let ottofile = Some(PathBuf::from("RUH-ROH"));
         let args = std::env::args().collect::<Vec<String>>();
-        println!("args={:#?}", args);
-        let pargs = PartitionedArgs::new(&task_names);
-        println!("pargs={:#?}", pargs);
-        let pargs2: Vec<Vec<String>> = partitions(&args, &task_names);        
-        println!("pargs={:#?}", pargs2);
+        let pargs = partitions(&args, &task_names);
         Ok(Self {
             prog,
             cwd,
             user,
             spec,
-            pargs,
-            pargs2,
-            ottofile,
             args,
+            pargs,
         })
     }
 
@@ -231,6 +186,7 @@ impl Parser {
         }
         Ok(Some(path))
     }
+
     /*
     fn indices(args: Vec<String>, task_names: &[&str]) -> Vec<usize> {
         let mut indices = vec![0];
@@ -397,7 +353,7 @@ impl Parser {
         let mut task = Task::default();
         for id in matches.ids().map(|id| id.as_str()) {
             if let Some(value) = matches.get_one::<String>(id) {
-                task.values.insert(id.to_owned(), value.to_owned());
+                //task.values.insert(id.to_owned(), value.to_owned());
             }
         }
         task
@@ -411,29 +367,36 @@ impl Parser {
             .disable_help_subcommand(true)
             .arg_required_else_help(true)
             .after_help("after_help");
+        let matches = otto.get_matches_from(&self.pargs[0]);
+        println!("{:#?}", matches);
+        let matches_vec = self.get_matches()?;
+        for matches in matches_vec {
+            println!("{:#?}", matches);
+        }
         Ok(spec)
     }
 
-    pub fn get_matches2(&mut self) -> Result<Vec<ArgMatches>> {
+    pub fn get_matches(&self) -> Result<Vec<ArgMatches>> {
         let mut matches_vec = vec![];
         if self.spec.tasks.is_empty() {
             panic!("no tasks in ottofile");
-        } else if self.pargs2.len() == 1 {
+        } else if self.pargs.len() == 1 {
             //we only have the main otto partition; no tasks
             let otto = Self::otto_to_command(self.spec.otto.clone(), self.spec.tasks.values().cloned().collect())
                 .disable_help_subcommand(true)
                 .arg_required_else_help(true)
                 .after_help("after_help");
-            let matches = otto.get_matches_from(&self.pargs2[0]);
+            let matches = otto.get_matches_from(&self.pargs[0]);
             matches_vec.push(matches);
-        } else if let Some(index) = self.pargs2
+        } else if let Some(index) = self
+            .pargs
             .iter()
             .position(|p| !p.intersect(vec!["-h".to_owned(), "--help".to_owned()]).is_empty())
         {
             // we have a partition with help
             // build the clap command for the partition with help
             // and the parse the args
-            let partition = &self.pargs2[index];
+            let partition = &self.pargs[index];
             let task = &self.spec.tasks[&partition[0]];
             let command = Self::task_to_command(task)
                 .disable_help_subcommand(true)
@@ -446,9 +409,9 @@ impl Parser {
             // build the clap command for the otto and tasks, respectively
             // and then parse the args (partition) for each task
             let otto = Self::otto_to_command(self.spec.otto.clone(), vec![]).after_help("otto!");
-            let otto_matches = otto.get_matches_from(&self.pargs2[0]);
+            let otto_matches = otto.get_matches_from(&self.pargs[0]);
             matches_vec.push(otto_matches);
-            for partition in &self.pargs2[1..] {
+            for partition in &self.pargs[1..] {
                 let task = &self.spec.tasks[&partition[0]];
                 let command = Self::task_to_command(task).after_help("task!");
                 let matches = command.get_matches_from(partition);
@@ -458,7 +421,8 @@ impl Parser {
         Ok(matches_vec)
     }
 
-    pub fn get_matches(&self) -> Result<Vec<ArgMatches>> {
+    /*
+    pub fn get_matches_old(&self) -> Result<Vec<ArgMatches>> {
         let mut matches_vec = vec![];
         if let Some(ottofile) = &self.ottofile {
             //we have an ottofile, so let's load it
@@ -525,6 +489,7 @@ impl Parser {
         }
         Ok(matches_vec)
     }
+    */
 }
 
 #[cfg(test)]

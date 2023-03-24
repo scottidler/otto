@@ -39,6 +39,11 @@ fn default_api() -> String {
 fn default_jobs() -> String {
     num_cpus::get().to_string()
 }
+
+fn default_tasks() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
 fn default_otto() -> Otto {
     Otto {
         name: default_name(),
@@ -46,7 +51,7 @@ fn default_otto() -> Otto {
         api: default_api(),
         verbosity: default_verbosity(),
         jobs: default_jobs(),
-        tasks: vec![],
+        tasks: default_tasks(),
     }
 }
 
@@ -67,7 +72,7 @@ pub struct Otto {
     #[serde(default = "default_jobs")]
     pub jobs: String,
 
-    #[serde(default)]
+    #[serde(default = "default_tasks")]
     pub tasks: Vec<String>,
 }
 
@@ -115,10 +120,10 @@ pub struct Task {
     pub params: Params,
 
     #[serde(default)]
-    pub action: Option<String>,
+    pub action: String,
 
-    #[serde(skip_deserializing)]
-    pub values: Values,
+    // #[serde(skip_deserializing)]
+    // pub values: Values,
 }
 
 impl Task {
@@ -129,7 +134,7 @@ impl Task {
         after: Vec<String>,
         before: Vec<String>,
         params: Params,
-        action: Option<String>,
+        action: String,
         values: Values,
     ) -> Self {
         Self {
@@ -139,7 +144,7 @@ impl Task {
             before,
             params,
             action,
-            values,
+            //values,
         }
     }
 }
@@ -207,6 +212,9 @@ pub struct Param {
 
     #[serde(default)]
     pub help: Option<String>,
+
+    #[serde(skip_deserializing)]
+    pub value: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,7 +251,7 @@ impl fmt::Display for Value {
             Self::List(l) => write!(f, "Value::List([{}])", l.join(", ")),
             Self::Dict(d) => write!(
                 f,
-                "Value::Dict({{ {} }})",
+                "Value::Dict({{{}}})",
                 d.iter()
                     .map(|(k, v)| format!("{k}: {v}"))
                     .collect::<Vec<String>>()
@@ -284,7 +292,6 @@ where
     }
     deserializer.deserialize_any(ValueEnum)
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Nargs {
     One,
