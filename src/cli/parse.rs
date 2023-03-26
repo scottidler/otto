@@ -353,7 +353,7 @@ impl Parser {
         let mut task = Task::default();
         for id in matches.ids().map(|id| id.as_str()) {
             if let Some(value) = matches.get_one::<String>(id) {
-                //task.values.insert(id.to_owned(), value.to_owned());
+                task.values.insert(id.to_owned(), value.to_owned());
             }
         }
         task
