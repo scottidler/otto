@@ -122,8 +122,8 @@ pub struct Task {
     #[serde(default)]
     pub action: String,
 
-    // #[serde(skip_deserializing)]
-    // pub values: Values,
+    #[serde(skip_deserializing)]
+    pub values: Values,
 }
 
 impl Task {
@@ -144,7 +144,7 @@ impl Task {
             before,
             params,
             action,
-            //values,
+            values,
         }
     }
 }
