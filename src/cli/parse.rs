@@ -21,7 +21,7 @@ use array_tool::vec::Intersect;
 use expanduser::expanduser;
 
 use crate::cfg::load::Loader;
-use crate::cfg::spec::{Otto, Param, ParamType, Spec, Task, Value};
+use crate::cfg::spec::{OttoSpec, ParamSpec, ParamType, OttofileSpec, TaskSpec, Value};
 use crate::cli::error::{OttoParseError, OttofileError};
 
 #[macro_use]
@@ -109,12 +109,64 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
     }
 }
 
+/*
+- name: hello
+  deps: []
+  envs:
+    bob: sue
+    age: 11
+  args:
+    greeting: hello
+  action: |
+    #!/bin/bash
+    echo "hello"
+- name: world
+  deps: [hello]
+  envs:
+    bob: ann
+    age: 13
+  args:
+    name: world
+ */
+#[derive(Debug, PartialEq, Eq)]
+pub struct Task {
+    name: String,
+    deps: Vec<String>,
+    envs: HashMap<String, String>,
+    args: HashMap<String, String>,
+    action: String,
+}
+
+impl Task {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            deps: vec![],
+            envs: HashMap::new(),
+            args: HashMap::new(),
+            action: "".to_string(),
+        }
+    }
+}
+
+impl Default for Task {
+    fn default() -> Self {
+        Self {
+            name: "".to_string(),
+            deps: vec![],
+            envs: HashMap::new(),
+            args: HashMap::new(),
+            action: "".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Parser {
     prog: String,
     cwd: PathBuf,
     user: String,
-    spec: Spec,
+    spec: OttofileSpec,
     args: Vec<String>,
     pargs: Vec<Vec<String>>,
 }
@@ -224,7 +276,7 @@ impl Parser {
         Ok((ottofile, args))
     }
 
-    fn load_spec() -> Result<Spec> {
+    fn load_spec() -> Result<OttofileSpec> {
         let mut args: Vec<String> = env::args().collect();
         let index = args.iter().position(|x| x == "--ottofile");
         let value = index.map_or_else(
@@ -238,14 +290,14 @@ impl Parser {
         );
         if let Some(ottofile) = Self::divine_ottofile(value)? {
             let content = fs::read_to_string(&ottofile)?;
-            let spec: Spec = serde_yaml::from_str(&content)?;
+            let spec: OttofileSpec = serde_yaml::from_str(&content)?;
             Ok(spec)
         } else {
-            Ok(Spec::default())
+            Ok(OttofileSpec::default())
         }
     }
 
-    fn otto_to_command(otto: Otto, tasks: Vec<Task>) -> Command {
+    fn otto_to_command(otto: OttoSpec, tasks: Vec<TaskSpec>) -> Command {
         let mut command = Command::new(&otto.name)
             .bin_name(&otto.name)
             .about(&otto.about)
@@ -300,7 +352,7 @@ impl Parser {
         command
     }
 
-    fn task_to_command(task: &Task) -> Command {
+    fn task_to_command(task: &TaskSpec) -> Command {
         let mut command = Command::new(&task.name).bin_name(&task.name);
         if let Some(task_help) = &task.help {
             command = command.about(task_help);
@@ -310,7 +362,7 @@ impl Parser {
         }
         command
     }
-    fn param_to_arg(param: &Param) -> Arg {
+    fn param_to_arg(param: &ParamSpec) -> Arg {
         let mut arg = Arg::new(&param.name);
         if let Some(short) = param.short {
             arg = arg.short(short);
@@ -330,8 +382,8 @@ impl Parser {
         arg
     }
 
-    fn matches_to_otto(matches: &ArgMatches) -> Otto {
-        let mut otto = Otto::default();
+    fn matches_to_otto(matches: &ArgMatches) -> OttoSpec {
+        let mut otto = OttoSpec::default();
         //println!("{:#?}", matches);
         if let Some(verbosity) = matches.get_one::<String>("verbosity") {
             otto.verbosity = verbosity.to_owned();
@@ -349,8 +401,9 @@ impl Parser {
         otto
     }
 
-    fn matches_to_task(matches: &ArgMatches) -> Task {
-        let mut task = Task::default();
+    fn matches_to_task(matches: &ArgMatches) -> TaskSpec {
+        let mut task = TaskSpec::default();
+        let task_name: String = matches.subcommand_name().unwrap().to_owned();
         for id in matches.ids().map(|id| id.as_str()) {
             if let Some(value) = matches.get_one::<String>(id) {
                 task.values.insert(id.to_owned(), value.to_owned());
@@ -359,9 +412,20 @@ impl Parser {
         task
     }
 
+    // need to get the task name and envs into the Task2 object
+    fn matches_to_task2(matches: &ArgMatches) -> Task {
+        let mut task = Task::default();
+        for id in matches.ids().map(|id| id.as_str()) {
+            if let Some(value) = matches.get_one::<String>(id) {
+                task.args.insert(id.to_owned(), value.to_owned());
+            }
+        }
+        task
+    }
+
     // methods
 
-    pub fn parse(&self) -> Result<Spec> {
+    pub fn parse(&self) -> Result<OttofileSpec> {
         let mut spec = self.spec.clone();
         let otto = Self::otto_to_command(self.spec.otto.clone(), self.spec.tasks.values().cloned().collect())
             .disable_help_subcommand(true)
@@ -392,6 +456,7 @@ impl Parser {
             .pargs
             .iter()
             .position(|p| !p.intersect(vec!["-h".to_owned(), "--help".to_owned()]).is_empty())
+
         {
             // we have a partition with help
             // build the clap command for the partition with help

@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::cfg::error::ConfigError;
-use crate::cfg::spec::{Param, Spec, Task};
+use crate::cfg::spec::{ParamSpec, OttofileSpec, TaskSpec};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Loader {
@@ -21,9 +21,9 @@ impl Loader {
         }
     }
 
-    pub fn load(&self) -> Result<Spec> {
+    pub fn load(&self) -> Result<OttofileSpec> {
         let content = fs::read_to_string(&self.ottofile)?;
-        let spec: Spec = serde_yaml::from_str(&content)?;
+        let spec: OttofileSpec = serde_yaml::from_str(&content)?;
         Ok(spec)
     }
 }

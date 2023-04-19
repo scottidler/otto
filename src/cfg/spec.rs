@@ -44,8 +44,8 @@ fn default_tasks() -> Vec<String> {
     vec!["*".to_string()]
 }
 
-fn default_otto() -> Otto {
-    Otto {
+fn default_otto() -> OttoSpec {
+    OttoSpec {
         name: default_name(),
         about: default_about(),
         api: default_api(),
@@ -56,7 +56,7 @@ fn default_otto() -> Otto {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct Otto {
+pub struct OttoSpec {
     #[serde(default = "default_name")]
     pub name: String,
 
@@ -76,34 +76,34 @@ pub struct Otto {
     pub tasks: Vec<String>,
 }
 
-impl Default for Otto {
+impl Default for OttoSpec {
     fn default() -> Self {
         default_otto()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct Spec {
+pub struct OttofileSpec {
     #[serde(default = "default_otto")]
-    pub otto: Otto,
+    pub otto: OttoSpec,
 
     #[serde(default, deserialize_with = "deserialize_task_map")]
-    pub tasks: Tasks,
+    pub tasks: TaskSpecs,
 }
 
-impl Default for Spec {
+impl Default for OttofileSpec {
     fn default() -> Self {
         Self {
             otto: default_otto(),
-            tasks: Tasks::new(),
+            tasks: TaskSpecs::new(),
         }
     }
 }
 
-pub type Tasks = HashMap<String, Task>;
+pub type TaskSpecs = HashMap<String, TaskSpec>;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-pub struct Task {
+pub struct TaskSpec {
     #[serde(skip_deserializing)]
     pub name: String,
 
@@ -117,7 +117,7 @@ pub struct Task {
     pub before: Vec<String>,
 
     #[serde(default, deserialize_with = "deserialize_param_map")]
-    pub params: Params,
+    pub params: ParamSpecs,
 
     #[serde(default)]
     pub action: String,
@@ -126,14 +126,14 @@ pub struct Task {
     pub values: Values,
 }
 
-impl Task {
+impl TaskSpec {
     #[must_use]
     pub fn new(
         name: String,
         help: Option<String>,
         after: Vec<String>,
         before: Vec<String>,
-        params: Params,
+        params: ParamSpecs,
         action: String,
         values: Values,
     ) -> Self {
@@ -148,14 +148,14 @@ impl Task {
         }
     }
 }
-pub fn deserialize_task_map<'de, D>(deserializer: D) -> Result<Tasks, D::Error>
+pub fn deserialize_task_map<'de, D>(deserializer: D) -> Result<TaskSpecs, D::Error>
 where
     D: Deserializer<'de>,
 {
     struct TaskMap;
 
     impl<'de> Visitor<'de> for TaskMap {
-        type Value = Tasks;
+        type Value = TaskSpecs;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
             formatter.write_str("a map of name to Task")
@@ -165,8 +165,8 @@ where
         where
             M: MapAccess<'de>,
         {
-            let mut tasks = Tasks::new();
-            while let Some((name, mut task)) = map.next_entry::<String, Task>()? {
+            let mut tasks = TaskSpecs::new();
+            while let Some((name, mut task)) = map.next_entry::<String, TaskSpec>()? {
                 task.name = name.clone();
                 tasks.insert(name.clone(), task);
             }
@@ -176,10 +176,10 @@ where
     deserializer.deserialize_map(TaskMap)
 }
 
-pub type Params = HashMap<String, Param>;
+pub type ParamSpecs = HashMap<String, ParamSpec>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct Param {
+pub struct ParamSpec {
     #[serde(skip_deserializing)]
     pub name: String,
 
@@ -379,14 +379,14 @@ fn divine(title: &str) -> (String, Option<char>, Option<String>) {
     (name, short, long)
 }
 
-pub fn deserialize_param_map<'de, D>(deserializer: D) -> Result<Params, D::Error>
+pub fn deserialize_param_map<'de, D>(deserializer: D) -> Result<ParamSpecs, D::Error>
 where
     D: Deserializer<'de>,
 {
     struct ParamMap;
 
     impl<'de> Visitor<'de> for ParamMap {
-        type Value = Params;
+        type Value = ParamSpecs;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
             formatter.write_str("a map of name to Param")
@@ -396,8 +396,8 @@ where
         where
             M: MapAccess<'de>,
         {
-            let mut params = Params::new();
-            while let Some((title, mut param)) = map.next_entry::<String, Param>()? {
+            let mut params = ParamSpecs::new();
+            while let Some((title, mut param)) = map.next_entry::<String, ParamSpec>()? {
                 (param.name, param.short, param.long) = divine(&title);
                 if param.long.is_some() || param.short.is_some() {
                     if let Some(ref value) = param.default {
