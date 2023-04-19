@@ -1,0 +1,18 @@
+- name: hello
+  deps: []
+  envs:
+    bob: sue
+    age: 11
+  args:
+    greeting: hello
+  action: |
+    #!/bin/bash
+    echo "hello"
+- name: world
+  deps: [hello]
+  envs:
+    bob: ann
+    age: 13
+  args:
+    name: world
+
