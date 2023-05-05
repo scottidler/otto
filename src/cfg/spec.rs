@@ -44,8 +44,8 @@ fn default_tasks() -> Vec<String> {
     vec!["*".to_string()]
 }
 
-fn default_otto() -> OttoSpec {
-    OttoSpec {
+fn default_otto() -> DefaultsSpec {
+    DefaultsSpec {
         name: default_name(),
         about: default_about(),
         api: default_api(),
@@ -56,7 +56,7 @@ fn default_otto() -> OttoSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct OttoSpec {
+pub struct DefaultsSpec {
     #[serde(default = "default_name")]
     pub name: String,
 
@@ -76,7 +76,7 @@ pub struct OttoSpec {
     pub tasks: Vec<String>,
 }
 
-impl Default for OttoSpec {
+impl Default for DefaultsSpec {
     fn default() -> Self {
         default_otto()
     }
@@ -85,7 +85,7 @@ impl Default for OttoSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct OttofileSpec {
     #[serde(default = "default_otto")]
-    pub otto: OttoSpec,
+    pub otto: DefaultsSpec,
 
     #[serde(default, deserialize_with = "deserialize_task_map")]
     pub tasks: TaskSpecs,

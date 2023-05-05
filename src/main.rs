@@ -6,7 +6,10 @@ use std::str;
 
 fn main() -> Result<()> {
     let mut parser = Parser::new()?;
-    //println!("parser={:#?}", parser);
-    let spec = parser.parse();
+    let (defaults, tasks) = parser.parse()?;
+    println!("defaults={:#?}", defaults);
+    for task in tasks {
+        println!("task={:#?}", task);
+    }
     Ok(())
 }
