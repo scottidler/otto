@@ -21,7 +21,7 @@ use array_tool::vec::Intersect;
 use expanduser::expanduser;
 
 use crate::cfg::load::Loader;
-use crate::cfg::spec::{OttoSpec, ParamSpec, ParamType, OttofileSpec, TaskSpec, Value};
+use crate::cfg::spec::{DefaultsSpec, ParamSpec, ParamType, OttofileSpec, TaskSpec, Value};
 use crate::cli::error::{OttoParseError, OttofileError};
 
 #[macro_use]
@@ -109,6 +109,42 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct OttoDefaults {
+    pub name: String,
+    pub about: String,
+    pub api: String,
+    pub verbosity: String,
+    pub jobs: String,
+    pub tasks: Vec<String>,
+}
+
+impl Default for OttoDefaults {
+    fn default() -> Self {
+        Self {
+            name: "".to_string(),
+            about: "".to_string(),
+            api: "".to_string(),
+            verbosity: "".to_string(),
+            jobs: "".to_string(),
+            tasks: vec![],
+        }
+    }
+}
+
+impl From<DefaultsSpec> for OttoDefaults {
+    fn from(defaults: DefaultsSpec) -> Self {
+        Self {
+            name: defaults.name.clone(),
+            about: defaults.about.clone(),
+            api: defaults.api.clone(),
+            verbosity: defaults.verbosity.clone(),
+            jobs: defaults.jobs.clone(),
+            tasks: defaults.tasks.clone(),
+        }
+    }
+}
+
 /*
 - name: hello
   deps: []
@@ -148,6 +184,8 @@ impl Task {
         }
     }
 }
+
+type Tasks = Vec<Task>;
 
 impl Default for Task {
     fn default() -> Self {
@@ -297,7 +335,7 @@ impl Parser {
         }
     }
 
-    fn otto_to_command(otto: OttoSpec, tasks: Vec<TaskSpec>) -> Command {
+    fn otto_to_command(otto: DefaultsSpec, tasks: Vec<TaskSpec>) -> Command {
         let mut command = Command::new(&otto.name)
             .bin_name(&otto.name)
             .about(&otto.about)
@@ -382,8 +420,8 @@ impl Parser {
         arg
     }
 
-    fn matches_to_otto(matches: &ArgMatches) -> OttoSpec {
-        let mut otto = OttoSpec::default();
+    fn matches_to_otto(matches: &ArgMatches) -> DefaultsSpec {
+        let mut otto = DefaultsSpec::default();
         //println!("{:#?}", matches);
         if let Some(verbosity) = matches.get_one::<String>("verbosity") {
             otto.verbosity = verbosity.to_owned();
@@ -401,19 +439,19 @@ impl Parser {
         otto
     }
 
-    fn matches_to_task(matches: &ArgMatches) -> TaskSpec {
-        let mut task = TaskSpec::default();
-        let task_name: String = matches.subcommand_name().unwrap().to_owned();
-        for id in matches.ids().map(|id| id.as_str()) {
-            if let Some(value) = matches.get_one::<String>(id) {
-                task.values.insert(id.to_owned(), value.to_owned());
-            }
-        }
-        task
-    }
+    // fn matches_to_task(matches: &ArgMatches) -> TaskSpec {
+    //     let mut task = TaskSpec::default();
+    //     let task_name: String = matches.subcommand_name().unwrap().to_owned();
+    //     for id in matches.ids().map(|id| id.as_str()) {
+    //         if let Some(value) = matches.get_one::<String>(id) {
+    //             task.values.insert(id.to_owned(), value.to_owned());
+    //         }
+    //     }
+    //     task
+    // }
 
     // need to get the task name and envs into the Task2 object
-    fn matches_to_task2(matches: &ArgMatches) -> Task {
+    fn matches_to_task(matches: &ArgMatches) -> Task {
         let mut task = Task::default();
         for id in matches.ids().map(|id| id.as_str()) {
             if let Some(value) = matches.get_one::<String>(id) {
@@ -425,19 +463,25 @@ impl Parser {
 
     // methods
 
-    pub fn parse(&self) -> Result<OttofileSpec> {
+    pub fn parse(&self) -> Result<(OttoDefaults, Tasks)> {
         let mut spec = self.spec.clone();
         let otto = Self::otto_to_command(self.spec.otto.clone(), self.spec.tasks.values().cloned().collect())
             .disable_help_subcommand(true)
             .arg_required_else_help(true)
             .after_help("after_help");
         let matches = otto.get_matches_from(&self.pargs[0]);
-        println!("{:#?}", matches);
+        let defaults: DefaultsSpec = Self::matches_to_otto(&matches);
+        let defaults: OttoDefaults = defaults.into();
+        //println!("{:#?}", matches);
         let matches_vec = self.get_matches()?;
-        for matches in matches_vec {
-            println!("{:#?}", matches);
-        }
-        Ok(spec)
+        //for matches in &matches_vec {
+        //    println!("{:#?}", matches);
+        //}
+        let tasks: Vec<Task> = matches_vec
+            .iter()
+            .map(|matches| Self::matches_to_task(matches))
+            .collect();
+        Ok((defaults, tasks))
     }
 
     pub fn get_matches(&self) -> Result<Vec<ArgMatches>> {
