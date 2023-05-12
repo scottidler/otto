@@ -310,12 +310,6 @@ impl Parser2 {
     }
 
     pub fn parse(&mut self) -> Result<(Otto, Vec<Task>)> {
-        // If the Ottofile is not found or cannot be loaded, or no tasks are found
-        if self.spec.tasks.is_empty() {
-            // Handle the case when no input is given and no tasks are found
-            return self.handle_no_input();
-        }
-
         // Create clap commands for 'otto' and tasks
         let otto_command = Self::otto_to_command(&self.spec.otto, &self.spec.tasks);
         let task_commands: Vec<Command> = self.spec.tasks.values().map(Self::task_to_command).collect();
@@ -324,27 +318,38 @@ impl Parser2 {
         let mut otto = self.parse_otto_command(otto_command, &self.pargs[0])?;
 
         // Process the tasks with their default values and command line parameters
-        let tasks = self.process_tasks(&task_commands)?;
+        let tasks: Vec<Task> = self.process_tasks()?;
 
+        let mut specified_tasks = Vec::new();
+
+        // Iterate through the command line arguments partitions
+        for partition in &self.pargs[1..] {
+            let task_name = &partition[0];
+            if let Some(task) = tasks.iter().find(|t| t.name == *task_name) {
+                specified_tasks.push(task.clone());
+            }
+        }
+
+        // If no tasks are specified in the command line arguments, use Otto's default tasks
+        if specified_tasks.is_empty() {
+            otto.tasks = tasks.iter().map(|task| task.name.clone()).collect();
+        } else {
+            // Update Otto's tasks with the tasks specified in the command line arguments
+            otto.tasks = specified_tasks.iter().map(|task| task.name.clone()).collect();
+        }
+
+        // Return all tasks from the Ottofile, and the updated Otto struct
         Ok((otto, tasks))
     }
 
-    fn process_tasks(&self, task_commands: &[Command]) -> Result<Vec<Task>> {
+    fn process_tasks(&self) -> Result<Vec<Task>> {
         // Initialize an empty tasks vector
         let mut tasks = vec![];
 
         // Iterate through the tasks loaded from the Ottofile
         for task in self.spec.tasks.values() {
             // Create a new task with the same fields as the original task
-            let mut processed_task = Task {
-                name: task.name.clone(),
-                help: task.help.clone(),
-                after: task.after.clone(),
-                before: task.before.clone(),
-                params: task.params.clone(),
-                action: task.action.clone(),
-                values: HashMap::new(),
-            };
+            let mut processed_task = task.clone();
 
             // Apply the default values for each task
             for (name, param) in &task.params {
