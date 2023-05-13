@@ -371,30 +371,6 @@ impl Parser2 {
         Ok(tasks)
     }
 
-/*
-    fn update_task_with_args(&self, task: &mut Task, args: &[String]) {
-        // Create a clap command for the given task
-        let task_command = Self::task_to_command(task);
-
-        // Parse args using the task command
-        let matches = match task_command.try_get_matches_from(args) {
-            Ok(matches) => matches,
-            Err(e) => {
-                eprintln!("{}", e);
-                std::process::exit(1);
-            }
-        };
-
-        // Update the task fields with the parsed values
-        for (name, param) in &mut task.params {
-            if let Some(value) = matches.get_many::<String>(name) {
-                let value_str = value.cloned().next().unwrap_or_default();
-                param.value = Value::Item(value_str);
-            }
-        }
-    }
-*/
-
     fn update_task_with_args(&self, task: &mut Task, args: &[String]) {
         // Create a clap command for the given task
         let task_command = Self::task_to_command(task);
@@ -404,135 +380,12 @@ impl Parser2 {
 
         // Update the task fields with the parsed values
         for (name, param) in &mut task.params {
-            if let Some(value) = matches.get_many::<String>(name) {
+            if let Some(value) = matches.get_many::<String>(&param.name) {
                 let value_str = value.cloned().next().unwrap_or_default();
                 param.value = Value::Item(value_str);
             }
         }
     }
-
-
-
-    /*
-    // fn update_task_with_args(&self, task: &mut Task, args: &[String]) {
-    //     // Update the task fields with the passed parameters from args
-
-    //     // Create a clap command for the given task
-    //     let task_command = self.create_task_command(task);
-
-    //     // Parse args using the task command
-    //     let matches = task_command.get_matches_from(args);
-
-    //     // Update the task fields with the parsed values
-    //     for (name, param) in &mut task.params {
-    //         match matches.
-
-    //     }
-    // }
-
-    // fn create_task_command(&self, task: &Task) -> Command {
-    //     let mut task_command = Command::new(&task.name);
-
-    //     for (name, param) in &task.params {
-    //         let mut arg = Arg::new(name);
-
-    //         if let Some(short) = param.short {
-    //             arg = arg.short(short);
-    //         }
-
-    //         if let Some(long) = &param.long {
-    //             arg = arg.long(long);
-    //         }
-
-    //         if let Some(help) = &param.help {
-    //             arg = arg.help(help);
-    //         }
-
-    //         if let Some(metavar) = &param.metavar {
-    //             arg = arg.value_name(metavar);
-    //         }
-
-    //         task_command = task_command.arg(arg);
-    //     }
-
-    //     task_command
-    // }
-
-    // fn update_task_with_args(&self, task: &mut Task, args: &[String]) {
-    //     // Create a clap command for the given task
-    //     let task_command = self.create_task_command(task);
-
-    //     // Parse args using the task command
-    //     let matches = task_command.try_get_matches_from(args).unwrap();
-
-    //     // Update the task fields with the parsed values
-    //     for (name, param) in &mut task.params {
-    //         if let Some(value) = matches.value_of(name) {
-    //             param.value = Value::String(value.to_string());
-    //         }
-    //     }
-    // }
-
-    // fn create_task_command(&self, task: &Task) -> Command {
-    //     let mut task_command = Command::new(&task.name);
-
-    //     for (name, param) in &task.params {
-    //         let mut arg = Arg::new(name);
-
-    //         if let Some(short) = param.short {
-    //             arg = arg.short(short);
-    //         }
-
-    //         if let Some(long) = &param.long {
-    //             arg = arg.long(long);
-    //         }
-
-    //         if let Some(help) = &param.help {
-    //             arg = arg.help(help);
-    //         }
-
-    //         if let Some(metavar) = &param.metavar {
-    //             arg = arg.value_name(metavar);
-    //         }
-
-    //         task_command = task_command.arg(arg);
-    //     }
-
-    //     task_command
-    // }
-
-    // fn update_task_with_args(&self, task: &mut Task, args: &[String]) {
-    //     // Create a clap command for the given task
-    //     let task_command = self.create_task_command(task);
-
-    //     // Parse args using the task command
-    //     let matches = task_command.try_get_matches_from(args).unwrap();
-
-    //     // Update the task fields with the parsed values
-    //     for (name, param) in &mut task.params {
-    //         if let Some(value) = matches.get_many::<String>(name) {
-    //             let value_str = value.cloned().next().unwrap_or_default();
-    //             param.value = value_str;
-    //         }
-    //     }
-    // }
-
-    // fn update_task_with_args(&self, task: &mut Task, args: &[String]) {
-    //     // Create a clap command for the given task
-    //     let task_command = self.create_task_command(task);
-
-    //     // Parse args using the task command
-    //     let matches = task_command.try_get_matches_from(args).unwrap();
-
-    //     // Update the task fields with the parsed values
-    //     for (name, param) in &mut task.params {
-    //         if let Some(value) = matches.get_many::<String>(name) {
-    //             let value_str = value.cloned().next().unwrap_or_default();
-    //             param.value = Value::Item(value_str); // Wrap the value_str with the appropriate enum variant
-    //         }
-    //     }
-    // }
-    */
 
     fn handle_no_input(&self) -> Result<(Otto, Vec<Task>)> {
         // Create a default otto command with no tasks
