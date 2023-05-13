@@ -371,12 +371,19 @@ impl Parser2 {
         Ok(tasks)
     }
 
+/*
     fn update_task_with_args(&self, task: &mut Task, args: &[String]) {
         // Create a clap command for the given task
         let task_command = Self::task_to_command(task);
 
         // Parse args using the task command
-        let matches = task_command.try_get_matches_from(args).unwrap();
+        let matches = match task_command.try_get_matches_from(args) {
+            Ok(matches) => matches,
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        };
 
         // Update the task fields with the parsed values
         for (name, param) in &mut task.params {
@@ -386,6 +393,25 @@ impl Parser2 {
             }
         }
     }
+*/
+
+    fn update_task_with_args(&self, task: &mut Task, args: &[String]) {
+        // Create a clap command for the given task
+        let task_command = Self::task_to_command(task);
+
+        // Parse args using the task command
+        let matches = task_command.get_matches_from(args);
+
+        // Update the task fields with the parsed values
+        for (name, param) in &mut task.params {
+            if let Some(value) = matches.get_many::<String>(name) {
+                let value_str = value.cloned().next().unwrap_or_default();
+                param.value = Value::Item(value_str);
+            }
+        }
+    }
+
+
 
     /*
     // fn update_task_with_args(&self, task: &mut Task, args: &[String]) {
@@ -509,12 +535,19 @@ impl Parser2 {
     */
 
     fn handle_no_input(&self) -> Result<(Otto, Vec<Task>)> {
-        // Show default help for 'otto' command and exit
-        unimplemented!()
+        // Create a default otto command with no tasks
+        let mut otto_command = Self::otto_to_command(&self.spec.otto, &HashMap::new());
+        otto_command.print_help().unwrap();
+        std::process::exit(1);
     }
 
     fn parse_otto_command(&self, otto_command: Command, args: &[String]) -> Result<Otto> {
         // Parse 'otto' command using args and update the Otto fields
+
+        // if spec.tasks is empty, then show default help for 'otto' command and exit
+        if self.spec.tasks.is_empty() {
+            self.handle_no_input()?;
+        }
 
         // Parse the arguments using clap's get_matches_from method
         let matches = otto_command.get_matches_from(args);
@@ -527,8 +560,7 @@ impl Parser2 {
                 otto.name = name.to_string();
             }
         }
-*/
-/*
+
         if matches.contains_id("about") {
             if let Some(about) = matches.get_one::<String>("about") {
                 otto.about = about.to_string();
