@@ -8,8 +8,8 @@ use std::str;
 fn main() -> Result<()> {
     //let mut parser = Parser::new()?;
     let mut parser = Parser2::new()?;
-    let (defaults, tasks) = parser.parse()?;
-    println!("defaults={:#?}", defaults);
+    let (otto, tasks) = parser.parse()?;
+    println!("otto={:#?}", otto);
     for task in tasks {
         println!("task={:#?}", task);
     }

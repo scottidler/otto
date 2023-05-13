@@ -515,16 +515,116 @@ impl Parser2 {
 
     fn parse_otto_command(&self, otto_command: Command, args: &[String]) -> Result<Otto> {
         // Parse 'otto' command using args and update the Otto fields
-        unimplemented!()
+
+        // Parse the arguments using clap's get_matches_from method
+        let matches = otto_command.get_matches_from(args);
+
+        let mut otto = self.spec.otto.clone();
+
+/*
+        if matches.contains_id("name") {
+            if let Some(name) = matches.get_one::<String>("name") {
+                otto.name = name.to_string();
+            }
+        }
+*/
+/*
+        if matches.contains_id("about") {
+            if let Some(about) = matches.get_one::<String>("about") {
+                otto.about = about.to_string();
+            }
+        }
+*/
+        if matches.contains_id("api") {
+            if let Some(api) = matches.get_one::<String>("api") {
+                otto.api = api.to_string();
+            }
+        }
+        if matches.contains_id("verbosity") {
+            if let Some(verbosity) = matches.get_one::<String>("verbosity") {
+                otto.verbosity = verbosity.to_string();
+            }
+        }
+        if matches.contains_id("jobs") {
+            if let Some(jobs) = matches.get_one::<String>("jobs") {
+                otto.jobs = jobs.to_string();
+            }
+        }
+        if matches.contains_id("tasks") {
+            if let Some(tasks) = matches.get_many::<String>("tasks") {
+                otto.tasks = tasks
+                    .into_iter()
+                    .map(|task| task.to_string())
+                    .collect::<Vec<String>>();
+            }
+        }
+
+        // right now args will have at least one element, the name of the otto binary
+        // tasks will be ["*"]
+        // so this logic is bunk at the moment
+        if args.len() == 1 && otto.tasks.len() == 0 {
+            return Err(eyre!("No tasks specified"));
+        } else {
+            println!("args: {:?}", args);
+            println!("otto.tasks: {:?}", otto.tasks);
+        }
+
+        Ok(otto)
     }
+
 
     fn parse_task_commands(&self, task_commands: &[Command], args: &[Vec<String>]) -> Result<HashMap<String, Task>> {
-        // Parse task commands using args and update the Task fields
-        unimplemented!()
+        let mut tasks: HashMap<String, Task> = HashMap::new();
+
+        for (task_command, task_args) in task_commands.iter().zip(args) {
+            let matches = task_command.clone().get_matches_from(task_args);
+
+            // Get the task name
+            let task_name = task_command.get_name().to_string();
+
+            // Get the corresponding task from the Ottofile
+            let mut task = self.spec.tasks.get(&task_name)
+                .ok_or_else(|| eyre!("Task {} not found in the Ottofile", &task_name))?
+                .clone();
+
+            // Update the task's values with the parsed parameters
+            for (param_name, _) in task.params.iter() {
+                if let Some(value) = matches.get_one::<String>(param_name) {
+                    task.values.insert(param_name.clone(), value.clone());
+                }
+            }
+
+            // Insert the updated task into the tasks HashMap
+            tasks.insert(task_name, task);
+        }
+
+        Ok(tasks)
     }
 
-    fn parse_and_update_task_fields(&self, tasks: &mut HashMap<String, Task>, args: &[Vec<String>]) {
-        // Parse and update the Task fields for tasks using args
-        unimplemented!()
+    fn parse_and_update_task_fields(&self, tasks: &mut HashMap<String, Task>, args: &[Vec<String>]) -> Result<()> {
+        // Iterate over each task command-line arguments
+        for task_args in args {
+            // The first argument should be the task name
+            let task_name = &task_args[0];
+
+            // Get the corresponding task from the tasks HashMap
+            if let Some(task) = tasks.get_mut(task_name) {
+                // Update the task's values with the passed parameters
+                for (idx, value) in task_args[1..].iter().enumerate() {
+                    // We'll assume that the task parameters are in the same order as in the Task's params HashMap
+                    if let Some((param_name, _)) = task.params.iter().nth(idx) {
+                        // Insert the new value into the task's values HashMap
+                        task.values.insert(param_name.clone(), value.clone());
+                    } else {
+                        return Err(eyre!("Too many arguments for task {}", task_name));
+                    }
+                }
+            } else {
+                return Err(eyre!("Task {} not found in the Ottofile", task_name));
+            }
+        }
+
+        Ok(())
     }
+
 }
