@@ -380,8 +380,8 @@ impl Parser2 {
 
         // Update the task fields with the parsed values
         for (name, param) in &mut task.params {
-            if let Some(value) = matches.get_many::<String>(&param.name) {
-                let value_str = value.cloned().next().unwrap_or_default();
+            if let Some(mut value) = matches.get_many::<String>(&param.name) {
+                let value_str = value.next().cloned().unwrap_or_default();
                 param.value = Value::Item(value_str);
             }
         }
