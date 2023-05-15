@@ -25,7 +25,8 @@ fn default_name() -> String {
 }
 
 fn default_about() -> String {
-    "a tool for managing a DAG of tasks".to_string()
+    //"a tool for managing a DAG of tasks".to_string()
+    "A task runner".to_string()
 }
 
 fn default_verbosity() -> String {
