@@ -22,7 +22,7 @@ use expanduser::expanduser;
 
 use crate::cfg::load::Loader;
 use crate::cfg::spec::{Otto, Param, ParamType, Config, Task, Tasks, Value};
-use crate::cli::error::{OttoParseError, OttofileError};
+use crate::cli::error::{OttoParseError, OttofileError, SilentError};
 
 #[macro_use]
 use super::macros;
@@ -391,7 +391,9 @@ impl Parser2 {
         // Create a default otto command with no tasks
         let mut otto_command = Self::otto_to_command(&self.spec.otto, &HashMap::new());
         otto_command.print_help().unwrap();
-        std::process::exit(1);
+        //std::process::exit(1);
+        //Err(eyre!("No tasks found in the Ottofile"))
+        Err(SilentError.into())
     }
 
     fn parse_otto_command(&self, otto_command: Command, args: &[String]) -> Result<Otto> {
@@ -512,4 +514,87 @@ impl Parser2 {
         Ok(())
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn generate_test_otto() -> Otto {
+        Otto {
+            verbosity: "1".to_string(),
+            name: "otto".to_string(),
+            about: "A task runner".to_string(),
+            api: "http://localhost:8000".to_string(),
+            jobs: "4".to_string(),
+            //tasks: vec!["build".to_string(), "test".to_string()],
+            tasks: vec!["build".to_string()],
+        }
+    }
+
+    fn generate_test_task() -> Task {
+        Task {
+            name: "build".to_string(),
+            help: Some("Build the project".to_string()),
+            params: HashMap::new(),
+            before: vec![],
+            after: vec![],
+            action: "echo 'building'".to_string(),
+            values: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_parser2_new() {
+        let p = Parser2::new().unwrap();
+        assert!(!p.prog.is_empty());
+    }
+
+    #[test]
+    fn test_parse_no_args() {
+        let otto = generate_test_otto();
+        let tasks = vec![generate_test_task()];
+
+        let args = vec!["otto".to_string()];
+        let pargs = partitions(&args, &["build"]);
+
+        let mut parser = Parser2 {
+            prog: "otto".to_string(),
+            cwd: env::current_dir().unwrap(),
+            user: env::var("USER").unwrap(),
+            spec: Config { otto: otto.clone(), tasks: HashMap::new() },
+            args,
+            pargs,
+        };
+
+        let result = parser.parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_with_args() {
+        let otto = generate_test_otto();
+        let task = generate_test_task();
+
+        let mut tasks = HashMap::new();
+        tasks.insert(task.name.clone(), task);
+
+        let args = vec!["otto".to_string(), "build".to_string()];
+        let pargs = partitions(&args, &["build"]);
+
+        let mut parser = Parser2 {
+            prog: "otto".to_string(),
+            cwd: env::current_dir().unwrap(),
+            user: env::var("USER").unwrap(),
+            spec: Config { otto: otto.clone(), tasks: tasks.clone() },
+            args,
+            pargs,
+        };
+
+        let result = parser.parse().unwrap();
+        assert_eq!(result.0, otto, "comparing otto struct");
+        assert_eq!(result.1.len(), tasks.len(), "comparing tasks length");
+        assert_eq!(result.1[0].name, "build".to_string(), "comparing task name");
+    }
 }

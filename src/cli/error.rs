@@ -1,7 +1,7 @@
 #![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
 use std::env;
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -30,4 +30,13 @@ pub enum OttoParseError {
     ClapError(#[from] clap::Error),
     #[error("unknown error")]
     Unknown,
+}
+
+#[derive(Error, Debug)]
+pub struct SilentError;
+
+impl Display for SilentError {
+    fn fmt(&self, _f: &mut Formatter) -> FmtResult {
+        Ok(())
+    }
 }
