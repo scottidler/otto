@@ -451,10 +451,9 @@ impl Parser2 {
         // so this logic is bunk at the moment
         if args.len() == 1 && otto.tasks.len() == 0 {
             return Err(eyre!("No tasks specified"));
-        } else {
-            println!("args: {:?}", args);
-            println!("otto.tasks: {:?}", otto.tasks);
         }
+        println!("args: {:?}", args);
+        println!("otto.tasks: {:?}", otto.tasks);
 
         Ok(otto)
     }
