@@ -10,23 +10,23 @@ fn main() {
     let mut parser = match Parser2::new() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Error initializing parser: {}", e);
+            eprintln!("Error initializing parser: {e}");
             process::exit(1);
         }
     };
 
     match parser.parse() {
         Ok((otto, tasks)) => {
-            println!("otto={:#?}", otto);
+            println!("otto={otto:#?}");
             for task in tasks {
-                println!("task={:#?}", task);
+                println!("task={task:#?}");
             }
         }
         Err(e) => {
             if e.downcast_ref::<SilentError>().is_some() {
                 process::exit(1);
             } else {
-                eprintln!("Error parsing: {}", e);
+                eprintln!("Error parsing: {e}");
                 process::exit(1);
             }
         }
