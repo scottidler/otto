@@ -147,7 +147,7 @@ impl Parser2 {
         let cwd = env::current_dir()?;
         let user = env::var("USER")?;
         let spec = Self::load_spec()?;
-        let task_names: Vec<&str> = spec.tasks.keys().map(|k| k.as_str()).collect();
+        let task_names: Vec<&str> = spec.tasks.keys().map(std::string::String::as_str).collect();
         let args = std::env::args().collect::<Vec<String>>();
         let pargs = partitions(&args, &task_names);
         Ok(Self {
@@ -215,7 +215,7 @@ impl Parser2 {
             },
         );
         if let Some(ottofile) = Self::divine_ottofile(value)? {
-            let content = fs::read_to_string(&ottofile)?;
+            let content = fs::read_to_string(ottofile)?;
             let spec: Config = serde_yaml::from_str(&content)?;
             Ok(spec)
         } else {
@@ -273,7 +273,7 @@ impl Parser2 {
                     .help("comma separated list of tasks to run"),
             );
         for (name, task) in tasks {
-            command = command.subcommand(Self::task_to_command(&task));
+            command = command.subcommand(Self::task_to_command(task));
         }
         command
     }
@@ -441,7 +441,7 @@ impl Parser2 {
             if let Some(tasks) = matches.get_many::<String>("tasks") {
                 otto.tasks = tasks
                     .into_iter()
-                    .map(|task| task.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<String>>();
             }
         }
@@ -449,10 +449,10 @@ impl Parser2 {
         // right now args will have at least one element, the name of the otto binary
         // tasks will be ["*"]
         // so this logic is bunk at the moment
-        if args.len() == 1 && otto.tasks.len() == 0 {
+        if args.len() == 1 && otto.tasks.is_empty() {
             return Err(eyre!("No tasks specified"));
         }
-        println!("args: {:?}", args);
+        println!("args: {args:?}");
         println!("otto.tasks: {:?}", otto.tasks);
 
         Ok(otto)
@@ -474,7 +474,7 @@ impl Parser2 {
                 .clone();
 
             // Update the task's values with the parsed parameters
-            for (param_name, _) in task.params.iter() {
+            for (param_name, _) in &task.params {
                 if let Some(value) = matches.get_one::<String>(param_name) {
                     task.values.insert(param_name.clone(), value.clone());
                 }
@@ -562,7 +562,7 @@ mod tests {
             prog: "otto".to_string(),
             cwd: env::current_dir().unwrap(),
             user: env::var("USER").unwrap(),
-            spec: Config { otto: otto.clone(), tasks: HashMap::new() },
+            spec: Config { otto: otto, tasks: HashMap::new() },
             args,
             pargs,
         };
