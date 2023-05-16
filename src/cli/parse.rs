@@ -472,7 +472,7 @@ impl Parser {
                 .clone();
 
             // Update the task's values with the parsed parameters
-            for (param_name, _) in &task.params {
+            for param_name in task.params.keys() {
                 if let Some(value) = matches.get_one::<String>(param_name) {
                     task.values.insert(param_name.clone(), value.clone());
                 }
@@ -560,7 +560,7 @@ mod tests {
             prog: "otto".to_string(),
             cwd: env::current_dir().unwrap(),
             user: env::var("USER").unwrap(),
-            spec: Config { otto: otto, tasks: HashMap::new() },
+            spec: Config { otto, tasks: HashMap::new() },
             args,
             pargs,
         };
