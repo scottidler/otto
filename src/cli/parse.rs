@@ -452,7 +452,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_parser_new() {
         let mut args = vec![];
@@ -546,4 +545,39 @@ mod tests {
         assert_eq!(result.1.len(), tasks.len(), "comparing tasks length");
         assert_eq!(result.1[0].name, "build".to_string(), "comparing task name");
     }
+
+    use super::{Parser, Value};
+
+    #[test]
+    fn test_parser_parse() {
+        let mut args: Vec<String> = vec![
+            "--ottofile",
+            "examples/ex1",
+            "hello",
+            "-g",
+            "howdy",
+            "world",
+            "-n",
+            "earth",
+        ].iter().map(std::string::ToString::to_string).collect();
+
+        let mut parser = Parser::new(&mut args).expect("Failed to create parser");
+        let (otto, tasks) = parser.parse().expect("Failed to parse");
+
+        // Add assertions here to verify the parsing was correct
+        // For example, check that the 'hello' task has a '-g' param with value 'howdy'
+        let hello_task = tasks.iter().find(|task| task.name == "hello")
+            .expect("Task 'hello' not found");
+        let hello_param = hello_task.params.get(&"-g|--greeting".to_string())
+            .expect("Param '-g|--greeting' not found in 'hello' task");
+        assert_eq!(hello_param.value, Value::Item("howdy".to_string()));
+
+        // And check that the 'world' task has a '-n' param with value 'earth'
+        let world_task = tasks.iter().find(|task| task.name == "world")
+            .expect("Task 'world' not found");
+        let world_param = world_task.params.get(&"-n|--name".to_string())
+            .expect("Param '-n|--name' not found in 'world' task");
+        assert_eq!(world_param.value, Value::Item("earth".to_string()));
+    }
+
 }
