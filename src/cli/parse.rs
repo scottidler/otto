@@ -485,6 +485,7 @@ impl Parser {
         Ok(tasks)
     }
 
+/*
     fn parse_and_update_task_fields(tasks: &mut HashMap<String, Task>, args: &[Vec<String>]) -> Result<()> {
         // Iterate over each task command-line arguments
         for task_args in args {
@@ -510,6 +511,7 @@ impl Parser {
 
         Ok(())
     }
+*/
 
 }
 
@@ -518,6 +520,46 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[test]
+    fn test_indices() {
+        let args = vec![
+            "arg1".to_string(),
+            "task1".to_string(),
+            "arg2".to_string(),
+            "task2".to_string(),
+            "arg3".to_string(),
+        ];
+        let task_names = &["task1", "task2"];
+        let expected = vec![0, 1, 3];
+        assert_eq!(indices(args, task_names), expected);
+    }
+
+    #[test]
+    fn test_partitions() {
+        let args = vec![
+            "arg1".to_string(),
+            "task1".to_string(),
+            "arg2".to_string(),
+            "task2".to_string(),
+            "arg3".to_string(),
+        ];
+        let task_names = vec!["task1", "task2"];
+        assert_eq!(
+            partitions(&args, &task_names),
+            vec![
+                vec!["arg1"],
+                vec!["task1", "arg2"],
+                vec!["task2", "arg3"]
+            ]
+        );
+    }
+
+
+    #[test]
+    fn test_parser_new() {
+        assert!(Parser::new().is_ok());
+    }
+
     fn generate_test_otto() -> Otto {
         Otto {
             verbosity: "1".to_string(),
@@ -525,7 +567,6 @@ mod tests {
             about: "A task runner".to_string(),
             api: "http://localhost:8000".to_string(),
             jobs: "4".to_string(),
-            //tasks: vec!["build".to_string(), "test".to_string()],
             tasks: vec!["build".to_string()],
         }
     }
@@ -539,6 +580,24 @@ mod tests {
             after: vec![],
             action: "echo 'building'".to_string(),
             values: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_handle_no_input_no_ottofile() {
+        let parser = Parser::new().unwrap();
+
+        // Rename or delete Ottofile in current directory if it exists
+        if Path::new("Ottofile").exists() {
+            fs::rename("Ottofile", "Ottofile.bak").unwrap();
+        }
+
+        let result = parser.handle_no_input();
+        assert!(result.is_err(), "Expected error when no Ottofile is present");
+
+        // Restore Ottofile
+        if Path::new("Ottofile.bak").exists() {
+            fs::rename("Ottofile.bak", "Ottofile").unwrap();
         }
     }
 
