@@ -1,13 +1,13 @@
 #![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
 use eyre::Result;
-use otto::cli::parse2::Parser2;
+use otto::cli::parse2::Parser;
 use otto::cli::error::SilentError;
 use std::str;
 use std::process;
 
 fn main() {
-    let mut parser = match Parser2::new() {
+    let mut parser = match Parser::new() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error initializing parser: {e}");
