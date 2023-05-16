@@ -1,32 +1,18 @@
-#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+//#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
-use clap::{arg, Arg, ArgMatches, Command};
+use clap::{Arg, Command};
 use eyre::{eyre, Result};
-use thiserror::Error;
 
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::Debug;
 use std::fs;
-use std::fs::metadata;
-use std::marker::PhantomData;
-use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::unimplemented;
-
-use array_tool::vec::Intersect;
 use expanduser::expanduser;
 
-use crate::cfg::load::Loader;
-use crate::cfg::spec::{Otto, Param, ParamType, Config, Task, Tasks, Value};
-use crate::cli::error::{OttoParseError, OttofileError, SilentError};
-
-#[macro_use]
-use super::macros;
-use std::error;
+use crate::cfg::spec::{Otto, Param, Config, Task, Tasks, Value};
+use crate::cli::error::SilentError;
 
 const OTTOFILES: &[&str] = &[
     "otto.yml",
@@ -139,23 +125,22 @@ fn partitions(args: &Vec<String>, task_names: &[&str]) -> Vec<Vec<String>> {
 }
 
 impl Parser {
-    pub fn new() -> Result<Self> {
+    pub fn new(args: &mut Vec<String>) -> Result<Self> {
         let prog = std::env::current_exe()?
             .file_name()
             .and_then(OsStr::to_str)
             .map_or_else(|| "otto".to_string(), std::string::ToString::to_string);
         let cwd = env::current_dir()?;
         let user = env::var("USER")?;
-        let spec = Self::load_spec()?;
+        let spec = Self::load_spec(args)?;
         let task_names: Vec<&str> = spec.tasks.keys().map(std::string::String::as_str).collect();
-        let args = std::env::args().collect::<Vec<String>>();
         let pargs = partitions(&args, &task_names);
         Ok(Self {
             prog,
             cwd,
             user,
             spec,
-            args,
+            args: args.to_owned(),
             pargs,
         })
     }
@@ -186,24 +171,8 @@ impl Parser {
         Ok(Some(path))
     }
 
-    fn get_ottofile_args() -> Result<(Option<PathBuf>, Vec<String>)> {
-        let mut args: Vec<String> = env::args().collect();
-        let index = args.iter().position(|x| x == "--ottofile");
-        let value = index.map_or_else(
-            || env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
-            |index| {
-                let value = args[index + 1].clone();
-                args.remove(index);
-                args.remove(index);
-                value
-            },
-        );
-        let ottofile = Self::divine_ottofile(value)?;
-        Ok((ottofile, args))
-    }
-
-    fn load_spec() -> Result<Config> {
-        let mut args: Vec<String> = env::args().collect();
+    fn load_spec(args: &mut Vec<String>) -> Result<Config> {
+        //let mut args: Vec<String> = env::args().collect();
         let index = args.iter().position(|x| x == "--ottofile");
         let value = index.map_or_else(
             || env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
@@ -312,7 +281,7 @@ impl Parser {
     pub fn parse(&mut self) -> Result<(Otto, Vec<Task>)> {
         // Create clap commands for 'otto' and tasks
         let otto_command = Self::otto_to_command(&self.spec.otto, &self.spec.tasks);
-        let task_commands: Vec<Command> = self.spec.tasks.values().map(Self::task_to_command).collect();
+        //let task_commands: Vec<Command> = self.spec.tasks.values().map(Self::task_to_command).collect();
 
         // Parse 'otto' command and update Otto fields
         let mut otto = self.parse_otto_command(otto_command, &self.pargs[0])?;
@@ -407,19 +376,6 @@ impl Parser {
 
         let mut otto = self.spec.otto.clone();
 
-/*
-        if matches.contains_id("name") {
-            if let Some(name) = matches.get_one::<String>("name") {
-                otto.name = name.to_string();
-            }
-        }
-
-        if matches.contains_id("about") {
-            if let Some(about) = matches.get_one::<String>("about") {
-                otto.about = about.to_string();
-            }
-        }
-*/
         if matches.contains_id("api") {
             if let Some(api) = matches.get_one::<String>("api") {
                 otto.api = api.to_string();
@@ -455,64 +411,6 @@ impl Parser {
 
         Ok(otto)
     }
-
-
-    fn parse_task_commands(&self, task_commands: &[Command], args: &[Vec<String>]) -> Result<HashMap<String, Task>> {
-        let mut tasks: HashMap<String, Task> = HashMap::new();
-
-        for (task_command, task_args) in task_commands.iter().zip(args) {
-            let matches = task_command.clone().get_matches_from(task_args);
-
-            // Get the task name
-            let task_name = task_command.get_name().to_string();
-
-            // Get the corresponding task from the Ottofile
-            let mut task = self.spec.tasks.get(&task_name)
-                .ok_or_else(|| eyre!("Task {} not found in the Ottofile", &task_name))?
-                .clone();
-
-            // Update the task's values with the parsed parameters
-            for param_name in task.params.keys() {
-                if let Some(value) = matches.get_one::<String>(param_name) {
-                    task.values.insert(param_name.clone(), value.clone());
-                }
-            }
-
-            // Insert the updated task into the tasks HashMap
-            tasks.insert(task_name, task);
-        }
-
-        Ok(tasks)
-    }
-
-/*
-    fn parse_and_update_task_fields(tasks: &mut HashMap<String, Task>, args: &[Vec<String>]) -> Result<()> {
-        // Iterate over each task command-line arguments
-        for task_args in args {
-            // The first argument should be the task name
-            let task_name = &task_args[0];
-
-            // Get the corresponding task from the tasks HashMap
-            if let Some(task) = tasks.get_mut(task_name) {
-                // Update the task's values with the passed parameters
-                for (idx, value) in task_args[1..].iter().enumerate() {
-                    // We'll assume that the task parameters are in the same order as in the Task's params HashMap
-                    if let Some((param_name, _)) = task.params.iter().nth(idx) {
-                        // Insert the new value into the task's values HashMap
-                        task.values.insert(param_name.clone(), value.clone());
-                    } else {
-                        return Err(eyre!("Too many arguments for task {}", task_name));
-                    }
-                }
-            } else {
-                return Err(eyre!("Task {} not found in the Ottofile", task_name));
-            }
-        }
-
-        Ok(())
-    }
-*/
-
 }
 
 #[cfg(test)]
@@ -557,7 +455,8 @@ mod tests {
 
     #[test]
     fn test_parser_new() {
-        assert!(Parser::new().is_ok());
+        let mut args = vec![];
+        assert!(Parser::new(&mut args).is_ok());
     }
 
     fn generate_test_otto() -> Otto {
@@ -585,7 +484,8 @@ mod tests {
 
     #[test]
     fn test_handle_no_input_no_ottofile() {
-        let parser = Parser::new().unwrap();
+        let mut args = vec![];
+        let parser = Parser::new(&mut args).unwrap();
 
         // Rename or delete Ottofile in current directory if it exists
         if Path::new("Ottofile").exists() {
@@ -602,15 +502,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parser2_new() {
-        let p = Parser::new().unwrap();
-        assert!(!p.prog.is_empty());
-    }
-
-    #[test]
     fn test_parse_no_args() {
         let otto = generate_test_otto();
-        let tasks = vec![generate_test_task()];
 
         let args = vec!["otto".to_string()];
         let pargs = partitions(&args, &["build"]);
