@@ -390,7 +390,7 @@ impl Parser {
     fn handle_no_input(&self) -> Result<(Otto, Vec<Task>)> {
         // Create a default otto command with no tasks
         let mut otto_command = Self::otto_to_command(&self.spec.otto, &HashMap::new());
-        otto_command.print_help().unwrap();
+        otto_command.print_help()?;
         Err(SilentError.into())
     }
 
@@ -485,7 +485,7 @@ impl Parser {
         Ok(tasks)
     }
 
-    fn parse_and_update_task_fields(&self, tasks: &mut HashMap<String, Task>, args: &[Vec<String>]) -> Result<()> {
+    fn parse_and_update_task_fields(tasks: &mut HashMap<String, Task>, args: &[Vec<String>]) -> Result<()> {
         // Iterate over each task command-line arguments
         for task_args in args {
             // The first argument should be the task name
