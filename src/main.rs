@@ -1,7 +1,7 @@
 #![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
 use eyre::Result;
-use otto::cli::parse2::Parser;
+use otto::cli::parse::Parser;
 use otto::cli::error::SilentError;
 use std::str;
 use std::process;
