@@ -241,7 +241,7 @@ impl Parser {
                     .default_values(&otto.tasks)
                     .help("comma separated list of tasks to run"),
             );
-        for (name, task) in tasks {
+        for task in tasks.values() {
             command = command.subcommand(Self::task_to_command(task));
         }
         command
@@ -348,7 +348,7 @@ impl Parser {
         let matches = task_command.get_matches_from(args);
 
         // Update the task fields with the parsed values
-        for (name, param) in &mut task.params {
+        for param in task.params.values_mut() {
             if let Some(mut value) = matches.get_many::<String>(&param.name) {
                 let value_str = value.next().cloned().unwrap_or_default();
                 param.value = Value::Item(value_str);
