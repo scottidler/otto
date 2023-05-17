@@ -1,3 +1,4 @@
+/*
 #![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
 use eyre::Result;
@@ -27,3 +28,5 @@ impl Loader {
         Ok(spec)
     }
 }
+
+*/

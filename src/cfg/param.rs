@@ -10,193 +10,7 @@ use std::path::PathBuf;
 use std::vec::Vec;
 
 use crate::cfg::error::ConfigError;
-use crate::cfg::otto::{default_otto, Otto};
-use crate::cfg::task::{deserialize_task_map, Task, Tasks};
-use crate::cfg::param::{Param, Params};
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct Config {
-    #[serde(default = "default_otto")]
-    pub otto: Otto,
-
-    #[serde(default, deserialize_with = "deserialize_task_map")]
-    pub tasks: Tasks,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            otto: default_otto(),
-            tasks: Tasks::new(),
-        }
-    }
-}
-
-/*
-type Values = HashMap<String, String>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Action {
-    Script(String),
-    File(PathBuf),
-    //URL(Url),
-}
-
-fn default_name() -> String {
-    "otto".to_string()
-}
-
-fn default_about() -> String {
-    //"a tool for managing a DAG of tasks".to_string()
-    "A task runner".to_string()
-}
-
-fn default_verbosity() -> String {
-    "1".to_string()
-}
-
-fn default_api() -> String {
-    "1".to_string()
-}
-
-fn default_jobs() -> String {
-    num_cpus::get().to_string()
-}
-
-fn default_tasks() -> Vec<String> {
-    vec!["*".to_string()]
-}
-
-fn default_otto() -> Otto {
-    Otto {
-        name: default_name(),
-        about: default_about(),
-        api: default_api(),
-        verbosity: default_verbosity(),
-        jobs: default_jobs(),
-        tasks: default_tasks(),
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub struct Otto {
-    #[serde(default = "default_name")]
-    pub name: String,
-
-    #[serde(default = "default_about")]
-    pub about: String,
-
-    #[serde(default = "default_api")]
-    pub api: String,
-
-    #[serde(default = "default_verbosity")]
-    pub verbosity: String,
-
-    #[serde(default = "default_jobs")]
-    pub jobs: String,
-
-    #[serde(default = "default_tasks")]
-    pub tasks: Vec<String>,
-}
-
-impl Default for Otto {
-    fn default() -> Self {
-        default_otto()
-    }
-}
-
-
-
-pub type Tasks = HashMap<String, Task>;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-pub struct Task {
-    #[serde(skip_deserializing)]
-    pub name: String,
-
-    #[serde(default)]
-    pub help: Option<String>,
-
-    #[serde(default)]
-    pub after: Vec<String>,
-
-    #[serde(default)]
-    pub before: Vec<String>,
-
-    #[serde(default, deserialize_with = "deserialize_param_map")]
-    pub params: Params,
-
-    #[serde(default)]
-    pub action: String,
-
-    #[serde(skip_deserializing)]
-    pub values: Values,
-}
-
-impl Task {
-    #[must_use]
-    pub fn new(
-        name: String,
-        help: Option<String>,
-        after: Vec<String>,
-        before: Vec<String>,
-        params: Params,
-        action: String,
-        values: Values,
-    ) -> Self {
-        Self {
-            name,
-            help,
-            after,
-            before,
-            params,
-            action,
-            values,
-        }
-    }
-}
-
-fn namify(name: &str) -> String {
-    name.split('|')
-        .find(|&part| part.starts_with("--"))
-        .map(|s| s.trim_start_matches("--").to_string())
-        .unwrap_or_else(|| name.split('|').next().unwrap().trim_start_matches('-').to_string())
-}
-
-#[test]
-fn test_namify() {
-    assert_eq!(namify("-g|--greeting"), "greeting".to_string());
-    assert_eq!(namify("-k"), "k".to_string());
-    assert_eq!(namify("--name"), "name".to_string());
-}
-
-pub fn deserialize_task_map<'de, D>(deserializer: D) -> Result<Tasks, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct TaskMap;
-
-    impl<'de> Visitor<'de> for TaskMap {
-        type Value = Tasks;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a map of name to Task")
-        }
-
-        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
-        where
-            M: MapAccess<'de>,
-        {
-            let mut tasks = Tasks::new();
-            while let Some((name, mut task)) = map.next_entry::<String, Task>()? {
-                task.name = namify(&name);
-                tasks.insert(name.clone(), task);
-            }
-            Ok(tasks)
-        }
-    }
-    deserializer.deserialize_map(TaskMap)
-}
 
 pub type Params = HashMap<String, Param>;
 
@@ -251,6 +65,8 @@ impl Default for ParamType {
         Self::OPT
     }
 }
+
+pub type Values = HashMap<String, Value>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
@@ -437,5 +253,3 @@ where
     }
     deserializer.deserialize_map(ParamMap)
 }
-
-*/
