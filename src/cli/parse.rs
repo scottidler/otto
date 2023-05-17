@@ -11,10 +11,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use expanduser::expanduser;
 
-//use crate::cfg::spec::{Otto, Param, Config, Task, Tasks, Value};
+//use crate::cfg::config::{Otto, Param, Config, Task, Tasks, Value};
 
 
-use crate::cfg::spec::Config;
+use crate::cfg::config::Config;
 use crate::cfg::otto::Otto;
 use crate::cfg::task::{Task, Tasks};
 use crate::cfg::param::{Param, Value};
@@ -112,7 +112,7 @@ pub struct Parser {
     prog: String,
     cwd: PathBuf,
     user: String,
-    spec: Config,
+    config: Config,
     args: Vec<String>,
     pargs: Vec<Vec<String>>,
 }
@@ -146,14 +146,14 @@ impl Parser {
             .map_or_else(|| "otto".to_string(), std::string::ToString::to_string);
         let cwd = env::current_dir()?;
         let user = env::var("USER")?;
-        let spec = Self::load_spec(&mut args)?;
-        let task_names: Vec<&str> = spec.tasks.keys().map(std::string::String::as_str).collect();
+        let config = Self::load_config(&mut args)?;
+        let task_names: Vec<&str> = config.tasks.keys().map(std::string::String::as_str).collect();
         let pargs = partitions(&args, &task_names);
         Ok(Self {
             prog,
             cwd,
             user,
-            spec,
+            config,
             args,
             pargs,
         })
@@ -185,7 +185,7 @@ impl Parser {
         Ok(Some(path))
     }
 
-    fn load_spec(args: &mut Vec<String>) -> Result<Config> {
+    fn load_config(args: &mut Vec<String>) -> Result<Config> {
         //let mut args: Vec<String> = env::args().collect();
         let index = args.iter().position(|x| x == "--ottofile");
         let value = index.map_or_else(
@@ -199,8 +199,8 @@ impl Parser {
         );
         if let Some(ottofile) = Self::divine_ottofile(value)? {
             let content = fs::read_to_string(ottofile)?;
-            let spec: Config = serde_yaml::from_str(&content)?;
-            Ok(spec)
+            let config: Config = serde_yaml::from_str(&content)?;
+            Ok(config)
         } else {
             Ok(Config::default())
         }
@@ -294,8 +294,8 @@ impl Parser {
 
     pub fn parse(&mut self) -> Result<(Otto, Vec<Task>)> {
         // Create clap commands for 'otto' and tasks
-        let otto_command = Self::otto_to_command(&self.spec.otto, &self.spec.tasks);
-        //let task_commands: Vec<Command> = self.spec.tasks.values().map(Self::task_to_command).collect();
+        let otto_command = Self::otto_to_command(&self.config.otto, &self.config.tasks);
+        //let task_commands: Vec<Command> = self.config.tasks.values().map(Self::task_to_command).collect();
 
         // Parse 'otto' command and update Otto fields
         let mut otto = self.parse_otto_command(otto_command, &self.pargs[0])?;
@@ -303,22 +303,22 @@ impl Parser {
         // Process the tasks with their default values and command line parameters
         let tasks: Vec<Task> = self.process_tasks()?;
 
-        let mut specified_tasks = Vec::new();
+        let mut configified_tasks = Vec::new();
 
         // Iterate through the command line arguments partitions
         for partition in &self.pargs[1..] {
             let task_name = &partition[0];
             if let Some(task) = tasks.iter().find(|t| t.name == *task_name) {
-                specified_tasks.push(task.clone());
+                configified_tasks.push(task.clone());
             }
         }
 
-        // If no tasks are specified in the command line arguments, use Otto's default tasks
-        if specified_tasks.is_empty() {
+        // If no tasks are configified in the command line arguments, use Otto's default tasks
+        if configified_tasks.is_empty() {
             otto.tasks = tasks.iter().map(|task| task.name.clone()).collect();
         } else {
-            // Update Otto's tasks with the tasks specified in the command line arguments
-            otto.tasks = specified_tasks.iter().map(|task| task.name.clone()).collect();
+            // Update Otto's tasks with the tasks configified in the command line arguments
+            otto.tasks = configified_tasks.iter().map(|task| task.name.clone()).collect();
         }
 
         // Return all tasks from the Ottofile, and the updated Otto struct
@@ -330,7 +330,7 @@ impl Parser {
         let mut tasks = vec![];
 
         // Iterate through the tasks loaded from the Ottofile
-        for task in self.spec.tasks.values() {
+        for task in self.config.tasks.values() {
             // Create a new task with the same fields as the original task
             let mut processed_task = task.clone();
 
@@ -373,7 +373,7 @@ impl Parser {
 
     fn handle_no_input(&self) -> Result<(Otto, Vec<Task>)> {
         // Create a default otto command with no tasks
-        let mut otto_command = Self::otto_to_command(&self.spec.otto, &HashMap::new());
+        let mut otto_command = Self::otto_to_command(&self.config.otto, &HashMap::new());
         otto_command.print_help()?;
         Err(SilentError.into())
     }
@@ -381,15 +381,15 @@ impl Parser {
     fn parse_otto_command(&self, otto_command: Command, args: &[String]) -> Result<Otto> {
         // Parse 'otto' command using args and update the Otto fields
 
-        // if spec.tasks is empty, then show default help for 'otto' command and exit
-        if self.spec.tasks.is_empty() {
+        // if config.tasks is empty, then show default help for 'otto' command and exit
+        if self.config.tasks.is_empty() {
             self.handle_no_input()?;
         }
 
         // Parse the arguments using clap's get_matches_from method
         let matches = otto_command.get_matches_from(args);
 
-        let mut otto = self.spec.otto.clone();
+        let mut otto = self.config.otto.clone();
 
         if matches.contains_id("api") {
             if let Some(api) = matches.get_one::<String>("api") {
@@ -419,7 +419,7 @@ impl Parser {
         // tasks will be ["*"]
         // so this logic is bunk at the moment
         if args.len() == 1 && otto.tasks.is_empty() {
-            return Err(eyre!("No tasks specified"));
+            return Err(eyre!("No tasks configified"));
         }
         println!("args: {args:?}");
         println!("otto.tasks: {:?}", otto.tasks);
@@ -526,7 +526,7 @@ mod tests {
             prog: "otto".to_string(),
             cwd: env::current_dir().unwrap(),
             user: env::var("USER").unwrap(),
-            spec: Config { otto, tasks: HashMap::new() },
+            config: Config { otto, tasks: HashMap::new() },
             args,
             pargs,
         };
@@ -550,7 +550,7 @@ mod tests {
             prog: "otto".to_string(),
             cwd: env::current_dir().unwrap(),
             user: env::var("USER").unwrap(),
-            spec: Config { otto: otto.clone(), tasks: tasks.clone() },
+            config: Config { otto: otto.clone(), tasks: tasks.clone() },
             args,
             pargs,
         };
