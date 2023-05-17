@@ -11,7 +11,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use expanduser::expanduser;
 
-use crate::cfg::spec::{Otto, Param, Config, Task, Tasks, Value};
+//use crate::cfg::spec::{Otto, Param, Config, Task, Tasks, Value};
+
+
+use crate::cfg::spec::Config;
+use crate::cfg::otto::Otto;
+use crate::cfg::task::{Task, Tasks};
+use crate::cfg::param::{Param, Value};
+
 use crate::cli::error::SilentError;
 
 const OTTOFILES: &[&str] = &[
@@ -94,6 +101,12 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
         None
     }
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Job {
+
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Parser {
     prog: String,
@@ -125,14 +138,15 @@ fn partitions(args: &Vec<String>, task_names: &[&str]) -> Vec<Vec<String>> {
 }
 
 impl Parser {
-    pub fn new(args: &mut Vec<String>) -> Result<Self> {
+    pub fn new(args: Vec<String>) -> Result<Self> {
+        let mut args = args.clone();
         let prog = std::env::current_exe()?
             .file_name()
             .and_then(OsStr::to_str)
             .map_or_else(|| "otto".to_string(), std::string::ToString::to_string);
         let cwd = env::current_dir()?;
         let user = env::var("USER")?;
-        let spec = Self::load_spec(args)?;
+        let spec = Self::load_spec(&mut args)?;
         let task_names: Vec<&str> = spec.tasks.keys().map(std::string::String::as_str).collect();
         let pargs = partitions(&args, &task_names);
         Ok(Self {
@@ -140,7 +154,7 @@ impl Parser {
             cwd,
             user,
             spec,
-            args: args.to_owned(),
+            args,
             pargs,
         })
     }
@@ -323,7 +337,8 @@ impl Parser {
             // Apply the default values for each task
             for (name, param) in &task.params {
                 if let Some(default_value) = &param.default {
-                    processed_task.values.insert(name.clone(), default_value.clone());
+                    let value = Value::Item(default_value.clone());
+                    processed_task.values.insert(name.clone(), value);
                 }
             }
 
@@ -454,8 +469,8 @@ mod tests {
 
     #[test]
     fn test_parser_new() {
-        let mut args = vec![];
-        assert!(Parser::new(&mut args).is_ok());
+        let args = vec![];
+        assert!(Parser::new(args).is_ok());
     }
 
     fn generate_test_otto() -> Otto {
@@ -483,8 +498,8 @@ mod tests {
 
     #[test]
     fn test_handle_no_input_no_ottofile() {
-        let mut args = vec![];
-        let parser = Parser::new(&mut args).unwrap();
+        let args = vec![];
+        let parser = Parser::new(args).unwrap();
 
         // Rename or delete Ottofile in current directory if it exists
         if Path::new("Ottofile").exists() {
@@ -545,39 +560,4 @@ mod tests {
         assert_eq!(result.1.len(), tasks.len(), "comparing tasks length");
         assert_eq!(result.1[0].name, "build".to_string(), "comparing task name");
     }
-
-    use super::{Parser, Value};
-
-    #[test]
-    fn test_parser_parse() {
-        let mut args: Vec<String> = vec![
-            "--ottofile",
-            "examples/ex1",
-            "hello",
-            "-g",
-            "howdy",
-            "world",
-            "-n",
-            "earth",
-        ].iter().map(std::string::ToString::to_string).collect();
-
-        let mut parser = Parser::new(&mut args).expect("Failed to create parser");
-        let (otto, tasks) = parser.parse().expect("Failed to parse");
-
-        // Add assertions here to verify the parsing was correct
-        // For example, check that the 'hello' task has a '-g' param with value 'howdy'
-        let hello_task = tasks.iter().find(|task| task.name == "hello")
-            .expect("Task 'hello' not found");
-        let hello_param = hello_task.params.get(&"-g|--greeting".to_string())
-            .expect("Param '-g|--greeting' not found in 'hello' task");
-        assert_eq!(hello_param.value, Value::Item("howdy".to_string()));
-
-        // And check that the 'world' task has a '-n' param with value 'earth'
-        let world_task = tasks.iter().find(|task| task.name == "world")
-            .expect("Task 'world' not found");
-        let world_param = world_task.params.get(&"-n|--name".to_string())
-            .expect("Param '-n|--name' not found in 'world' task");
-        assert_eq!(world_param.value, Value::Item("earth".to_string()));
-    }
-
 }

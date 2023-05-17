@@ -5,8 +5,8 @@ use otto::cli::error::SilentError;
 use std::process;
 
 fn main() {
-    let mut args: Vec<String> = std::env::args().collect();
-    let mut parser = match Parser::new(&mut args) {
+    let args: Vec<String> = std::env::args().collect();
+    let mut parser = match Parser::new(args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error initializing parser: {e}");
