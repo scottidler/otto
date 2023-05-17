@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use std::vec::Vec;
 
 use crate::cfg::error::ConfigError;
-use crate::cfg::otto::{default_otto, Otto};
-use crate::cfg::task::{deserialize_task_map, Task, Tasks};
-use crate::cfg::param::{Param, Params};
+pub use crate::cfg::otto::{default_otto, Otto};
+pub use crate::cfg::task::{deserialize_task_map, Task, Tasks};
+pub use crate::cfg::param::{Param, Params, Value};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Config {

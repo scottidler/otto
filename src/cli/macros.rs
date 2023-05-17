@@ -141,30 +141,13 @@ macro_rules! str_to_usize {
         )
     }};
 }
-/*
-macro_rules! str_to_setting {
-    ($app:ident, $value:ident, $method:ident, $s:ident, $t:literal, $n:expr) => {{
-        if let Some(v) = $value.as_vec() {
-            for ys in v {
-                if let Some(s) = ys.as_str() {
-                    $app = $app.$method(s.parse::<$s>().unwrap_or_else(|_| {
-                        panic!("Unknown {} '{}' found in YAML file for {}", $t, s, $n)
-                    }));
-                } else {
-                    panic!(
-                        "Failed to convert YAML {:?} value to an array of strings",
-                        $value
-                    );
-                }
-            }
-        } else if let Some(v) = $value.as_str() {
-            $app = $app.$method(v
-                .parse::<$s>()
-                .unwrap_or_else(|_| panic!("Unknown {} '{}' found in YAML file for {}", $t, v, $n)))
-        } else {
-            panic!("Failed to convert YAML {:?} value to a string", $value);
-        }
-        $app
-    }};
+
+macro_rules! vec_of_strings {
+    ($($x:expr),* $(,)?) => {{
+        let mut temp_vec = Vec::new();
+        $(
+            temp_vec.push(String::from($x));
+        )*
+        temp_vec
+    }}
 }
-*/
