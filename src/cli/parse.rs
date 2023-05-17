@@ -1,4 +1,4 @@
-//#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
 use clap::{Arg, Command};
 use eyre::{eyre, Result};
@@ -11,14 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use expanduser::expanduser;
 
-//use crate::cfg::config::{Otto, Param, Config, Task, Tasks, Value};
-
-
-use crate::cfg::config::Config;
-use crate::cfg::otto::Otto;
-use crate::cfg::task::{Task, Tasks};
-use crate::cfg::param::{Param, Value};
-
+use crate::cfg::config::{Config, Otto, Param, Task, Tasks, Value};
 use crate::cli::error::SilentError;
 
 const OTTOFILES: &[&str] = &[
@@ -431,16 +424,17 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::macros::*;
     use std::collections::HashMap;
 
     #[test]
     fn test_indices() {
-        let args = vec![
-            "arg1".to_string(),
-            "task1".to_string(),
-            "arg2".to_string(),
-            "task2".to_string(),
-            "arg3".to_string(),
+        let args = vec_of_strings![
+            "arg1",
+            "task1",
+            "arg2",
+            "task2",
+            "arg3",
         ];
         let task_names = &["task1", "task2"];
         let expected = vec![0, 1, 3];
@@ -449,12 +443,12 @@ mod tests {
 
     #[test]
     fn test_partitions() {
-        let args = vec![
-            "arg1".to_string(),
-            "task1".to_string(),
-            "arg2".to_string(),
-            "task2".to_string(),
-            "arg3".to_string(),
+        let args = vec_of_strings![
+            "arg1",
+            "task1",
+            "arg2",
+            "task2",
+            "arg3",
         ];
         let task_names = vec!["task1", "task2"];
         assert_eq!(

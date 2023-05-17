@@ -1,10 +1,12 @@
-//#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+
+use eyre::Result;
 
 use otto::cli::parse::Parser;
 use otto::cli::error::SilentError;
 use std::process;
 
-fn main() {
+fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mut parser = match Parser::new(args) {
         Ok(p) => p,
@@ -14,6 +16,7 @@ fn main() {
         }
     };
 
+/*
     match parser.parse() {
         Ok((otto, tasks)) => {
             println!("otto={otto:#?}");
@@ -30,4 +33,9 @@ fn main() {
             }
         }
     }
+*/
+    let (otto, tasks) = parser.parse()?;
+
+
+    Ok(())
 }
