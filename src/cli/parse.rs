@@ -179,7 +179,6 @@ impl Parser {
     }
 
     fn load_config(args: &mut Vec<String>) -> Result<Config> {
-        //let mut args: Vec<String> = env::args().collect();
         let index = args.iter().position(|x| x == "--ottofile");
         let value = index.map_or_else(
             || env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
@@ -364,11 +363,10 @@ impl Parser {
         }
     }
 
-    fn handle_no_input(&self) -> Result<(Otto, Vec<Task>)> {
+    fn handle_no_input(&self) {
         // Create a default otto command with no tasks
         let mut otto_command = Self::otto_to_command(&self.config.otto, &HashMap::new());
-        otto_command.print_help()?;
-        Err(SilentError.into())
+        otto_command.get_matches_from(&["otto", "--help"]);
     }
 
     fn parse_otto_command(&self, otto_command: Command, args: &[String]) -> Result<Otto> {
@@ -376,7 +374,7 @@ impl Parser {
 
         // if config.tasks is empty, then show default help for 'otto' command and exit
         if self.config.tasks.is_empty() {
-            self.handle_no_input()?;
+            self.handle_no_input();
         }
 
         // Parse the arguments using clap's get_matches_from method
@@ -500,14 +498,16 @@ mod tests {
             fs::rename("Ottofile", "Ottofile.bak").unwrap();
         }
 
-        let result = parser.handle_no_input();
-        assert!(result.is_err(), "Expected error when no Ottofile is present");
+        // Call handle_no_input and check that it doesn't panic
+        let result = std::panic::catch_unwind(|| parser.handle_no_input());
+        assert!(result.is_ok(), "handle_no_input panicked when no Ottofile was present");
 
         // Restore Ottofile
         if Path::new("Ottofile.bak").exists() {
             fs::rename("Ottofile.bak", "Ottofile").unwrap();
         }
     }
+
 
     #[test]
     fn test_parse_no_args() {
