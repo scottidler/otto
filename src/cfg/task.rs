@@ -33,9 +33,6 @@ pub struct Task {
 
     #[serde(default)]
     pub action: String,
-
-    #[serde(skip_deserializing)]
-    pub values: Values,
 }
 
 impl Task {
@@ -47,7 +44,6 @@ impl Task {
         before: Vec<String>,
         params: Params,
         action: String,
-        values: Values,
     ) -> Self {
         Self {
             name,
@@ -56,7 +52,6 @@ impl Task {
             before,
             params,
             action,
-            values,
         }
     }
 }

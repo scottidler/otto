@@ -16,25 +16,10 @@ fn main() -> Result<()> {
         }
     };
 
-/*
-    match parser.parse() {
-        Ok((otto, tasks)) => {
-            println!("otto={otto:#?}");
-            for task in tasks {
-                println!("task={task:#?}");
-            }
-        }
-        Err(e) => {
-            if e.downcast_ref::<SilentError>().is_some() {
-                process::exit(1);
-            } else {
-                eprintln!("Error parsing: {e}");
-                process::exit(1);
-            }
-        }
-    }
-*/
     let (otto, tasks) = parser.parse()?;
+
+    println!("otto: {:?}", otto);
+    println!("tasks: {:?}", tasks);
 
 
     Ok(())
