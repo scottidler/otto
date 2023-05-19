@@ -2,7 +2,7 @@
 
 use clap::{Arg, Command};
 use eyre::{eyre, Result};
-
+use daggy::{Dag, NodeIndex};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
@@ -300,7 +300,8 @@ impl Parser {
         arg
     }
 
-    pub fn parse(&mut self) -> Result<(Otto, Vec<Job>)> {
+    //pub fn parse(&mut self) -> Result<(Otto, Vec<Job>)> {
+    pub fn parse(&mut self) -> Result<(Otto, Dag<Job, (), u32>)> {
         // Create clap commands for 'otto' and jobs
         let otto_command = Self::otto_to_command(&self.config.otto, &self.config.tasks);
         //let task_commands: Vec<Command> = self.config.jobs.values().map(Self::task_to_command).collect();
@@ -309,33 +310,27 @@ impl Parser {
         let mut otto = self.parse_otto_command(otto_command, &self.pargs[0])?;
 
         // Process the jobs with their default values and command line parameters
-        let jobs: Vec<Job> = self.process_jobs()?;
+        let jobs = self.process_jobs()?;
 
-        let mut configified_jobs = Vec::new();
+        // collect first item in each parg, skipping the first one
+        let configured_tasks = self
+            .pargs
+            .iter()
+            .skip(1)
+            .map(|p| p[0].clone())
+            .collect::<Vec<String>>();
 
-        // Iterate through the command line arguments partitions
-        for partition in &self.pargs[1..] {
-            let job_name = &partition[0];
-            if let Some(job) = jobs.iter().find(|j| j.name == *job_name) {
-                configified_jobs.push(job.clone());
-            }
+        if !configured_tasks.is_empty() {
+            otto.tasks = configured_tasks;
         }
-
-        // If no jobs are configified in the command line arguments, use Otto's default jobs
-        if configified_jobs.is_empty() {
-            otto.jobs = jobs.iter().map(|job| job.name.clone()).collect();
-        } else {
-            // Update Otto's jobs with the jobs configified in the command line arguments
-            otto.jobs = configified_jobs.iter().map(|job| job.name.clone()).collect();
-        }
-
         // Return all jobs from the Ottofile, and the updated Otto struct
         Ok((otto, jobs))
     }
 
-    fn process_jobs(&self) -> Result<Vec<Job>> {
-        // Initialize an empty jobs map
-        let mut jobs: HashMap<String, Job> = HashMap::new();
+    fn process_jobs(&self) -> Result<Dag<Job, (), u32>> {
+        // Initialize an empty Dag and an index map
+        let mut dag: Dag<Job, (), u32> = Dag::new();
+        let mut indices: HashMap<String, NodeIndex<u32>> = HashMap::new();
 
         // Iterate through the tasks loaded from the Ottofile
         for task in self.config.tasks.values() {
@@ -372,22 +367,24 @@ impl Parser {
                 }
             }
 
-            // Add the processed job to the jobs HashMap
-            jobs.insert(task.name.clone(), job);
+            // Add the processed job to the Dag and index map
+            let index = dag.add_node(job.clone());
+            indices.insert(job.name.clone(), index);
         }
 
         // Iterate over the jobs a second time to handle 'after' dependencies
         for task in self.config.tasks.values() {
             for after_task_name in &task.after {
-                if let Some(after_job) = jobs.get_mut(after_task_name) {
-                    after_job.deps.push(task.name.clone());
-                }
+                let node = indices.get(&task.name).expect("Job not found in indices");
+                let dep_node = indices.get(after_task_name).expect("Dependency not found in indices");
+                dag.add_edge(*dep_node, *node, ()).unwrap();
             }
         }
 
-        // Convert the HashMap to a Vec and return
-        Ok(jobs.values().cloned().collect())
+        // Return the completed Dag
+        Ok(dag)
     }
+
 
 
     fn handle_no_input(&self) {
@@ -585,10 +582,15 @@ mod tests {
         assert_eq!(result.0, otto, "comparing otto struct");
 
         // We expect the same number of jobs as tasks
-        assert_eq!(jobs.len(), tasks.len(), "comparing jobs length");
+        assert_eq!(jobs.node_count(), tasks.len(), "comparing jobs length");
+
+        // Use node_weight to get Job data
+        let first_node_index = NodeIndex::new(0);
+        let first_job = jobs.node_weight(first_node_index).unwrap();
 
         // Assert job name
-        assert_eq!(jobs[0].name, "build".to_string(), "comparing job name");
+        assert_eq!(first_job.name, "build".to_string(), "comparing job name");
     }
+
 
 }

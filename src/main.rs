@@ -21,6 +21,5 @@ fn main() -> Result<()> {
     println!("otto: {:?}", otto);
     println!("tasks: {:?}", tasks);
 
-
     Ok(())
 }
