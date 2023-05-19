@@ -1,0 +1,22 @@
+otto:
+  api: 1
+  jobs: 17
+  task:
+  - bob
+tasks:
+  one:
+    params:
+      -a|--arg:
+        help: arg help
+  two:
+    before:
+    - one
+    after:
+    - three
+    params:
+      -b|--boo:
+        help: boo help
+  three:
+    params:
+      -c|--car:
+        help: car help

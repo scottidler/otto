@@ -95,9 +95,25 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Job {
+    pub name: String,
+    pub deps: Vec<String>,
+    pub envs: HashMap<String, String>,
+    pub values: HashMap<String, Value>,
+    pub action: String,
+}
 
+impl Job {
+    pub fn new(name: String, deps: Vec<String>, envs: HashMap<String, String>, values: HashMap<String, Value>, action: String) -> Self {
+        Self {
+            name,
+            deps,
+            envs,
+            values,
+            action,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -284,84 +300,95 @@ impl Parser {
         arg
     }
 
-    pub fn parse(&mut self) -> Result<(Otto, Vec<Task>)> {
-        // Create clap commands for 'otto' and tasks
+    pub fn parse(&mut self) -> Result<(Otto, Vec<Job>)> {
+        // Create clap commands for 'otto' and jobs
         let otto_command = Self::otto_to_command(&self.config.otto, &self.config.tasks);
-        //let task_commands: Vec<Command> = self.config.tasks.values().map(Self::task_to_command).collect();
+        //let task_commands: Vec<Command> = self.config.jobs.values().map(Self::task_to_command).collect();
 
         // Parse 'otto' command and update Otto fields
         let mut otto = self.parse_otto_command(otto_command, &self.pargs[0])?;
 
-        // Process the tasks with their default values and command line parameters
-        let tasks: Vec<Task> = self.process_tasks()?;
+        // Process the jobs with their default values and command line parameters
+        let jobs: Vec<Job> = self.process_jobs()?;
 
-        let mut configified_tasks = Vec::new();
+        let mut configified_jobs = Vec::new();
 
         // Iterate through the command line arguments partitions
         for partition in &self.pargs[1..] {
-            let task_name = &partition[0];
-            if let Some(task) = tasks.iter().find(|t| t.name == *task_name) {
-                configified_tasks.push(task.clone());
+            let job_name = &partition[0];
+            if let Some(job) = jobs.iter().find(|j| j.name == *job_name) {
+                configified_jobs.push(job.clone());
             }
         }
 
-        // If no tasks are configified in the command line arguments, use Otto's default tasks
-        if configified_tasks.is_empty() {
-            otto.tasks = tasks.iter().map(|task| task.name.clone()).collect();
+        // If no jobs are configified in the command line arguments, use Otto's default jobs
+        if configified_jobs.is_empty() {
+            otto.jobs = jobs.iter().map(|job| job.name.clone()).collect();
         } else {
-            // Update Otto's tasks with the tasks configified in the command line arguments
-            otto.tasks = configified_tasks.iter().map(|task| task.name.clone()).collect();
+            // Update Otto's jobs with the jobs configified in the command line arguments
+            otto.jobs = configified_jobs.iter().map(|job| job.name.clone()).collect();
         }
 
-        // Return all tasks from the Ottofile, and the updated Otto struct
-        Ok((otto, tasks))
+        // Return all jobs from the Ottofile, and the updated Otto struct
+        Ok((otto, jobs))
     }
 
-    fn process_tasks(&self) -> Result<Vec<Task>> {
-        // Initialize an empty tasks vector
-        let mut tasks = vec![];
+    fn process_jobs(&self) -> Result<Vec<Job>> {
+        // Initialize an empty jobs map
+        let mut jobs: HashMap<String, Job> = HashMap::new();
 
         // Iterate through the tasks loaded from the Ottofile
         for task in self.config.tasks.values() {
-            // Create a new task with the same fields as the original task
-            let mut processed_task = task.clone();
+            // Create a new job based on the task
+            let mut job = Job {
+                name: task.name.clone(),
+                deps: task.before.clone(),
+                envs: HashMap::new(),
+                values: HashMap::new(),
+                action: task.action.clone(),
+            };
 
             // Apply the default values for each task
             for (name, param) in &task.params {
                 if let Some(default_value) = &param.default {
                     let value = Value::Item(default_value.clone());
-                    processed_task.values.insert(name.clone(), value);
+                    job.values.insert(name.clone(), value);
                 }
             }
 
             // Check if the task is mentioned in the command line and override the default values with the passed parameters
             if let Some(task_args) = self.pargs[1..].iter().find(|partition| partition[0] == task.name) {
-                // Update the processed_task with the passed parameters
-                self.update_task_with_args(&mut processed_task, task_args);
+                // Create a clap command for the given task
+                let task_command = Self::task_to_command(task);
+
+                // Parse args using the task command
+                let matches = task_command.get_matches_from(task_args);
+
+                // Update the job fields with the parsed values
+                for param in task.params.values() {
+                    if let Some(value) = matches.get_one::<String>(param.name.as_str()) {
+                        job.values.insert(param.name.clone(), Value::Item(value.to_string()));
+                    }
+                }
             }
 
-            // Add the processed task to the tasks vector
-            tasks.push(processed_task);
+            // Add the processed job to the jobs HashMap
+            jobs.insert(task.name.clone(), job);
         }
 
-        Ok(tasks)
-    }
-
-    fn update_task_with_args(&self, task: &mut Task, args: &[String]) {
-        // Create a clap command for the given task
-        let task_command = Self::task_to_command(task);
-
-        // Parse args using the task command
-        let matches = task_command.get_matches_from(args);
-
-        // Update the task fields with the parsed values
-        for param in task.params.values_mut() {
-            if let Some(mut value) = matches.get_many::<String>(&param.name) {
-                let value_str = value.next().cloned().unwrap_or_default();
-                param.value = Value::Item(value_str);
+        // Iterate over the jobs a second time to handle 'after' dependencies
+        for task in self.config.tasks.values() {
+            for after_task_name in &task.after {
+                if let Some(after_job) = jobs.get_mut(after_task_name) {
+                    after_job.deps.push(task.name.clone());
+                }
             }
         }
+
+        // Convert the HashMap to a Vec and return
+        Ok(jobs.values().cloned().collect())
     }
+
 
     fn handle_no_input(&self) {
         // Create a default otto command with no tasks
@@ -392,6 +419,11 @@ impl Parser {
                 otto.verbosity = verbosity.to_string();
             }
         }
+        // if matches.contains_id("jobs") {
+        //     if let Some(jobs) = matches.get_one::<String>("jobs") {
+        //         otto.jobs = jobs.to_string();
+        //     }
+        // }
         if matches.contains_id("jobs") {
             if let Some(jobs) = matches.get_one::<String>("jobs") {
                 otto.jobs = jobs.to_string();
@@ -412,8 +444,6 @@ impl Parser {
         if args.len() == 1 && otto.tasks.is_empty() {
             return Err(eyre!("No tasks configified"));
         }
-        println!("args: {args:?}");
-        println!("otto.tasks: {:?}", otto.tasks);
 
         Ok(otto)
     }
@@ -471,7 +501,7 @@ mod tests {
             name: "otto".to_string(),
             about: "A task runner".to_string(),
             api: "http://localhost:8000".to_string(),
-            jobs: "4".to_string(),
+            jobs: num_cpus::get().to_string(),
             tasks: vec!["build".to_string()],
         }
     }
@@ -484,7 +514,6 @@ mod tests {
             before: vec![],
             after: vec![],
             action: "echo 'building'".to_string(),
-            values: HashMap::new(),
         }
     }
 
@@ -512,6 +541,7 @@ mod tests {
     #[test]
     fn test_parse_no_args() {
         let otto = generate_test_otto();
+        println!("generated otto: {otto:#?}");
 
         let args = vec!["otto".to_string()];
         let pargs = partitions(&args, &["build"]);
@@ -550,8 +580,15 @@ mod tests {
         };
 
         let result = parser.parse().unwrap();
+        let jobs = result.1;
+
         assert_eq!(result.0, otto, "comparing otto struct");
-        assert_eq!(result.1.len(), tasks.len(), "comparing tasks length");
-        assert_eq!(result.1[0].name, "build".to_string(), "comparing task name");
+
+        // We expect the same number of jobs as tasks
+        assert_eq!(jobs.len(), tasks.len(), "comparing jobs length");
+
+        // Assert job name
+        assert_eq!(jobs[0].name, "build".to_string(), "comparing job name");
     }
+
 }
