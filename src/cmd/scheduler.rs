@@ -19,76 +19,6 @@ impl Scheduler {
         }
     }
 
-/*
-    pub fn run(&self) {
-        let num_jobs = self.jobs.raw_nodes().len();
-        println!("num_jobs: {}", num_jobs);
-
-        let completed_jobs: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let condvar: Arc<Condvar> = Arc::new(Condvar::new());
-
-        rayon::scope(|s| {
-            for node in self.jobs.raw_nodes() {
-                let job = node.weight.clone();
-                println!("job: {:?}", job);
-                let completed_jobs = completed_jobs.clone();
-                let condvar = condvar.clone();
-
-                s.spawn(move |_| {
-                    let mut all_deps_completed = false;
-
-                    while !all_deps_completed {
-                        {
-                            let completed_jobs = completed_jobs.lock().unwrap();
-
-                            all_deps_completed = job.deps.iter().all(|dep| completed_jobs.contains(dep));
-                        }
-
-                        if !all_deps_completed {
-                            continue;
-                        }
-                    }
-
-                    let mut env: HashMap<String, String> = HashMap::new();
-                    for (k, v) in &job.envs {
-                        env.insert(k.into(), v.into());
-                    }
-                    for (k, v) in &job.values {
-                        if let Value::Item(val) = v {
-                            env.insert(k.into(), val.into());
-                        }
-                    }
-
-                    // All dependencies are completed, now run the job
-                    let output = Command::new("sh")
-                        .envs(&env)
-                        .arg("-c")
-                        .arg(&job.action)
-                        .output()
-                        .expect("Failed to execute command");
-
-                    println!("output: {:?}", output);
-
-                    if !output.status.success() {
-                        panic!("Job {} failed with exit code {:?}", job.name, output.status.code());
-                    }
-
-                    // Mark the job as completed
-                    completed_jobs.lock().unwrap().insert(job.name.clone());
-
-                    // Notify other jobs that a job has finished.
-                    condvar.notify_all();
-                });
-            }
-        });
-
-        assert_eq!(completed_jobs.lock().unwrap().len(), num_jobs, "All jobs should be completed");
-        println!("All jobs completed");
-    }
-*/
-
-
-
     pub fn run(&self) {
         // Find the set of tasks to execute
         let tasks_to_execute = self.get_tasks_to_execute();
@@ -116,10 +46,8 @@ impl Scheduler {
                     while !all_deps_completed {
                         {
                             let completed_jobs = completed_jobs.lock().unwrap();
-
                             all_deps_completed = job.deps.iter().all(|dep| completed_jobs.contains(dep));
                         }
-
                         if !all_deps_completed {
                             continue;
                         }
@@ -181,7 +109,4 @@ impl Scheduler {
 
         tasks_to_execute
     }
-
-
-
 }
