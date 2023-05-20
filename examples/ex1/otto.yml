@@ -2,21 +2,16 @@ otto:
   api: 1
   jobs: 16
   tasks:
-  - world
+  - punch
 tasks:
   punch:
     params:
-      -t|--type:
-        choices:
-        - howdy
-        - help
-        default: bueller
-        help: default="bueller"; override type
-      -f|--flag:
-        default: false
-        help: toggle flag to true
-      pos:
-        help: pos help
+      -a|--arg:
+        default: value
+        help: default="hello"; override arg
+    action: |
+      #!/bin/bash
+      echo "${arg:-donkey}"
     help: punch task help
   hello:
     params:
@@ -28,6 +23,7 @@ tasks:
         help: default="hello"; override greeting
     action: |
       #!/bin/bash
+      sleep 2
       echo "${greeting:-hello}"
     help: hello task help
   world:
@@ -39,5 +35,5 @@ tasks:
         help: default="world"; override name
     action: |
       #!/bin/bash
-      echo "$name"
+      echo "${name:-world}"
     help: world task help

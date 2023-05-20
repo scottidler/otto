@@ -14,6 +14,8 @@ use expanduser::expanduser;
 use crate::cfg::config::{Config, Otto, Param, Task, Tasks, Value};
 use crate::cli::error::SilentError;
 
+pub type DAG<T> = Dag<T, (), u32>;
+
 const OTTOFILES: &[&str] = &[
     "otto.yml",
     ".otto.yml",
@@ -300,11 +302,9 @@ impl Parser {
         arg
     }
 
-    //pub fn parse(&mut self) -> Result<(Otto, Vec<Job>)> {
-    pub fn parse(&mut self) -> Result<(Otto, Dag<Job, (), u32>)> {
+    pub fn parse(&mut self) -> Result<(Otto, DAG<Job>)> {
         // Create clap commands for 'otto' and jobs
         let otto_command = Self::otto_to_command(&self.config.otto, &self.config.tasks);
-        //let task_commands: Vec<Command> = self.config.jobs.values().map(Self::task_to_command).collect();
 
         // Parse 'otto' command and update Otto fields
         let mut otto = self.parse_otto_command(otto_command, &self.pargs[0])?;
@@ -312,6 +312,7 @@ impl Parser {
         // Process the jobs with their default values and command line parameters
         let jobs = self.process_jobs()?;
 
+/*
         // collect first item in each parg, skipping the first one
         let configured_tasks = self
             .pargs
@@ -323,13 +324,32 @@ impl Parser {
         if !configured_tasks.is_empty() {
             otto.tasks = configured_tasks;
         }
+*/
+
+        // Collect the first item in each parg, skipping the first one.
+        let configured_tasks = self
+            .pargs
+            .iter()
+            .skip(1)
+            .map(|p| p[0].clone())
+            .collect::<Vec<String>>();
+
+        // If tasks were passed as arguments, they replace the default tasks.
+        // Otherwise, the default tasks remain.
+        if !configured_tasks.is_empty() {
+            otto.tasks = configured_tasks;
+        } else {
+            otto.tasks = self.config.otto.tasks.clone();
+        }
+
+
         // Return all jobs from the Ottofile, and the updated Otto struct
         Ok((otto, jobs))
     }
 
-    fn process_jobs(&self) -> Result<Dag<Job, (), u32>> {
+    fn process_jobs(&self) -> Result<DAG<Job>> {
         // Initialize an empty Dag and an index map
-        let mut dag: Dag<Job, (), u32> = Dag::new();
+        let mut dag: DAG<Job> = DAG::new();
         let mut indices: HashMap<String, NodeIndex<u32>> = HashMap::new();
 
         // Iterate through the tasks loaded from the Ottofile
