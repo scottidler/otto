@@ -4,6 +4,7 @@ use eyre::Result;
 
 use otto::cli::parse::Parser;
 use otto::cli::error::SilentError;
+use otto::cmd::scheduler::Scheduler;
 use std::process;
 
 fn main() -> Result<()> {
@@ -16,10 +17,15 @@ fn main() -> Result<()> {
         }
     };
 
-    let (otto, tasks) = parser.parse()?;
+    let (otto, jobs) = parser.parse()?;
 
     println!("otto: {:?}", otto);
-    println!("tasks: {:?}", tasks);
+    println!("jobs: {:?}", jobs);
+
+    println!("before scheduler");
+    let sechedule = Scheduler::new(otto, jobs);
+    sechedule.run();
+    println!("after scheduler");
 
     Ok(())
 }
