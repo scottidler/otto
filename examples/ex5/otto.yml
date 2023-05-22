@@ -1,0 +1,45 @@
+otto:
+  api: 1
+  jobs: 16
+  tasks:
+    - O
+tasks:
+  H:
+    action: |
+      #!/bin/bash
+      echo "H"
+    help: H task help
+
+  E:
+    before:
+      - H
+    action: |
+      #!/bin/bash
+      echo "E"
+    help: E task help
+
+  L1:
+    before:
+      - E
+    action: |
+      #!/bin/bash
+      echo "L"
+    help: L1 task help
+
+  L2:
+    before:
+      - E
+    action: |
+      #!/bin/bash
+      echo "L"
+    help: L2 task help
+
+  O:
+    before:
+      - L1
+      - L2
+    action: |
+      #!/bin/bash
+      echo "O"
+    help: O task help
+
