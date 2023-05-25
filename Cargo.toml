@@ -26,3 +26,4 @@ num_cpus = "1.15.0"
 daggy = "0.8.0"
 thiserror = "1.0.40"
 rayon = "1.7.0"
+tokio = { version = "1.28.1", features = ["full"] }

@@ -98,7 +98,7 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Job {
+pub struct TaskSpec {
     pub name: String,
     pub deps: Vec<String>,
     pub envs: HashMap<String, String>,
@@ -106,7 +106,7 @@ pub struct Job {
     pub action: String,
 }
 
-impl Job {
+impl TaskSpec {
     pub fn new(name: String, deps: Vec<String>, envs: HashMap<String, String>, values: HashMap<String, Value>, action: String) -> Self {
         Self {
             name,
@@ -302,7 +302,7 @@ impl Parser {
         arg
     }
 
-    pub fn parse(&mut self) -> Result<(Otto, DAG<Job>)> {
+    pub fn parse(&mut self) -> Result<(Otto, DAG<TaskSpec>)> {
         // Create clap commands for 'otto' and jobs
         let otto_command = Self::otto_to_command(&self.config.otto, &self.config.tasks);
 
@@ -310,21 +310,7 @@ impl Parser {
         let mut otto = self.parse_otto_command(otto_command, &self.pargs[0])?;
 
         // Process the jobs with their default values and command line parameters
-        let jobs = self.process_jobs()?;
-
-/*
-        // collect first item in each parg, skipping the first one
-        let configured_tasks = self
-            .pargs
-            .iter()
-            .skip(1)
-            .map(|p| p[0].clone())
-            .collect::<Vec<String>>();
-
-        if !configured_tasks.is_empty() {
-            otto.tasks = configured_tasks;
-        }
-*/
+        let tasks = self.process_tasks()?;
 
         // Collect the first item in each parg, skipping the first one.
         let configured_tasks = self
@@ -344,18 +330,18 @@ impl Parser {
 
 
         // Return all jobs from the Ottofile, and the updated Otto struct
-        Ok((otto, jobs))
+        Ok((otto, tasks))
     }
 
-    fn process_jobs(&self) -> Result<DAG<Job>> {
+    fn process_tasks(&self) -> Result<DAG<TaskSpec>> {
         // Initialize an empty Dag and an index map
-        let mut dag: DAG<Job> = DAG::new();
+        let mut dag: DAG<TaskSpec> = DAG::new();
         let mut indices: HashMap<String, NodeIndex<u32>> = HashMap::new();
 
         // Iterate through the tasks loaded from the Ottofile
         for task in self.config.tasks.values() {
             // Create a new job based on the task
-            let mut job = Job {
+            let mut spec = TaskSpec {
                 name: task.name.clone(),
                 deps: task.before.clone(),
                 envs: HashMap::new(),
@@ -367,7 +353,7 @@ impl Parser {
             for (name, param) in &task.params {
                 if let Some(default_value) = &param.default {
                     let value = Value::Item(default_value.clone());
-                    job.values.insert(name.clone(), value);
+                    spec.values.insert(name.clone(), value);
                 }
             }
 
@@ -382,14 +368,14 @@ impl Parser {
                 // Update the job fields with the parsed values
                 for param in task.params.values() {
                     if let Some(value) = matches.get_one::<String>(param.name.as_str()) {
-                        job.values.insert(param.name.clone(), Value::Item(value.to_string()));
+                        spec.values.insert(param.name.clone(), Value::Item(value.to_string()));
                     }
                 }
             }
 
             // Add the processed job to the Dag and index map
-            let index = dag.add_node(job.clone());
-            indices.insert(job.name.clone(), index);
+            let index = dag.add_node(spec.clone());
+            indices.insert(spec.name.clone(), index);
         }
 
         // Iterate over the jobs a second time to handle 'after' dependencies
@@ -436,11 +422,7 @@ impl Parser {
                 otto.verbosity = verbosity.to_string();
             }
         }
-        // if matches.contains_id("jobs") {
-        //     if let Some(jobs) = matches.get_one::<String>("jobs") {
-        //         otto.jobs = jobs.to_string();
-        //     }
-        // }
+
         if matches.contains_id("jobs") {
             if let Some(jobs) = matches.get_one::<String>("jobs") {
                 otto.jobs = jobs.to_string();
@@ -597,19 +579,19 @@ mod tests {
         };
 
         let result = parser.parse().unwrap();
-        let jobs = result.1;
+        let dag = result.1;
 
         assert_eq!(result.0, otto, "comparing otto struct");
 
         // We expect the same number of jobs as tasks
-        assert_eq!(jobs.node_count(), tasks.len(), "comparing jobs length");
+        assert_eq!(dag.node_count(), tasks.len(), "comparing tasks length");
 
         // Use node_weight to get Job data
         let first_node_index = NodeIndex::new(0);
-        let first_job = jobs.node_weight(first_node_index).unwrap();
+        let first_task = dag.node_weight(first_node_index).unwrap();
 
         // Assert job name
-        assert_eq!(first_job.name, "build".to_string(), "comparing job name");
+        assert_eq!(first_task.name, "build".to_string(), "comparing task name");
     }
 
 

@@ -1,44 +1,47 @@
 use std::process::Command;
 use std::sync::{Arc, Mutex, Condvar};
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashSet, HashMap, VecDeque};
 use eyre::{Result, eyre};
 use std::str;
 
-use crate::cli::parse::{Job, DAG};
+use rayon::Scope;
+use std::process::Output;
+
+use crate::cli::parse::{TaskSpec, DAG};
 use crate::cfg::param::Value;
 use crate::cfg::otto::Otto;
 
 pub struct Scheduler {
     pub otto: Otto,
-    pub jobs: DAG<Job>,
+    pub tasks: DAG<TaskSpec>,
 }
 
 impl Scheduler {
-    pub fn new(otto: Otto, jobs: DAG<Job>) -> Self {
+    pub fn new(otto: Otto, tasks: DAG<TaskSpec>) -> Self {
         Self {
             otto,
-            jobs,
+            tasks,
         }
     }
 
     pub fn run(&self) -> Result<()> {
         // Find the set of tasks to execute
         let tasks_to_execute = self.get_tasks_to_execute()?;
-        let num_jobs = tasks_to_execute.len();
+        let num_tasks = tasks_to_execute.len();
 
-        let completed_jobs: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let completed_tasks: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let condvar: Arc<Condvar> = Arc::new(Condvar::new());
 
-        rayon::scope(|s| {
-            for node in self.jobs.raw_nodes() {
-                let job = node.weight.clone();
+        rayon::scope(|s: &Scope| {
+            for node in self.tasks.raw_nodes() {
+                let task = node.weight.clone();
 
-                // Skip this job if it's not in the set of tasks to execute
-                if !tasks_to_execute.contains(&job.name) {
+                // Skip this task if it's not in the set of tasks to execute
+                if !tasks_to_execute.contains(&task.name) {
                     continue;
                 }
 
-                let completed_jobs = completed_jobs.clone();
+                let completed_tasks = completed_tasks.clone();
                 let condvar = condvar.clone();
 
                 s.spawn(move |_| {
@@ -47,8 +50,8 @@ impl Scheduler {
 
                         while !all_deps_completed {
                             {
-                                let completed_jobs = completed_jobs.lock().unwrap();
-                                all_deps_completed = job.deps.iter().all(|dep| completed_jobs.contains(dep));
+                                let completed_tasks = completed_tasks.lock().unwrap();
+                                all_deps_completed = task.deps.iter().all(|dep| completed_tasks.contains(dep));
                             }
                             if !all_deps_completed {
                                 continue;
@@ -56,20 +59,20 @@ impl Scheduler {
                         }
 
                         let mut env: HashMap<String, String> = HashMap::new();
-                        for (k, v) in &job.envs {
+                        for (k, v) in &task.envs {
                             env.insert(k.into(), v.into());
                         }
-                        for (k, v) in &job.values {
+                        for (k, v) in &task.values {
                             if let Value::Item(val) = v {
                                 env.insert(k.into(), val.into());
                             }
                         }
 
-                        // All dependencies are completed, now run the job
-                        let output = Command::new("sh")
+                        // All dependencies are completed, now run the task
+                        let output: Output = Command::new("sh")
                             .envs(&env)
                             .arg("-c")
-                            .arg(&job.action)
+                            .arg(&task.action)
                             .output()
                             .map_err(|e| eyre!("Failed to execute command: {}", e))?;
 
@@ -78,50 +81,140 @@ impl Scheduler {
                         println!("{}", stdout);
 
                         if !output.status.success() {
-                            return Err(eyre!("Job {} failed with exit code {:?}", job.name, output.status.code()));
+                            return Err(eyre!("Task {} failed with exit code {:?}", task.name, output.status.code()));
                         }
 
-                        // Mark the job as completed
-                        completed_jobs.lock().unwrap().insert(job.name.clone());
+                        // Mark the task as completed
+                        completed_tasks.lock().unwrap().insert(task.name.clone());
 
-                        // Notify other jobs that a job has finished.
+                        // Notify other tasks that a task has finished.
                         condvar.notify_all();
 
                         Ok(())
                     };
 
                     if let Err(err) = result() {
-                        eprintln!("Error executing job {}: {}", job.name, err);
+                        eprintln!("Error executing task {}: {}", task.name, err);
                     }
                 });
             }
         });
 
-        let completed_jobs_count = completed_jobs.lock().unwrap().len();
-        if completed_jobs_count != num_jobs {
-            return Err(eyre!("Not all jobs were completed. Completed: {}, Expected: {}", completed_jobs_count, num_jobs));
+        let completed_tasks_count = completed_tasks.lock().unwrap().len();
+        if completed_tasks_count != num_tasks {
+            return Err(eyre!("Not all tasks were completed. Completed: {}, Expected: {}", completed_tasks_count, num_tasks));
         }
 
         Ok(())
     }
 
-/*
-    pub fn get_tasks_to_execute(&self) -> Result<HashSet<String>> {
-        let mut tasks_to_execute = HashSet::new();
-        let mut visited_tasks = HashSet::new();
+    pub async fn run_async(&self) -> Result<()> {
+        // Parse max_tasks from otto.jobs
+        let max_tasks: usize = self.otto.jobs.parse()
+            .map_err(|_| eyre!("Invalid max_jobs value: {}", self.otto.jobs))?;
 
-        for task in &self.otto.tasks {
-            if !visited_tasks.contains(task) {
-                visited_tasks.insert(task.clone());
-                self.add_dependencies(task, &mut tasks_to_execute, &mut visited_tasks)?;
-            } else {
-                return Err(eyre!("Circular dependency detected for task: {}", task));
+        // Find the set of tasks to execute
+        let tasks_to_execute = self.get_tasks_to_execute()?;
+        let num_tasks = tasks_to_execute.len();
+
+        let completed_tasks: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let task_queue: Arc<Mutex<VecDeque<TaskSpec>>> = Arc::new(Mutex::new(VecDeque::new()));
+
+        // Populate the task queue
+        for node in self.tasks.raw_nodes() {
+            let task = node.weight.clone();
+            if tasks_to_execute.contains(&task.name) {
+                task_queue.lock().unwrap().push_back(task);
             }
         }
 
-        Ok(tasks_to_execute)
+        let mut handles = Vec::new();
+
+        for _ in 0..max_tasks {
+            let completed_tasks = completed_tasks.clone();
+            let task_queue = task_queue.clone();
+
+            let handle = tokio::spawn(async move {
+                loop {
+                    let task = {
+                        let mut task_queue = task_queue.lock().unwrap();
+                        if task_queue.is_empty() {
+                            break;
+                        }
+                        task_queue.pop_front().unwrap()
+                    };
+
+                    let result = async {
+                        let mut all_deps_completed = false;
+
+                        while !all_deps_completed {
+                            {
+                                let completed_tasks = completed_tasks.lock().unwrap();
+                                all_deps_completed = task.deps.iter().all(|dep| completed_tasks.contains(dep));
+                            }
+                            if !all_deps_completed {
+                                continue;
+                            }
+                        }
+
+                        let mut env: HashMap<String, String> = HashMap::new();
+                        for (k, v) in &task.envs {
+                            env.insert(k.into(), v.into());
+                        }
+                        for (k, v) in &task.values {
+                            if let Value::Item(val) = v {
+                                env.insert(k.into(), val.into());
+                            }
+                        }
+
+                        // All dependencies are completed, now run the task
+                        let output = tokio::task::spawn_blocking(move || {
+                            Command::new("sh")
+                                .envs(&env)
+                                .arg("-c")
+                                .arg(&task.action)
+                                .output()
+                        }).await
+                        .map_err(|e| eyre!("Failed to execute command: {}", e))?;
+
+                        let output = output.map_err(|e| eyre!("Failed to execute command: {}", e))?;
+
+                        let stdout = str::from_utf8(&output.stdout)
+                            .map_err(|e| eyre!("Failed to parse stdout as UTF-8: {}", e))?;
+                        println!("{}", stdout);
+
+                        if !output.status.success() {
+                            return Err(eyre!("Task {} failed with exit code {:?}", task.name, output.status.code()));
+                        }
+
+                        // Mark the task as completed
+                        completed_tasks.lock().unwrap().insert(task.name.clone());
+
+                        Ok(())
+                    };
+
+                    if let Err(err) = result.await {
+                        eprintln!("Error executing task {}: {}", task.name, err);
+                    }
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all workers to complete
+        for handle in handles {
+            handle.await?;
+        }
+
+        let completed_tasks_count = completed_tasks.lock().unwrap().len();
+        if completed_tasks_count != num_tasks{
+            return Err(eyre!("Not all tasks were completed. Completed: {}, Expected: {}", completed_tasks_count, num_tasks));
+        }
+
+        Ok(())
     }
-*/
+
 
     pub fn get_tasks_to_execute(&self) -> Result<HashSet<String>> {
         let mut tasks_to_execute = HashSet::new();
@@ -144,19 +237,19 @@ impl Scheduler {
 
     fn add_dependencies(
         &self,
-        task: &String,
+        taskname: &String,
         tasks_to_execute: &mut HashSet<String>,
         visited_tasks: &mut HashSet<String>,
         path: &mut HashSet<String>,
     ) -> Result<()> {
-        if let Some(job) = self.jobs.raw_nodes().iter().find(|node| node.weight.name == *task) {
-            for dep in &job.weight.deps {
+        if let Some(task) = self.tasks.raw_nodes().iter().find(|task| task.weight.name == *taskname) {
+            for dep in &task.weight.deps {
                 // If the dependency is already in the current path from the root task,
                 // then we have a circular dependency.
                 if path.contains(dep) {
                     return Err(eyre!(
                         "Circular dependency detected between tasks: {} and {}",
-                        task, dep
+                        taskname, dep
                     ));
                 }
                 path.insert(dep.clone());
@@ -164,65 +257,8 @@ impl Scheduler {
                 path.remove(dep); // Remove the task from the current path once it's fully processed.
             }
         }
-        visited_tasks.insert(task.clone());
-        tasks_to_execute.insert(task.clone());
+        visited_tasks.insert(taskname.clone());
+        tasks_to_execute.insert(taskname.clone());
         Ok(())
     }
-
-
-
-/*
-    fn add_dependencies(
-        &self,
-        task: &String,
-        tasks_to_execute: &mut HashSet<String>,
-        visited_tasks: &mut HashSet<String>,
-    ) -> Result<()> {
-        if let Some(job) = self.jobs.raw_nodes().iter().find(|node| node.weight.name == *task) {
-            for dep in &job.weight.deps {
-                if visited_tasks.contains(dep) {
-                    return Err(eyre!(
-                        "Circular dependency detected between tasks: {} and {}",
-                        task, dep
-                    ));
-                }
-                visited_tasks.insert(dep.clone());
-                self.add_dependencies(dep, tasks_to_execute, visited_tasks)?;
-            }
-        }
-        tasks_to_execute.insert(task.clone());
-        Ok(())
-    }
-*/
-
-/*
-    fn add_dependencies(
-        &self,
-        task: &String,
-        tasks_to_execute: &mut HashSet<String>,
-        visited_tasks: &mut HashSet<String>,
-    ) -> Result<()> {
-        if let Some(job) = self.jobs.raw_nodes().iter().find(|node| node.weight.name == *task) {
-            for dep in &job.weight.deps {
-                if visited_tasks.contains(dep) {
-                    return Err(eyre!(
-                        "Circular dependency detected between tasks: {} and {}",
-                        task, dep
-                    ));
-                }
-
-                // The recursive call was moved up to ensure we visit the dependencies first
-                self.add_dependencies(dep, tasks_to_execute, visited_tasks)?;
-
-                // Moved this line here, after the dependencies are visited, to prevent
-                // a false circular dependency detection. Previously, it was inserted
-                // into the visited_tasks set before its dependencies were visited.
-                visited_tasks.insert(dep.clone());
-            }
-        }
-        tasks_to_execute.insert(task.clone());
-        Ok(())
-    }
-*/
-
 }
