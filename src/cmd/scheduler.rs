@@ -109,11 +109,6 @@ impl Scheduler {
     }
 
     pub async fn run_async(&self) -> Result<()> {
-        // Parse max_tasks from otto.jobs
-        // let max_tasks: usize = self.otto.jobs.parse()
-        //     .map_err(|_| eyre!("Invalid max_jobs value: {}", self.otto.jobs))?;
-        let max_tasks = self.otto.jobs;
-
         // Find the set of tasks to execute
         let tasks_to_execute = self.get_tasks_to_execute()?;
         let num_tasks = tasks_to_execute.len();
@@ -131,7 +126,7 @@ impl Scheduler {
 
         let mut handles = Vec::new();
 
-        for _ in 0..max_tasks {
+        for _ in 0..self.otto.jobs {
             let completed_tasks = completed_tasks.clone();
             let task_queue = task_queue.clone();
 
