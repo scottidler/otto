@@ -1,6 +1,6 @@
 #![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
-use clap::{Arg, Command};
+use clap::{Arg, Command, value_parser};
 use eyre::{eyre, Result};
 use daggy::{Dag, NodeIndex};
 use std::collections::HashMap;
@@ -251,9 +251,9 @@ impl Parser {
                 Arg::new("jobs")
                     .short('j')
                     .long("jobs")
-                    //.takes_value(true)
                     .value_name("JOBS")
                     .default_value(&otto.jobs.to_string())
+                    .value_parser(value_parser!(usize))
                     .help("number of jobs to run in parallel"),
             )
             .arg(
@@ -424,8 +424,8 @@ impl Parser {
         }
 
         if matches.contains_id("jobs") {
-            if let Some(jobs) = matches.get_one::<String>("jobs") {
-                otto.jobs = jobs.to_string();
+            if let Some(jobs) = matches.get_one::<usize>("jobs") {
+                otto.jobs = *jobs;
             }
         }
         if matches.contains_id("tasks") {
@@ -500,7 +500,7 @@ mod tests {
             name: "otto".to_string(),
             about: "A task runner".to_string(),
             api: "http://localhost:8000".to_string(),
-            jobs: num_cpus::get().to_string(),
+            jobs: num_cpus::get(),
             tasks: vec!["build".to_string()],
         }
     }

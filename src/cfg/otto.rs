@@ -29,8 +29,8 @@ fn default_api() -> String {
     "1".to_string()
 }
 
-fn default_jobs() -> String {
-    num_cpus::get().to_string()
+fn default_jobs() -> usize {
+    num_cpus::get()
 }
 
 fn default_tasks() -> Vec<String> {
@@ -63,7 +63,7 @@ pub struct Otto {
     pub verbosity: String,
 
     #[serde(default = "default_jobs")]
-    pub jobs: String,
+    pub jobs: usize,
 
     #[serde(default = "default_tasks")]
     pub tasks: Vec<String>,

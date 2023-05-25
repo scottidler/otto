@@ -110,8 +110,9 @@ impl Scheduler {
 
     pub async fn run_async(&self) -> Result<()> {
         // Parse max_tasks from otto.jobs
-        let max_tasks: usize = self.otto.jobs.parse()
-            .map_err(|_| eyre!("Invalid max_jobs value: {}", self.otto.jobs))?;
+        // let max_tasks: usize = self.otto.jobs.parse()
+        //     .map_err(|_| eyre!("Invalid max_jobs value: {}", self.otto.jobs))?;
+        let max_tasks = self.otto.jobs;
 
         // Find the set of tasks to execute
         let tasks_to_execute = self.get_tasks_to_execute()?;
