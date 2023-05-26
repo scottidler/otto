@@ -1,41 +1,19 @@
-#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+//#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
-use eyre::Result;
+use std::env;
+use eyre::Report;
 
 use otto::cli::parse::Parser;
-use otto::cli::error::SilentError;
 use otto::cmd::scheduler::Scheduler;
-use std::process;
-
-// fn main() -> Result<()> {
-//     let args: Vec<String> = std::env::args().collect();
-//     let mut parser = match Parser::new(args) {
-//         Ok(p) => p,
-//         Err(e) => {
-//             eprintln!("Error initializing parser: {e}");
-//             process::exit(1);
-//         }
-//     };
-
-//     let (otto, jobs) = parser.parse()?;
-//     let sechedule = Scheduler::new(otto, jobs);
-//     sechedule.run()?;
-//     Ok(())
-// }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let mut parser = match Parser::new(args) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error initializing parser: {e}");
-            process::exit(1);
-        }
-    };
+async fn main() -> Result<(), Report> {
+    let args: Vec<String> = env::args().collect();
+    let mut parser = Parser::new(args)?;
 
-    let (otto, jobs) = parser.parse()?;
-    let sechedule = Scheduler::new(otto, jobs);
-    sechedule.run_async().await?;
+    let (otto, jobs, hash) = parser.parse()?;
+    let scheduler = Scheduler::new(otto, jobs, hash);
+    scheduler.run_async().await?;
+
     Ok(())
 }

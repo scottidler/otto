@@ -1,18 +1,20 @@
-#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+//#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
 
-use clap::{Arg, Command, value_parser};
-use eyre::{eyre, Result};
-use daggy::{Dag, NodeIndex};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use clap::{value_parser, Arg, Command};
+use daggy::{Dag, NodeIndex};
 use expanduser::expanduser;
+use eyre::{eyre, Result};
+use hex;
+use sha2::{Digest, Sha256};
 
 use crate::cfg::config::{Config, Otto, Param, Task, Tasks, Value};
-use crate::cli::error::SilentError;
 
 pub type DAG<T> = Dag<T, (), u32>;
 
@@ -25,6 +27,16 @@ const OTTOFILES: &[&str] = &[
     "OTTOFILE",
 ];
 
+const DEFAULT_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+fn calculate_hash(action: &String) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(action);
+    let result = hasher.finalize();
+    hex::encode(result)
+}
+
+#[allow(dead_code)]
 fn print_type_of<T>(t: &T)
 where
     T: ?Sized + Debug,
@@ -32,6 +44,7 @@ where
     println!("type={} value={:#?}", std::any::type_name::<T>(), t);
 }
 
+#[allow(dead_code)]
 fn format_items(items: &[&str], before: Option<&str>, between: Option<&str>, after: Option<&str>) -> String
 where
 {
@@ -104,17 +117,34 @@ pub struct TaskSpec {
     pub envs: HashMap<String, String>,
     pub values: HashMap<String, Value>,
     pub action: String,
+    pub hash: String,
 }
 
 impl TaskSpec {
-    pub fn new(name: String, deps: Vec<String>, envs: HashMap<String, String>, values: HashMap<String, Value>, action: String) -> Self {
+    pub fn new(
+        name: String,
+        deps: Vec<String>,
+        envs: HashMap<String, String>,
+        values: HashMap<String, Value>,
+        action: String,
+    ) -> Self {
+        let hash = calculate_hash(&action);
         Self {
             name,
             deps,
             envs,
             values,
             action,
+            hash,
         }
+    }
+    pub fn from_task(task: &Task) -> Self {
+        let name = task.name.clone();
+        let deps = task.before.clone();
+        let envs = HashMap::new();
+        let values = HashMap::new();
+        let action = task.action.clone();
+        Self::new(name, deps, envs, values, action)
     }
 }
 
@@ -124,6 +154,7 @@ pub struct Parser {
     cwd: PathBuf,
     user: String,
     config: Config,
+    hash: String,
     args: Vec<String>,
     pargs: Vec<Vec<String>>,
 }
@@ -157,7 +188,7 @@ impl Parser {
             .map_or_else(|| "otto".to_string(), std::string::ToString::to_string);
         let cwd = env::current_dir()?;
         let user = env::var("USER")?;
-        let config = Self::load_config(&mut args)?;
+        let (config, hash) = Self::load_config(&mut args)?;
         let task_names: Vec<&str> = config.tasks.keys().map(std::string::String::as_str).collect();
         let pargs = partitions(&args, &task_names);
         Ok(Self {
@@ -165,6 +196,7 @@ impl Parser {
             cwd,
             user,
             config,
+            hash,
             args,
             pargs,
         })
@@ -196,7 +228,7 @@ impl Parser {
         Ok(Some(path))
     }
 
-    fn load_config(args: &mut Vec<String>) -> Result<Config> {
+    fn load_config(args: &mut Vec<String>) -> Result<(Config, String)> {
         let index = args.iter().position(|x| x == "--ottofile");
         let value = index.map_or_else(
             || env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
@@ -209,10 +241,11 @@ impl Parser {
         );
         if let Some(ottofile) = Self::divine_ottofile(value)? {
             let content = fs::read_to_string(ottofile)?;
+            let hash = calculate_hash(&content);
             let config: Config = serde_yaml::from_str(&content)?;
-            Ok(config)
+            Ok((config, hash))
         } else {
-            Ok(Config::default())
+            Ok((Config::default(), DEFAULT_HASH.to_owned()))
         }
     }
 
@@ -302,7 +335,7 @@ impl Parser {
         arg
     }
 
-    pub fn parse(&mut self) -> Result<(Otto, DAG<TaskSpec>)> {
+    pub fn parse(&mut self) -> Result<(Otto, DAG<TaskSpec>, String)> {
         // Create clap commands for 'otto' and jobs
         let otto_command = Self::otto_to_command(&self.config.otto, &self.config.tasks);
 
@@ -313,12 +346,7 @@ impl Parser {
         let tasks = self.process_tasks()?;
 
         // Collect the first item in each parg, skipping the first one.
-        let configured_tasks = self
-            .pargs
-            .iter()
-            .skip(1)
-            .map(|p| p[0].clone())
-            .collect::<Vec<String>>();
+        let configured_tasks = self.pargs.iter().skip(1).map(|p| p[0].clone()).collect::<Vec<String>>();
 
         // If tasks were passed as arguments, they replace the default tasks.
         // Otherwise, the default tasks remain.
@@ -328,9 +356,8 @@ impl Parser {
             otto.tasks = self.config.otto.tasks.clone();
         }
 
-
         // Return all jobs from the Ottofile, and the updated Otto struct
-        Ok((otto, tasks))
+        Ok((otto, tasks, self.hash.clone()))
     }
 
     fn process_tasks(&self) -> Result<DAG<TaskSpec>> {
@@ -341,13 +368,7 @@ impl Parser {
         // Iterate through the tasks loaded from the Ottofile
         for task in self.config.tasks.values() {
             // Create a new job based on the task
-            let mut spec = TaskSpec {
-                name: task.name.clone(),
-                deps: task.before.clone(),
-                envs: HashMap::new(),
-                values: HashMap::new(),
-                action: task.action.clone(),
-            };
+            let mut spec = TaskSpec::from_task(task);
 
             // Apply the default values for each task
             for (name, param) in &task.params {
@@ -391,11 +412,9 @@ impl Parser {
         Ok(dag)
     }
 
-
-
     fn handle_no_input(&self) {
         // Create a default otto command with no tasks
-        let mut otto_command = Self::otto_to_command(&self.config.otto, &HashMap::new());
+        let otto_command = Self::otto_to_command(&self.config.otto, &HashMap::new());
         otto_command.get_matches_from(&["otto", "--help"]);
     }
 
@@ -451,18 +470,11 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::macros::*;
     use std::collections::HashMap;
 
     #[test]
     fn test_indices() {
-        let args = vec_of_strings![
-            "arg1",
-            "task1",
-            "arg2",
-            "task2",
-            "arg3",
-        ];
+        let args = vec_of_strings!["arg1", "task1", "arg2", "task2", "arg3",];
         let task_names = &["task1", "task2"];
         let expected = vec![0, 1, 3];
         assert_eq!(indices(args, task_names), expected);
@@ -470,21 +482,11 @@ mod tests {
 
     #[test]
     fn test_partitions() {
-        let args = vec_of_strings![
-            "arg1",
-            "task1",
-            "arg2",
-            "task2",
-            "arg3",
-        ];
+        let args = vec_of_strings!["arg1", "task1", "arg2", "task2", "arg3",];
         let task_names = vec!["task1", "task2"];
         assert_eq!(
             partitions(&args, &task_names),
-            vec![
-                vec!["arg1"],
-                vec!["task1", "arg2"],
-                vec!["task2", "arg3"]
-            ]
+            vec![vec!["arg1"], vec!["task1", "arg2"], vec!["task2", "arg3"]]
         );
     }
 
@@ -496,11 +498,12 @@ mod tests {
 
     fn generate_test_otto() -> Otto {
         Otto {
-            verbosity: "1".to_string(),
             name: "otto".to_string(),
+            home: "~/.otto".to_string(),
             about: "A task runner".to_string(),
             api: "http://localhost:8000".to_string(),
             jobs: num_cpus::get(),
+            verbosity: "1".to_string(),
             tasks: vec!["build".to_string()],
         }
     }
@@ -536,7 +539,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_parse_no_args() {
         let otto = generate_test_otto();
@@ -546,10 +548,14 @@ mod tests {
         let pargs = partitions(&args, &["build"]);
 
         let mut parser = Parser {
+            hash: DEFAULT_HASH.to_string(),
             prog: "otto".to_string(),
             cwd: env::current_dir().unwrap(),
             user: env::var("USER").unwrap(),
-            config: Config { otto, tasks: HashMap::new() },
+            config: Config {
+                otto,
+                tasks: HashMap::new(),
+            },
             args,
             pargs,
         };
@@ -571,9 +577,13 @@ mod tests {
 
         let mut parser = Parser {
             prog: "otto".to_string(),
+            hash: DEFAULT_HASH.to_string(),
             cwd: env::current_dir().unwrap(),
             user: env::var("USER").unwrap(),
-            config: Config { otto: otto.clone(), tasks: tasks.clone() },
+            config: Config {
+                otto: otto.clone(),
+                tasks: tasks.clone(),
+            },
             args,
             pargs,
         };
@@ -593,6 +603,4 @@ mod tests {
         // Assert job name
         assert_eq!(first_task.name, "build".to_string(), "comparing task name");
     }
-
-
 }
