@@ -67,6 +67,7 @@ where
 // In particular, this handles the case on unix where both paths are
 // absolute but with only the root as the common directory.
 // url: https://stackoverflow.com/a/39343127
+#[allow(clippy::similar_names)]
 fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
     use std::path::Component;
 
@@ -121,6 +122,7 @@ pub struct TaskSpec {
 }
 
 impl TaskSpec {
+    #[must_use]
     pub fn new(
         name: String,
         deps: Vec<String>,
@@ -138,6 +140,7 @@ impl TaskSpec {
             hash,
         }
     }
+    #[must_use]
     pub fn from_task(task: &Task) -> Self {
         let name = task.name.clone();
         let deps = task.before.clone();
@@ -181,7 +184,7 @@ fn partitions(args: &Vec<String>, task_names: &[&str]) -> Vec<Vec<String>> {
 
 impl Parser {
     pub fn new(args: Vec<String>) -> Result<Self> {
-        let mut args = args.clone();
+        let mut args = args;
         let prog = std::env::current_exe()?
             .file_name()
             .and_then(OsStr::to_str)
@@ -415,7 +418,7 @@ impl Parser {
     fn handle_no_input(&self) {
         // Create a default otto command with no tasks
         let otto_command = Self::otto_to_command(&self.config.otto, &HashMap::new());
-        otto_command.get_matches_from(&["otto", "--help"]);
+        otto_command.get_matches_from(["otto", "--help"]);
     }
 
     fn parse_otto_command(&self, otto_command: Command, args: &[String]) -> Result<Otto> {
