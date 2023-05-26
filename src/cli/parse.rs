@@ -162,7 +162,7 @@ pub struct Parser {
     pargs: Vec<Vec<String>>,
 }
 
-fn indices(args: Vec<String>, task_names: &[&str]) -> Vec<usize> {
+fn indices(args: &[String], task_names: &[&str]) -> Vec<usize> {
     let mut indices = vec![0];
     for (i, arg) in args.iter().enumerate() {
         if task_names.contains(&arg.as_str()) {
@@ -175,7 +175,7 @@ fn indices(args: Vec<String>, task_names: &[&str]) -> Vec<usize> {
 fn partitions(args: &Vec<String>, task_names: &[&str]) -> Vec<Vec<String>> {
     let mut partitions = vec![];
     let mut end = args.len();
-    for index in indices(args.clone(), task_names).iter().rev() {
+    for index in indices(args, task_names).iter().rev() {
         partitions.insert(0, args[*index..end].to_vec());
         end = *index;
     }
@@ -353,10 +353,10 @@ impl Parser {
 
         // If tasks were passed as arguments, they replace the default tasks.
         // Otherwise, the default tasks remain.
-        if !configured_tasks.is_empty() {
-            otto.tasks = configured_tasks;
-        } else {
+        if configured_tasks.is_empty() {
             otto.tasks = self.config.otto.tasks.clone();
+        } else {
+            otto.tasks = configured_tasks;
         }
 
         // Return all jobs from the Ottofile, and the updated Otto struct
@@ -407,7 +407,7 @@ impl Parser {
             for after_task_name in &task.after {
                 let node = indices.get(&task.name).expect("Job not found in indices");
                 let dep_node = indices.get(after_task_name).expect("Dependency not found in indices");
-                dag.add_edge(*dep_node, *node, ()).unwrap();
+                dag.add_edge(*dep_node, *node, ())?;
             }
         }
 

@@ -56,8 +56,7 @@ impl Task {
 fn namify(name: &str) -> String {
     name.split('|')
         .find(|&part| part.starts_with("--"))
-        .map(|s| s.trim_start_matches("--").to_string())
-        .unwrap_or_else(|| name.split('|').next().unwrap().trim_start_matches('-').to_string())
+        .map_or_else(|| name.split('|').next().unwrap().trim_start_matches('-').to_string(), |s| s.trim_start_matches("--").to_string())
 }
 
 #[test]

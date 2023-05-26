@@ -176,117 +176,19 @@ impl Scheduler {
         Ok(())
     }
 
-
-/*
-    pub async fn run_async(&self) -> Result<()> {
-        // Find the set of tasks to execute
-        let tasks_to_execute = self.get_tasks_to_execute()?;
-        let num_tasks = tasks_to_execute.len();
-
-        let completed_tasks: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let task_queue: Arc<Mutex<VecDeque<TaskSpec>>> = Arc::new(Mutex::new(VecDeque::new()));
-
-        // Populate the task queue
-        for node in self.tasks.raw_nodes() {
-            let task = node.weight.clone();
-            if tasks_to_execute.contains(&task.name) {
-                task_queue.lock().unwrap().push_back(task);
-            }
-        }
-
-        let mut handles = Vec::new();
-
-        for _ in 0..self.otto.jobs {
-            let completed_tasks = completed_tasks.clone();
-            let task_queue = task_queue.clone();
-
-            let handle = tokio::spawn(async move {
-                loop {
-                    let task = {
-                        let mut task_queue = task_queue.lock().unwrap();
-                        if task_queue.is_empty() {
-                            break;
-                        }
-                        task_queue.pop_front().unwrap()
-                    };
-
-                    let env = Self::setup_env(&task.clone());
-
-                    let result = async {
-                        let mut all_deps_completed = false;
-
-                        while !all_deps_completed {
-                            {
-                                let completed_tasks = completed_tasks.lock().unwrap();
-                                all_deps_completed = task.deps.iter().all(|dep| completed_tasks.contains(dep));
-                            }
-                            if !all_deps_completed {
-                                continue;
-                            }
-                        }
-
-                        // All dependencies are completed, now run the task
-                        let output = tokio::task::spawn_blocking(move || {
-                            Command::new("sh")
-                                .envs(&env)
-                                .arg("-c")
-                                .arg(&task.action)
-                                .output()
-                        }).await
-                        .map_err(|e| eyre!("Failed to execute command: {}", e))?;
-
-                        let output = output.map_err(|e| eyre!("Failed to execute command: {}", e))?;
-
-                        let stdout = str::from_utf8(&output.stdout)
-                            .map_err(|e| eyre!("Failed to parse stdout as UTF-8: {}", e))?;
-                        println!("{}", stdout);
-
-                        if !output.status.success() {
-                            return Err(eyre!("Task {} failed with exit code {:?}", task.name, output.status.code()));
-                        }
-
-                        // Mark the task as completed
-                        completed_tasks.lock().unwrap().insert(task.name.clone());
-
-                        Ok(())
-                    };
-
-                    if let Err(err) = result.await {
-                        eprintln!("Error executing task {}: {}", task.name, err);
-                    }
-                }
-            });
-
-            handles.push(handle);
-        }
-
-        // Wait for all workers to complete
-        for handle in handles {
-            handle.await?;
-        }
-
-        let completed_tasks_count = completed_tasks.lock().unwrap().len();
-        if completed_tasks_count != num_tasks{
-            return Err(eyre!("Not all tasks were completed. Completed: {}, Expected: {}", completed_tasks_count, num_tasks));
-        }
-
-        Ok(())
-    }
-*/
-
     pub fn get_tasks_to_execute(&self) -> Result<HashSet<String>> {
         let mut tasks_to_execute = HashSet::new();
         let mut visited_tasks = HashSet::new();
         let mut path = HashSet::new();
 
         for task in &self.otto.tasks {
-            if !visited_tasks.contains(task) {
+            if visited_tasks.contains(task) {
+                return Err(eyre!("Circular dependency detected for task: {}", task));
+            } else {
                 visited_tasks.insert(task.clone());
                 path.insert(task.clone());
                 self.add_dependencies(task, &mut tasks_to_execute, &mut visited_tasks, &mut path)?;
                 path.remove(task);
-            } else {
-                return Err(eyre!("Circular dependency detected for task: {}", task));
             }
         }
 
