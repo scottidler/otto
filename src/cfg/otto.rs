@@ -1,23 +1,17 @@
-#![allow(unused_imports, unused_variables, dead_code)]
-use eyre::Result;
+//#![allow(unused_imports, unused_variables, dead_code)]
 
-use serde::de::{Deserializer, Error, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::fmt;
-use std::num::ParseIntError;
-use std::path::PathBuf;
 use std::vec::Vec;
-
-use crate::cfg::error::ConfigError;
-
 
 fn default_name() -> String {
     "otto".to_string()
 }
 
+fn default_home() -> String {
+    "~/.otto".to_string()
+}
+
 fn default_about() -> String {
-    //"a tool for managing a DAG of tasks".to_string()
     "A task runner".to_string()
 }
 
@@ -40,6 +34,7 @@ fn default_tasks() -> Vec<String> {
 pub fn default_otto() -> Otto {
     Otto {
         name: default_name(),
+        home: default_home(),
         about: default_about(),
         api: default_api(),
         verbosity: default_verbosity(),
@@ -52,6 +47,9 @@ pub fn default_otto() -> Otto {
 pub struct Otto {
     #[serde(default = "default_name")]
     pub name: String,
+
+    #[serde(default = "default_home")]
+    pub home: String,
 
     #[serde(default = "default_about")]
     pub about: String,

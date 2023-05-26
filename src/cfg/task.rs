@@ -1,16 +1,13 @@
-#![allow(unused_imports, unused_variables, dead_code)]
-use eyre::Result;
+//#![allow(unused_imports, unused_variables, dead_code)]
 
-use serde::de::{Deserializer, Error, MapAccess, SeqAccess, Visitor};
+use eyre::Result;
+use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt;
-use std::num::ParseIntError;
-use std::path::PathBuf;
 use std::vec::Vec;
 
-use crate::cfg::error::ConfigError;
-use crate::cfg::param::{deserialize_param_map, Params, ParamType, Value, Values};
+use crate::cfg::param::{deserialize_param_map, Params};
 
 pub type Tasks = HashMap<String, Task>;
 
