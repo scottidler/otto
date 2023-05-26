@@ -30,6 +30,7 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    #[must_use]
     pub fn new(otto: Otto, tasks: DAG<TaskSpec>, hash: String) -> Self {
         Self {
             otto,
@@ -47,7 +48,7 @@ impl Scheduler {
 
         // Create the hidden directory if it doesn't already exist
         let hidden_hash_dir = format!(".{}", &self.hash);
-        let hidden_dir_path = home_dir.join(&hidden_hash_dir);
+        let hidden_dir_path = home_dir.join(hidden_hash_dir);
         if !hidden_dir_path.exists() {
             fs::create_dir(&hidden_dir_path)?;
         }
@@ -141,7 +142,7 @@ impl Scheduler {
 
                         let stdout = str::from_utf8(&output.stdout)
                             .map_err(|e| eyre!("Failed to parse stdout as UTF-8: {}", e))?;
-                        println!("{}", stdout);
+                        println!("{stdout}");
 
                         if !output.status.success() {
                             return Err(eyre!("Task {} failed with exit code {:?}", task.name, output.status.code()));
