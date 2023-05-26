@@ -31,6 +31,7 @@ fn default_tasks() -> Vec<String> {
     vec!["*".to_string()]
 }
 
+#[must_use]
 pub fn default_otto() -> Otto {
     Otto {
         name: default_name(),
