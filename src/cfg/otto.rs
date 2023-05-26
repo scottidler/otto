@@ -35,12 +35,12 @@ fn default_tasks() -> Vec<String> {
 pub fn default_otto() -> Otto {
     Otto {
         name: default_name(),
-        home: default_home(),
         about: default_about(),
         api: default_api(),
-        verbosity: default_verbosity(),
         jobs: default_jobs(),
+        home: default_home(),
         tasks: default_tasks(),
+        verbosity: default_verbosity(),
     }
 }
 
@@ -49,23 +49,23 @@ pub struct Otto {
     #[serde(default = "default_name")]
     pub name: String,
 
-    #[serde(default = "default_home")]
-    pub home: String,
-
     #[serde(default = "default_about")]
     pub about: String,
 
     #[serde(default = "default_api")]
     pub api: String,
 
-    #[serde(default = "default_verbosity")]
-    pub verbosity: String,
-
     #[serde(default = "default_jobs")]
     pub jobs: usize,
 
+    #[serde(default = "default_home")]
+    pub home: String,
+
     #[serde(default = "default_tasks")]
     pub tasks: Vec<String>,
+
+    #[serde(default = "default_verbosity")]
+    pub verbosity: String,
 }
 
 impl Default for Otto {

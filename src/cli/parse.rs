@@ -266,15 +266,6 @@ impl Parser {
                     .help("path to the ottofile"),
             )
             .arg(
-                Arg::new("verbosity")
-                    .short('v')
-                    .long("verbosity")
-                    //.takes_value(true)
-                    .value_name("LEVEL")
-                    .default_value("1")
-                    .help("verbosity level"),
-            )
-            .arg(
                 Arg::new("api")
                     .short('a')
                     .long("api")
@@ -293,6 +284,14 @@ impl Parser {
                     .help("number of jobs to run in parallel"),
             )
             .arg(
+                Arg::new("home")
+                    .short('H')
+                    .long("home")
+                    .value_name("PATH")
+                    .default_value(&otto.home)
+                    .help("path to the Otto home directory"),
+            )
+            .arg(
                 Arg::new("tasks")
                     .short('t')
                     .long("tasks")
@@ -300,6 +299,15 @@ impl Parser {
                     .value_name("TASKS")
                     .default_values(&otto.tasks)
                     .help("comma separated list of tasks to run"),
+            )
+            .arg(
+                Arg::new("verbosity")
+                    .short('v')
+                    .long("verbosity")
+                    //.takes_value(true)
+                    .value_name("LEVEL")
+                    .default_value("1")
+                    .help("verbosity level"),
             );
         for task in tasks.values() {
             command = command.subcommand(Self::task_to_command(task));
@@ -480,7 +488,7 @@ mod tests {
         let args = vec_of_strings!["arg1", "task1", "arg2", "task2", "arg3",];
         let task_names = &["task1", "task2"];
         let expected = vec![0, 1, 3];
-        assert_eq!(indices(args, task_names), expected);
+        assert_eq!(indices(&args, task_names), expected);
     }
 
     #[test]

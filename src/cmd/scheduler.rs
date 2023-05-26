@@ -40,41 +40,16 @@ impl Scheduler {
         }
     }
 
-    fn create_dir(&self) -> Result<PathBuf> {
-        // Construct the path
-        let canonical = expanduser(&self.otto.home)
-            .map_err(|e| eyre!("Failed to expand home directory: {}", e))?;
-        let home_dir = PathBuf::from(&canonical);
-
-        // Create the hidden directory if it doesn't already exist
-        let hidden_hash_dir = format!(".{}", &self.hash);
-        let hidden_dir_path = home_dir.join(hidden_hash_dir);
-        if !hidden_dir_path.exists() {
-            fs::create_dir(&hidden_dir_path)?;
-        }
-
-        // Create the timestamp directory
-        let timestamp_dir_path = home_dir.join(self.timestamp.to_string());
-        fs::create_dir(&timestamp_dir_path)?;
-
-        // Create a symlink from the <first-12-chars-of-hex-hash> -> .<64-char-hex-hash>
-        let symlink_name = &self.hash[..12];
-        let symlink_path = timestamp_dir_path.join(symlink_name);
-        if symlink_path.exists() {
-            fs::remove_file(&symlink_path)?;
-        }
-        std::os::unix::fs::symlink(&hidden_dir_path, &symlink_path)?;
-
-        // Create or update the "latest" symlink -> home / timestamp
-        let latest_symlink_path = home_dir.join("latest");
-        if latest_symlink_path.exists() {
-            fs::remove_file(&latest_symlink_path)?;
-        }
-        std::os::unix::fs::symlink(&timestamp_dir_path, &latest_symlink_path)?;
-
-        Ok(timestamp_dir_path)
-    }
-
+    /// Run the scheduler asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if it fails to lock a shared resource,
+    /// fails to create a directory, fails to write an action to a file, or fails to execute a command.
+    ///
+    /// # Panics
+    ///
+    /// This function can panic if a task is missing from the task queue. This should never occur under normal circumstances.
     pub async fn run_async(&self) -> Result<()> {
         // Find the set of tasks to execute
         let tasks_to_execute = self.get_tasks_to_execute()?;
@@ -174,6 +149,41 @@ impl Scheduler {
         }
 
         Ok(())
+    }
+
+    fn create_dir(&self) -> Result<PathBuf> {
+        // Construct the path
+        let canonical = expanduser(&self.otto.home)
+            .map_err(|e| eyre!("Failed to expand home directory: {}", e))?;
+        let home_dir = PathBuf::from(&canonical);
+
+        // Create the hidden directory if it doesn't already exist
+        let hidden_hash_dir = format!(".{}", &self.hash);
+        let hidden_dir_path = home_dir.join(hidden_hash_dir);
+        if !hidden_dir_path.exists() {
+            fs::create_dir(&hidden_dir_path)?;
+        }
+
+        // Create the timestamp directory
+        let timestamp_dir_path = home_dir.join(self.timestamp.to_string());
+        fs::create_dir(&timestamp_dir_path)?;
+
+        // Create a symlink from the <first-12-chars-of-hex-hash> -> .<64-char-hex-hash>
+        let symlink_name = &self.hash[..12];
+        let symlink_path = timestamp_dir_path.join(symlink_name);
+        if symlink_path.exists() {
+            fs::remove_file(&symlink_path)?;
+        }
+        std::os::unix::fs::symlink(&hidden_dir_path, &symlink_path)?;
+
+        // Create or update the "latest" symlink -> home / timestamp
+        let latest_symlink_path = home_dir.join("latest");
+        if latest_symlink_path.exists() {
+            fs::remove_file(&latest_symlink_path)?;
+        }
+        std::os::unix::fs::symlink(&timestamp_dir_path, &latest_symlink_path)?;
+
+        Ok(timestamp_dir_path)
     }
 
     pub fn get_tasks_to_execute(&self) -> Result<HashSet<String>> {
