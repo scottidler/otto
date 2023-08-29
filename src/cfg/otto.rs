@@ -7,16 +7,8 @@ fn default_name() -> String {
     "otto".to_string()
 }
 
-fn default_home() -> String {
-    "~/.otto".to_string()
-}
-
 fn default_about() -> String {
     "A task runner".to_string()
-}
-
-fn default_verbosity() -> String {
-    "1".to_string()
 }
 
 fn default_api() -> String {
@@ -27,8 +19,16 @@ fn default_jobs() -> usize {
     num_cpus::get()
 }
 
+fn default_home() -> String {
+    "~/.otto".to_string()
+}
+
 fn default_tasks() -> Vec<String> {
     vec!["*".to_string()]
+}
+
+fn default_verbosity() -> String {
+    "1".to_string()
 }
 
 #[must_use]
