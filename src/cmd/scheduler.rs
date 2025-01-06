@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::PathBuf;
 use once_cell::sync::Lazy;
 use expanduser::expanduser;
+use log::{debug};
 
 use crate::cli::parse::{TaskSpec, DAG};
 use crate::cfg::param::Value;
@@ -153,36 +154,62 @@ impl Scheduler {
 
     fn create_dir(&self) -> Result<PathBuf> {
         // Construct the path
+        debug!("Expanding home directory path: {}", &self.otto.home);
         let canonical = expanduser(&self.otto.home)
             .map_err(|e| eyre!("Failed to expand home directory: {}", e))?;
-        let home_dir = PathBuf::from(&canonical);
+        debug!("Expanded home directory path: {:?}", canonical);
 
-        // Create the hidden directory if it doesn't already exist
+        let home_dir = PathBuf::from(&canonical);
+        debug!("Home directory resolved to: {:?}", home_dir);
+
+        // Ensure the home directory and all parent directories exist
+        debug!("Ensuring home directory exists: {:?}", home_dir);
+        fs::create_dir_all(&home_dir)
+            .map_err(|e| eyre!("Failed to create home directory: {}", e))?;
+
+        // Create the hidden directory
         let hidden_hash_dir = format!(".{}", &self.hash);
-        let hidden_dir_path = home_dir.join(hidden_hash_dir);
-        if !hidden_dir_path.exists() {
-            fs::create_dir(&hidden_dir_path)?;
-        }
+        let hidden_dir_path = home_dir.join(&hidden_hash_dir);
+        debug!("Creating hidden hash directory: {:?}", hidden_dir_path);
+        fs::create_dir_all(&hidden_dir_path)
+            .map_err(|e| eyre!("Failed to create hidden hash directory: {}", e))?;
 
         // Create the timestamp directory
         let timestamp_dir_path = home_dir.join(self.timestamp.to_string());
-        fs::create_dir(&timestamp_dir_path)?;
+        debug!("Creating timestamp directory: {:?}", timestamp_dir_path);
+        fs::create_dir_all(&timestamp_dir_path)
+            .map_err(|e| eyre!("Failed to create timestamp directory: {}", e))?;
 
         // Create a symlink from the <first-12-chars-of-hex-hash> -> .<64-char-hex-hash>
         let symlink_name = &self.hash[..12];
         let symlink_path = timestamp_dir_path.join(symlink_name);
+        debug!(
+            "Creating symlink from {:?} to {:?}",
+            hidden_dir_path, symlink_path
+        );
         if symlink_path.exists() {
-            fs::remove_file(&symlink_path)?;
+            debug!("Removing existing symlink: {:?}", symlink_path);
+            fs::remove_file(&symlink_path)
+                .map_err(|e| eyre!("Failed to remove existing symlink: {}", e))?;
         }
-        std::os::unix::fs::symlink(&hidden_dir_path, &symlink_path)?;
+        std::os::unix::fs::symlink(&hidden_dir_path, &symlink_path)
+            .map_err(|e| eyre!("Failed to create symlink: {}", e))?;
 
         // Create or update the "latest" symlink -> home / timestamp
         let latest_symlink_path = home_dir.join("latest");
+        debug!(
+            "Creating or updating latest symlink from {:?} to {:?}",
+            timestamp_dir_path, latest_symlink_path
+        );
         if latest_symlink_path.exists() {
-            fs::remove_file(&latest_symlink_path)?;
+            debug!("Removing existing latest symlink: {:?}", latest_symlink_path);
+            fs::remove_file(&latest_symlink_path)
+                .map_err(|e| eyre!("Failed to remove existing latest symlink: {}", e))?;
         }
-        std::os::unix::fs::symlink(&timestamp_dir_path, &latest_symlink_path)?;
+        std::os::unix::fs::symlink(&timestamp_dir_path, &latest_symlink_path)
+            .map_err(|e| eyre!("Failed to create latest symlink: {}", e))?;
 
+        debug!("Directory setup completed successfully: {:?}", timestamp_dir_path);
         Ok(timestamp_dir_path)
     }
 
