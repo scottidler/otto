@@ -1,3 +1,5 @@
+// cli/macros.rs
+
 #![allow(unused_macros)]
 macro_rules! str_tuple2 {
     ($app:ident, $value:ident, $method:ident) => {{

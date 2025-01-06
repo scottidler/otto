@@ -1,9 +1,10 @@
-#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+// cfg/error.rs
 
-use std::fmt;
-use std::io;
+//use std::fmt;
+//use std::io;
 
-use std::fmt::{Debug, Display, Formatter};
+//use std::fmt::{Debug, Display, Formatter};
+use std::fmt::Debug;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

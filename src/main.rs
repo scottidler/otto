@@ -1,4 +1,4 @@
-//#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+// main.rs
 
 use std::env;
 use eyre::Report;

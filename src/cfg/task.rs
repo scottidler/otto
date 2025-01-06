@@ -1,4 +1,4 @@
-//#![allow(unused_imports, unused_variables, dead_code)]
+// cfg/task.rs
 
 use eyre::Result;
 use serde::de::{Deserializer, MapAccess, Visitor};

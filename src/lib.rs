@@ -1,3 +1,5 @@
+// lib.rs
+
 pub mod cfg;
 #[macro_use]
 pub mod cli;

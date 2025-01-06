@@ -1,4 +1,4 @@
-#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+// cli/error.rs
 
 use std::env;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};

@@ -1,4 +1,4 @@
-//#![allow(unused_imports, unused_variables, unused_attributes, unused_mut, dead_code)]
+// cli/parse.rs
 
 use std::collections::HashMap;
 use std::env;
@@ -183,6 +183,53 @@ fn partitions(args: &Vec<String>, task_names: &[&str]) -> Vec<Vec<String>> {
 }
 
 impl Parser {
+        pub fn new(mut args: Vec<String>) -> Result<Self> {
+        let prog = std::env::current_exe()?
+            .file_name()
+            .and_then(OsStr::to_str)
+            .map_or_else(|| "otto".to_string(), std::string::ToString::to_string);
+        let cwd = env::current_dir()?;
+        let user = env::var("USER")?;
+
+        // Load the Otto configuration file first
+        let (config, hash) = Self::load_config(&mut args)?;
+
+        // Apply configuration defaults to arguments if not set
+        let task_names: Vec<&str> = config.tasks.keys().map(std::string::String::as_str).collect();
+        let pargs = partitions(&args, &task_names);
+
+        Ok(Self {
+            prog,
+            cwd,
+            user,
+            config,
+            hash,
+            args,
+            pargs,
+        })
+    }
+
+    fn load_config(args: &mut Vec<String>) -> Result<(Config, String)> {
+        let index = args.iter().position(|x| x == "--ottofile" || x == "-o");
+        let value = index.map_or_else(
+            || env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
+            |index| {
+                let value = args[index + 1].clone();
+                args.remove(index);
+                args.remove(index);
+                value
+            },
+        );
+        if let Some(ottofile) = Self::divine_ottofile(value)? {
+            let content = fs::read_to_string(ottofile)?;
+            let hash = calculate_hash(&content);
+            let config: Config = serde_yaml::from_str(&content)?;
+            Ok((config, hash))
+        } else {
+            Ok((Config::default(), DEFAULT_HASH.to_owned()))
+        }
+    }
+    /*
     pub fn new(args: Vec<String>) -> Result<Self> {
         let mut args = args;
         let prog = std::env::current_exe()?
@@ -204,6 +251,7 @@ impl Parser {
             pargs,
         })
     }
+    */
 
     fn find_ottofile(path: &Path) -> Result<Option<PathBuf>> {
         let cwd = env::current_dir()?;
@@ -230,7 +278,7 @@ impl Parser {
         }
         Ok(Some(path))
     }
-
+    /*
     fn load_config(args: &mut Vec<String>) -> Result<(Config, String)> {
         let index = args.iter().position(|x| x == "--ottofile");
         let value = index.map_or_else(
@@ -251,7 +299,7 @@ impl Parser {
             Ok((Config::default(), DEFAULT_HASH.to_owned()))
         }
     }
-
+    */
     fn otto_to_command(otto: &Otto, tasks: &Tasks) -> Command {
         let mut command = Command::new(&otto.name)
             .bin_name(&otto.name)

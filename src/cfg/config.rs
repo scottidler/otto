@@ -1,4 +1,4 @@
-//#![allow(unused_imports, unused_variables, dead_code)]
+// cfg/config.rs
 
 use serde::Deserialize;
 

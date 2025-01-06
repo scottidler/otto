@@ -1,3 +1,5 @@
+// cfg/mod.rs
+
 pub mod error;
 pub mod config;
 pub mod otto;
