@@ -13,6 +13,7 @@ use expanduser::expanduser;
 use eyre::{eyre, Result};
 use hex;
 use sha2::{Digest, Sha256};
+use log::{debug, warn};
 
 use crate::cfg::config::{Config, Otto, Param, Task, Tasks, Value};
 
@@ -207,49 +208,96 @@ impl Parser {
 
     fn find_ottofile(path: &Path) -> Result<Option<PathBuf>> {
         let cwd = env::current_dir()?;
+        debug!("Searching for Ottofile in directory: {:?}", path);
         for ottofile in OTTOFILES {
             let ottofile_path = path.join(ottofile);
+            debug!("Checking for file: {:?}", ottofile_path);
             if ottofile_path.exists() {
-                let p =
-                    path_relative_from(&ottofile_path, &cwd).ok_or_else(|| eyre!("could not find relative path"))?;
-                return Ok(Some(p));
+                debug!("Found Ottofile: {:?}", ottofile_path);
+                let relative_path = path_relative_from(&ottofile_path, &cwd)
+                    .ok_or_else(|| eyre!("Could not determine relative path"))?;
+                return Ok(Some(relative_path));
             }
         }
-        let Some(parent) = path.parent() else { return Ok(None)};
-        if parent == Path::new("/") {
-            return Ok(None);
+        if let Some(parent) = path.parent() {
+            if parent == Path::new("/") {
+                debug!("Reached root directory; Ottofile not found.");
+                return Ok(None);
+            }
+            return Self::find_ottofile(parent);
         }
-        Self::find_ottofile(parent)
+        debug!("No parent directory; Ottofile not found.");
+        Ok(None)
     }
 
     fn divine_ottofile(value: String) -> Result<Option<PathBuf>> {
-        let mut path = expanduser(value)?;
-        path = fs::canonicalize(path)?;
-        if path.is_dir() {
-            return Self::find_ottofile(&path);
+        debug!("Divining Ottofile from value: {:?}", value);
+
+        // Expand `~` and canonicalize the path
+        let path = expanduser(value)?;
+        let canonical_path = fs::canonicalize(&path)?;
+        debug!("Canonicalized path: {:?}", canonical_path);
+
+        if canonical_path.is_file() {
+            // If the path is a file, return it directly
+            debug!("Path is a file; using it directly: {:?}", canonical_path);
+            return Ok(Some(canonical_path));
         }
-        Ok(Some(path))
+
+        if canonical_path.is_dir() {
+            // If the path is a directory, search for an Ottofile inside
+            debug!("Path is a directory; searching for Ottofile inside.");
+            return Self::find_ottofile(&canonical_path);
+        }
+
+        // If neither, return None
+        warn!("Path is neither a valid file nor a directory: {:?}", canonical_path);
+        Ok(None)
     }
 
     fn load_config(args: &mut Vec<String>) -> Result<(Config, String)> {
-        let index = args.iter().position(|x| x == "--ottofile");
+        debug!("Loading configuration with args: {:?}", args);
+
+        // Check if the --ottofile flag is present
+        let index = args.iter().position(|x| x == "--ottofile" || x == "-o");
         let value = index.map_or_else(
-            || env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned()),
+            || {
+                let env_var = env::var("OTTOFILE").unwrap_or_else(|_| "./".to_owned());
+                debug!("No --ottofile flag; using OTTOFILE environment variable or default: {:?}", env_var);
+                env_var
+            },
             |index| {
                 let value = args[index + 1].clone();
-                args.remove(index);
-                args.remove(index);
+                debug!("Found --ottofile flag with value: {:?}", value);
+                args.remove(index); // Remove the flag
+                args.remove(index); // Remove the value
                 value
             },
         );
-        if let Some(ottofile) = Self::divine_ottofile(value)? {
-            let content = fs::read_to_string(ottofile)?;
+
+        // Resolve the Ottofile path using divine_ottofile
+        if let Some(ottofile) = Self::divine_ottofile(value.clone())? {
+            debug!("Resolved Ottofile path: {:?}", ottofile);
+
+            // Ensure the resolved path is a file
+            if !ottofile.is_file() {
+                return Err(eyre!("Resolved Ottofile is not a valid file: {:?}", ottofile));
+            }
+
+            // Load the Ottofile content
+            let content = fs::read_to_string(&ottofile)?;
+            debug!("Ottofile content loaded successfully.");
             let hash = calculate_hash(&content);
+            debug!("Calculated hash for Ottofile: {:?}", hash);
+
+            // Parse the content into a Config struct
             let config: Config = serde_yaml::from_str(&content)?;
-            Ok((config, hash))
-        } else {
-            Ok((Config::default(), DEFAULT_HASH.to_owned()))
+            debug!("Parsed Ottofile content into config.");
+            return Ok((config, hash));
         }
+
+        warn!("Ottofile not found; returning default configuration.");
+        Ok((Config::default(), DEFAULT_HASH.to_owned()))
     }
 
     fn otto_to_command(otto: &Otto, tasks: &Tasks) -> Command {
