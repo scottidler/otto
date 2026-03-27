@@ -463,6 +463,14 @@ impl Parser {
             .version(env!("GIT_DESCRIBE"))
             .about("A task runner")
             .arg(
+                Arg::new("cwd")
+                    .short('C')
+                    .long("cwd")
+                    .value_name("DIR")
+                    .help("Change to DIR before doing anything")
+                    .value_parser(value_parser!(String)),
+            )
+            .arg(
                 Arg::new("ottofile")
                     .short('o')
                     .long("ottofile")

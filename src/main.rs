@@ -1,10 +1,11 @@
 use env_logger::Target;
-use eyre::{Report, Result};
+use eyre::{Report, Result, WrapErr};
 use log::info;
 use otto::RuntimeConfig;
 use otto::cli::Parser;
 use std::env;
 use std::fs::OpenOptions;
+use std::path::PathBuf;
 
 /// Default maximum log file size before rotation (10 MB).
 const DEFAULT_MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
@@ -49,6 +50,54 @@ fn setup_logging() -> Result<(), Report> {
     Ok(())
 }
 
+/// Pre-parse `-C`/`--cwd` from raw args, change the process working directory,
+/// and return the args with the flag stripped out.
+fn apply_cwd_flag(args: Vec<String>) -> Result<Vec<String>, Report> {
+    let mut i = 0;
+    let mut dir_value: Option<String> = None;
+    let mut skip_indices: Vec<usize> = Vec::new();
+
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            break;
+        }
+        if arg == "-C" || arg == "--cwd" {
+            skip_indices.push(i);
+            if let Some(d) = args.get(i + 1) {
+                dir_value = Some(d.clone());
+                skip_indices.push(i + 1);
+                i += 2;
+            } else {
+                eyre::bail!("'{}' requires a directory argument", arg);
+            }
+        } else if let Some(d) = arg.strip_prefix("--cwd=") {
+            dir_value = Some(d.to_string());
+            skip_indices.push(i);
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    if let Some(dir) = dir_value {
+        let path = PathBuf::from(&dir);
+        if !path.is_dir() {
+            eyre::bail!("directory '{}' does not exist or is not a directory", dir);
+        }
+        env::set_current_dir(&path).wrap_err_with(|| format!("failed to change directory to '{}'", dir))?;
+    }
+
+    let filtered: Vec<String> = args
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !skip_indices.contains(i))
+        .map(|(_, a)| a)
+        .collect();
+
+    Ok(filtered)
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(e) = setup_logging() {
@@ -58,6 +107,13 @@ async fn main() {
     info!("Starting otto");
 
     let args: Vec<String> = env::args().collect();
+    let args = match apply_cwd_flag(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
 
     // Handle hidden --is-valid-ottofile arg early (before normal parsing)
     if let Some(exit_code) = handle_is_valid_ottofile(&args) {
@@ -141,6 +197,7 @@ async fn handle_subcommand(args: &[String]) -> Option<Result<(), Report>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -199,5 +256,83 @@ mod tests {
         assert!(!log_path.exists());
         assert!(backup_path.exists());
         assert_eq!(fs::metadata(&backup_path).unwrap().len(), content.len() as u64);
+    }
+
+    #[test]
+    fn test_apply_cwd_flag_no_flag() {
+        let args = vec!["otto".into(), "ci".into()];
+        let result = apply_cwd_flag(args.clone()).unwrap();
+        assert_eq!(result, args);
+    }
+
+    #[test]
+    #[serial]
+    fn test_apply_cwd_flag_short() {
+        let original_cwd = env::current_dir().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path().to_string_lossy().to_string();
+
+        let args = vec!["otto".into(), "-C".into(), dir.clone(), "ci".into()];
+        let result = apply_cwd_flag(args).unwrap();
+
+        assert_eq!(result, vec!["otto", "ci"]);
+        let new_cwd = env::current_dir().unwrap();
+        assert_eq!(new_cwd.canonicalize().unwrap(), temp_dir.path().canonicalize().unwrap());
+
+        env::set_current_dir(original_cwd).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn test_apply_cwd_flag_long() {
+        let original_cwd = env::current_dir().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path().to_string_lossy().to_string();
+
+        let args = vec!["otto".into(), "--cwd".into(), dir.clone(), "ci".into()];
+        let result = apply_cwd_flag(args).unwrap();
+
+        assert_eq!(result, vec!["otto", "ci"]);
+        env::set_current_dir(original_cwd).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn test_apply_cwd_flag_equals_form() {
+        let original_cwd = env::current_dir().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path().to_string_lossy().to_string();
+
+        let args = vec!["otto".into(), format!("--cwd={}", dir), "ci".into()];
+        let result = apply_cwd_flag(args).unwrap();
+
+        assert_eq!(result, vec!["otto", "ci"]);
+        env::set_current_dir(original_cwd).unwrap();
+    }
+
+    #[test]
+    fn test_apply_cwd_flag_nonexistent_dir() {
+        let args = vec!["otto".into(), "-C".into(), "/nonexistent/path/xyz".into()];
+        let result = apply_cwd_flag(args);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("does not exist"));
+    }
+
+    #[test]
+    fn test_apply_cwd_flag_missing_value() {
+        let args = vec!["otto".into(), "-C".into()];
+        let result = apply_cwd_flag(args);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("requires a directory argument"));
+    }
+
+    #[test]
+    fn test_apply_cwd_flag_stops_at_double_dash() {
+        let args = vec!["otto".into(), "ci".into(), "--".into(), "-C".into(), "/tmp".into()];
+        let result = apply_cwd_flag(args.clone()).unwrap();
+        // -C after -- should not be consumed
+        assert_eq!(result, args);
     }
 }
