@@ -15,10 +15,10 @@ jobs:
         os: [ubuntu-latest, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup otto via setup-otto action
-        uses: scottidler/setup-otto@v1
+        uses: otto-rs/setup-otto@v1
         id: otto
 
       - name: Verify installation
