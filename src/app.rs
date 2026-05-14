@@ -2,7 +2,7 @@ use crate::cfg::otto::RetentionSpec;
 use crate::cfg::param::Value;
 use crate::cli::commands::history::HistoryCommand;
 use crate::cli::commands::stats::StatsCommand;
-use crate::cli::parser::Task;
+use crate::cli::parser::{Task, ottofile_base_dir};
 use crate::cli::{CleanCommand, ConvertCommand, Parser};
 use crate::executor::{DagVisualizer, TaskScheduler, Workspace};
 use eyre::{Report, Result};
@@ -287,7 +287,8 @@ pub async fn execute_with_terminal_output(
     }
 
     let cwd = env::current_dir()?;
-    let workspace = Workspace::new(cwd).await?;
+    let root = ottofile_base_dir(ottofile_path.as_deref(), &cwd).to_path_buf();
+    let workspace = Workspace::new(root).await?;
     workspace.init().await?;
 
     let mut execution_context = crate::executor::workspace::ExecutionContext::new();
@@ -358,7 +359,8 @@ pub async fn execute_with_tui(
     }
 
     let cwd = env::current_dir()?;
-    let workspace = Workspace::new(cwd).await?;
+    let root = ottofile_base_dir(ottofile_path.as_deref(), &cwd).to_path_buf();
+    let workspace = Workspace::new(root).await?;
     workspace.init().await?;
 
     let mut execution_context = crate::executor::workspace::ExecutionContext::new();

@@ -33,6 +33,25 @@ const OTTOFILES: &[&str] = &[
     "OTTOFILE",
 ];
 
+/// Returns the base directory for resolving paths declared relative to an
+/// ottofile - workspace root for task execution, anchor for foreach globs,
+/// and anchor for `input`/`output` paths.
+///
+/// When the ottofile path has a usable parent directory, that parent is the
+/// base. Otherwise (no ottofile, or a bare filename whose `parent()` is `""`)
+/// the caller-supplied `cwd` is returned.
+///
+/// This is the single source of truth for "where do relative paths in the
+/// ottofile resolve from." It is the reason `otto deploy` works when invoked
+/// from a subdirectory: discovery walks up to find the ottofile, then this
+/// function pins all relative-path resolution to the ottofile's directory.
+pub fn ottofile_base_dir<'a>(ottofile: Option<&'a Path>, cwd: &'a Path) -> &'a Path {
+    ottofile
+        .and_then(|p| p.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(cwd)
+}
+
 /// Check if a filename is a valid ottofile name.
 /// This is a hidden/secret function used for shell scripting.
 pub fn is_valid_ottofile_name(filename: &str) -> bool {
@@ -240,14 +259,10 @@ impl Parser {
     }
 
     /// Returns the base directory for resolving relative paths in the ottofile.
-    ///
-    /// This is the ottofile's parent directory if an ottofile has been loaded,
-    /// otherwise falls back to the current working directory.
-    ///
-    /// This is important for foreach globs: they should be resolved relative to the
-    /// ottofile location, not the user's current working directory.
+    /// Thin wrapper over the free `ottofile_base_dir` so parser internals and
+    /// task execution share one definition of "workspace root."
     fn base_dir(&self) -> &Path {
-        self.ottofile.as_ref().and_then(|p| p.parent()).unwrap_or(&self.cwd)
+        ottofile_base_dir(self.ottofile.as_deref(), &self.cwd)
     }
 
     /// Returns a reference to the original task specs from the ottofile.
@@ -1996,6 +2011,57 @@ fn partitions(args: &[String], task_names: &[String]) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // ottofile_base_dir tests
+    // =========================================================================
+
+    #[test]
+    fn test_ottofile_base_dir_uses_parent() {
+        let ottofile = PathBuf::from("/home/user/project/.otto.yml");
+        let cwd = PathBuf::from("/some/other/place");
+        assert_eq!(
+            ottofile_base_dir(Some(&ottofile), &cwd),
+            Path::new("/home/user/project")
+        );
+    }
+
+    #[test]
+    fn test_ottofile_base_dir_ignores_invocation_cwd_when_ottofile_known() {
+        // Regression: invoking otto from a subdirectory of a project must NOT
+        // make the workspace root the subdirectory. The discovered ottofile's
+        // parent wins over cwd.
+        let ottofile = PathBuf::from("/home/user/project/.otto.yml");
+        let cwd = PathBuf::from("/home/user/project/borg");
+        assert_eq!(
+            ottofile_base_dir(Some(&ottofile), &cwd),
+            Path::new("/home/user/project")
+        );
+    }
+
+    #[test]
+    fn test_ottofile_base_dir_filesystem_root_ottofile() {
+        // PathBuf::from("/.otto.yml").parent() == Some("/"), a valid root.
+        let ottofile = PathBuf::from("/.otto.yml");
+        let cwd = PathBuf::from("/tmp");
+        assert_eq!(ottofile_base_dir(Some(&ottofile), &cwd), Path::new("/"));
+    }
+
+    #[test]
+    fn test_ottofile_base_dir_none_falls_back_to_cwd() {
+        let cwd = PathBuf::from("/some/cwd");
+        assert_eq!(ottofile_base_dir(None, &cwd), Path::new("/some/cwd"));
+    }
+
+    #[test]
+    fn test_ottofile_base_dir_bare_filename_falls_back_to_cwd() {
+        // A bare filename has parent == Some(""), which is not useful; fall back.
+        // In practice the parser canonicalizes so this never happens, but
+        // the helper must not produce a nonsense empty-path root.
+        let ottofile = PathBuf::from(".otto.yml");
+        let cwd = PathBuf::from("/some/cwd");
+        assert_eq!(ottofile_base_dir(Some(&ottofile), &cwd), Path::new("/some/cwd"));
+    }
 
     #[test]
     fn test_indices() {
