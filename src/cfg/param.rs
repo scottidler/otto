@@ -41,12 +41,19 @@ impl Serialize for ParamMapSerializer<'_> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ParamSpec {
-    // name, short, long, param_type are derived from the params-map KEY by
-    // deserialize_param_map (via divine), not read from inline fields. They
-    // are also reconstructed into the rich key on serialize by
-    // ParamMapSerializer — so they must NOT appear as inline fields in either
-    // direction, otherwise they'd duplicate the key information and the
-    // emitted YAML would diverge from human-authored ottofiles.
+    // INVARIANT: name/short/long/param_type are derived from the params-map
+    // KEY (e.g. "-v|--verbose") by deserialize_param_map via divine(), and
+    // are reconstructed back into the rich key on serialize by
+    // ParamMapSerializer via rich_key(). divine() and rich_key() MUST remain
+    // inverses for the round-trip to hold. Do not mutate these fields after
+    // parse — either change the map key and re-divine, or the next serialize
+    // will emit YAML that no longer matches the original input form. The
+    // contract is locked in by tests/roundtrip.rs (ConfigSpec level) and
+    // rich_key_reflects_current_fields below (rich_key unit level).
+    //
+    // See docs/design/2026-05-24-paramspec-roundtrip.md for context and the
+    // criteria under which Option D (eliminate these fields entirely) would
+    // become worth doing.
     #[serde(skip)]
     pub name: String,
 
@@ -536,6 +543,41 @@ mod tests {
         // Positional parameter
         let input_file = task_spec.params.get("input_file").unwrap();
         assert_eq!(input_file.param_type, ParamType::POS);
+    }
+
+    /// Documents the contract that rich_key() is a *pure function of the
+    /// current ParamSpec fields*, not a cached value of the input key. If a
+    /// future refactor caches divine()'s input on the struct, this test
+    /// breaks — that's the signal that the divine/rich_key inverse-pair
+    /// invariant has been compromised and Option D (see design doc) should
+    /// be revisited.
+    #[test]
+    fn rich_key_reflects_current_fields() {
+        let mut spec = ParamSpec {
+            name: "verbose".to_string(),
+            short: Some('v'),
+            long: Some("verbose".to_string()),
+            param_type: ParamType::FLG,
+            dest: None,
+            metavar: None,
+            default: Some("false".to_string()),
+            constant: Value::Empty,
+            choices: vec![],
+            nargs: Nargs::default(),
+            help: None,
+            value: Value::Empty,
+        };
+        assert_eq!(rich_key(&spec), "-v|--verbose");
+
+        spec.long = Some("rename".to_string());
+        assert_eq!(rich_key(&spec), "-v|--rename");
+
+        spec.short = None;
+        assert_eq!(rich_key(&spec), "--rename");
+
+        spec.long = None;
+        spec.name = "positional".to_string();
+        assert_eq!(rich_key(&spec), "positional");
     }
 
     #[test]

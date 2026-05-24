@@ -23,6 +23,50 @@ was not necessary — the Architect's blast-radius correction (0 refs in
 `executor/`/`app/`) makes it cheaper than first estimated, but Option A's
 strict locality made it the lower-risk fix to ship today.
 
+### D-minimal (shipped in v1.2.4)
+
+A second Architect round confirmed Full D's blast radius at ~65–70 edits
+across `cli/parser.rs` (30 production reads + 23 test constructors) plus
+11 hardcoded `params.get("verbose")` assertions in `cfg/param.rs` tests.
+The "accessor methods" variant (computed `name()`/`short()`/`long()`)
+was ruled unviable: `divine()` allocates a new `String`, so accessors
+can't return `&str`; the result would be 30 callsites binding to
+temporaries with no parity gain.
+
+Instead of full D, we shipped:
+- `INVARIANT` doc comments on the four skipped `ParamSpec` fields naming
+  the `divine`/`rich_key` inverse-pair contract and the
+  no-post-parse-mutation rule.
+- A unit test `rich_key_reflects_current_fields` that asserts `rich_key()`
+  is a pure function of current `ParamSpec` state, so any future refactor
+  that caches the original key breaks the test rather than silently
+  drifting the round-trip.
+
+### When to revisit Option D
+
+Option D becomes worth its blast radius when *either* of these triggers
+fires:
+
+1. **`divine()`'s grammar grows beyond the current four forms** (`-v`,
+   `--verbose`, `-v|--verbose`, plain `name`). Examples that would push
+   us over: `--no-verbose` (negation), `--foo=BAR` (equals form), `-vv`
+   (repeated short flags). Each new grammar entry tightens the implicit
+   contract that `divine` and `rich_key` are inverses; at some point
+   keeping them in sync by code review becomes harder than removing one
+   half of the pair.
+
+2. **A user-visible feature lands that exercises the `ConfigSpec` serialize
+   path more aggressively than `otto convert` does today.** Specifically:
+   an `otto format` / `otto pretty` command that normalizes an existing
+   `.otto.yml`, an `otto edit`-style tool that round-trips configs through
+   serialization, or any converter that emits param-bearing tasks. The
+   first such feature provides the natural moment to amortize D's
+   refactor cost into something users get value from.
+
+Until then, Option A + the property test in `tests/roundtrip.rs` + the
+INVARIANT comments are sufficient. Revisit this section when either
+trigger lands.
+
 ## Context
 
 Otto's `ConfigSpec` (defined in `src/cfg/`) describes a `.otto.yml` file: a top-level `otto:` block, a `tasks:` map, and each `TaskSpec` carries a `params:` map of CLI parameters (`ParamSpec`).
