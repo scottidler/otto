@@ -313,8 +313,13 @@ impl DagVisualizer {
             if let Some(target_id) = task_to_id.get(&task.name) {
                 for dep in &task.task_deps {
                     if let Some(source_id) = task_to_id.get(&dep.task) {
+                        let (label, color, style) = match dep.when {
+                            crate::cfg::edge::When::Success => ("depends", "black", "solid"),
+                            crate::cfg::edge::When::Failure => ("on-failure", "red", "dashed"),
+                            crate::cfg::edge::When::Always => ("always", "darkgreen", "solid"),
+                        };
                         dot.push_str(&format!(
-                            "  {source_id} -> {target_id} [label=\"depends\", color=\"black\"];\n"
+                            "  {source_id} -> {target_id} [label=\"{label}\", color=\"{color}\", style=\"{style}\"];\n"
                         ));
                     }
                 }
