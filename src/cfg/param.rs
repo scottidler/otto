@@ -2,7 +2,7 @@
 
 use eyre::Result;
 use serde::de::{Deserializer, Error, MapAccess, SeqAccess, Visitor};
-use serde::ser::Serializer;
+use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -59,13 +59,39 @@ pub enum ParamType {
 
 pub type Values = HashMap<String, Value>;
 
-#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum Value {
     Item(String),
     List(Vec<String>),
     Dict(HashMap<String, String>),
     #[default]
     Empty,
+}
+
+impl Serialize for Value {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Empty => serializer.serialize_none(),
+            Self::Item(s) => serializer.serialize_str(s),
+            Self::List(list) => {
+                let mut seq = serializer.serialize_seq(Some(list.len()))?;
+                for item in list {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+            Self::Dict(dict) => {
+                let mut map = serializer.serialize_map(Some(dict.len()))?;
+                for (k, v) in dict {
+                    map.serialize_entry(k, v)?;
+                }
+                map.end()
+            }
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -95,7 +121,7 @@ where
         type Value = Value;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("string or list of strings")
+            formatter.write_str("null, string, list of strings, or map of string to string")
         }
         fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
         where
@@ -112,6 +138,28 @@ where
                 vec.push(item);
             }
             Ok(Value::List(vec))
+        }
+        fn visit_map<M>(self, mut visitor: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut map: HashMap<String, String> = HashMap::new();
+            while let Some((k, v)) = visitor.next_entry()? {
+                map.insert(k, v);
+            }
+            Ok(Value::Dict(map))
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            Ok(Value::Empty)
+        }
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            Ok(Value::Empty)
         }
     }
     deserializer.deserialize_any(ValueEnum)
@@ -505,6 +553,46 @@ mod tests {
         let mut dict = HashMap::new();
         dict.insert("key".to_string(), "value".to_string());
         assert_eq!(Value::Dict(dict).to_string(), "Value::Dict({key: value})");
+    }
+
+    #[test]
+    fn test_value_roundtrip_via_paramspec_constant() {
+        // Round-trip Value through ParamSpec.constant, which uses deserialize_value.
+        // This is the path that actually fires in production.
+        let mut dict = HashMap::new();
+        dict.insert("k1".to_string(), "v1".to_string());
+        dict.insert("k2".to_string(), "v2".to_string());
+
+        let cases = vec![
+            Value::Empty,
+            Value::Item("hello".to_string()),
+            Value::List(vec!["a".to_string(), "b".to_string()]),
+            Value::Dict(dict),
+        ];
+
+        for value in cases {
+            let spec = ParamSpec {
+                name: String::new(),
+                short: None,
+                long: None,
+                param_type: ParamType::default(),
+                dest: None,
+                metavar: None,
+                default: None,
+                constant: value.clone(),
+                choices: vec![],
+                nargs: Nargs::default(),
+                help: None,
+                value: Value::Empty,
+            };
+            let yaml = serde_yaml::to_string(&spec).unwrap();
+            let parsed: ParamSpec =
+                serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("failed to parse {yaml:?}: {e}"));
+            assert_eq!(
+                spec.constant, parsed.constant,
+                "constant round-trip failed for {value} (yaml: {yaml:?})"
+            );
+        }
     }
 
     #[test]
