@@ -12,19 +12,36 @@ tasks:
     bash: |
       whitespace -r
 
-  # Code quality checks
-  check:
-    help: "Run all quality checks (compile, clippy, format)"
+  # Code quality checks — split into leaf tasks so they parallelize and
+  # so fmt-check can auto-fix on failure via the on-failure: sugar.
+  compile:
+    help: "Verify the workspace compiles (cargo check)"
     bash: |
-      echo "=== Checking compilation ==="
       cargo check --workspace --all-targets --all-features
-      echo ""
-      echo "=== Running Clippy ==="
+
+  clippy:
+    help: "Run clippy with warnings as errors"
+    bash: |
       cargo clippy --workspace --all-targets --all-features -- -D warnings
-      echo ""
-      echo "=== Checking format ==="
+
+  fmt-check:
+    help: "Verify formatting; auto-runs fmt-fix on failure"
+    bash: |
       cargo fmt --all --check
-      echo ""
+    on-failure:
+      - fmt-fix
+
+  fmt-fix:
+    help: "Apply cargo fmt to fix format drift"
+    bash: |
+      cargo fmt --all
+
+  # Meta-task aggregating the three leaves above. Preserves `otto check`
+  # for callers that already know the name.
+  check:
+    help: "Run all quality checks (compile + clippy + fmt-check)"
+    before: [compile, clippy, fmt-check]
+    bash: |
       echo "✅ All checks passed!"
 
   # Run tests
@@ -200,18 +217,6 @@ tasks:
     before: [check, test]
     bash: |
       echo "✅ Quick checks passed!"
-
-  # Pre-commit checks
-  pre-commit:
-    help: "Pre-commit checks (format, then run CI)"
-    bash: |
-      echo "=== Formatting Code ==="
-      cargo fmt --all
-      echo ""
-      echo "=== Running CI Checks ==="
-      otto ci
-      echo ""
-      echo "✅ Ready to commit!"
 
   # Run everything
   all:
