@@ -39,7 +39,7 @@ pub struct Task {
     pub name: String,
     /// Parent task name for foreach subtasks (e.g., "install" for "install:td")
     pub parent: Option<String>,
-    pub task_deps: Vec<String>,
+    pub task_deps: Vec<TaskEdge>,
     pub file_deps: Vec<String>,
     pub output_deps: Vec<String>,
     pub envs: HashMap<String, String>,
@@ -54,7 +54,7 @@ impl Task {
     pub fn new(
         name: String,
         parent: Option<String>,
-        task_deps: Vec<String>,
+        task_deps: Vec<TaskEdge>,
         file_deps: Vec<String>,
         output_deps: Vec<String>,
         envs: HashMap<String, String>,
@@ -94,7 +94,11 @@ impl Task {
         global_envs: &HashMap<String, String>,
     ) -> Self {
         let name = task_spec.name.clone();
-        let task_deps: Vec<String> = task_spec.before.iter().map(|e| e.task.clone()).collect();
+        let task_deps: Vec<TaskEdge> = task_spec
+            .before
+            .iter()
+            .map(|e| TaskEdge::new(e.task.clone(), e.when))
+            .collect();
 
         // Derive parent for subtasks (names with colons like "install:td")
         let parent = if name.contains(':') {
@@ -255,7 +259,7 @@ mod tests {
         let task = Task::new(
             "build".to_string(),
             None,
-            vec!["test".to_string()],
+            vec![TaskEdge::success("test")],
             vec!["src/main.rs".to_string()],
             vec!["target/app".to_string()],
             HashMap::new(),
@@ -265,7 +269,8 @@ mod tests {
 
         assert_eq!(task.name, "build");
         assert_eq!(task.parent, None);
-        assert_eq!(task.task_deps, vec!["test"]);
+        assert_eq!(task.task_deps.len(), 1);
+        assert_eq!(task.task_deps[0].task, "test");
         assert_eq!(task.file_deps, vec!["src/main.rs"]);
         assert_eq!(task.output_deps, vec!["target/app"]);
         assert_eq!(task.action, "cargo build");
@@ -421,7 +426,8 @@ mod tests {
         let task = Task::from_task(&task_spec);
 
         assert_eq!(task.name, "test");
-        assert_eq!(task.task_deps, vec!["build"]);
+        assert_eq!(task.task_deps.len(), 1);
+        assert_eq!(task.task_deps[0].task, "build");
         assert_eq!(task.action, "echo test");
     }
 

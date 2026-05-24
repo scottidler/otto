@@ -7,6 +7,8 @@ use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::executor::task::TaskEdge;
+
 use clap::{Arg, ArgMatches, Command, value_parser};
 use daggy::Dag;
 use expanduser::expanduser;
@@ -99,7 +101,7 @@ impl std::error::Error for OttofileNotFound {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Task {
     pub name: String,
-    pub task_deps: Vec<String>,
+    pub task_deps: Vec<TaskEdge>,
     pub file_deps: Vec<String>,
     pub output_deps: Vec<String>,
     pub envs: HashMap<String, String>,
@@ -112,7 +114,7 @@ impl Task {
     #[must_use]
     pub fn new(
         name: String,
-        task_deps: Vec<String>,
+        task_deps: Vec<TaskEdge>,
         file_deps: Vec<String>,
         output_deps: Vec<String>,
         envs: HashMap<String, String>,
@@ -139,7 +141,11 @@ impl Task {
         global_envs: &HashMap<String, String>,
     ) -> Self {
         let name = task_spec.name.clone();
-        let task_deps: Vec<String> = task_spec.before.iter().map(|e| e.task.clone()).collect();
+        let task_deps: Vec<TaskEdge> = task_spec
+            .before
+            .iter()
+            .map(|e| TaskEdge::new(e.task.clone(), e.when))
+            .collect();
 
         // Resolve file globs from input to canonical paths using explicit cwd
         let file_deps = Self::resolve_file_globs(&task_spec.input, cwd);
@@ -836,7 +842,7 @@ impl Parser {
     fn propagate_params(
         &self,
         expanded_tasks: &HashMap<String, TaskSpec>,
-        task_deps: &HashMap<String, Vec<String>>,
+        task_deps: &HashMap<String, Vec<TaskEdge>>,
         task_entries: &mut [(String, Task)],
         cli_provided_params: &HashMap<String, HashSet<String>>,
     ) -> Result<()> {
@@ -954,7 +960,7 @@ impl Parser {
     /// Build dependency graph filtered to only include tasks in entry_names,
     /// resolving virtual parent references to their subtasks.
     fn build_filtered_deps(
-        task_deps: &HashMap<String, Vec<String>>,
+        task_deps: &HashMap<String, Vec<TaskEdge>>,
         entry_names: &HashSet<String>,
         expanded_tasks: &HashMap<String, TaskSpec>,
     ) -> HashMap<String, Vec<String>> {
@@ -963,16 +969,16 @@ impl Parser {
             let mut deps = Vec::new();
             if let Some(raw_deps) = task_deps.get(name) {
                 for dep in raw_deps {
-                    if expanded_tasks.get(dep).is_some_and(|s| s.virtual_parent) {
+                    if expanded_tasks.get(&dep.task).is_some_and(|s| s.virtual_parent) {
                         // Virtual parent -> redirect to subtasks
-                        let prefix = format!("{dep}:");
+                        let prefix = format!("{}:", dep.task);
                         for subtask in entry_names {
                             if subtask.starts_with(&prefix) {
                                 deps.push(subtask.clone());
                             }
                         }
-                    } else if entry_names.contains(dep) {
-                        deps.push(dep.clone());
+                    } else if entry_names.contains(&dep.task) {
+                        deps.push(dep.task.clone());
                     }
                 }
             }
@@ -1050,21 +1056,30 @@ impl Parser {
     /// This allows computing deps from expanded (foreach-processed) task specs.
     ///
     /// Validates that all referenced dependencies exist in the task specs.
-    fn compute_task_deps_from_specs(task_specs: &HashMap<String, TaskSpec>) -> Result<HashMap<String, Vec<String>>> {
-        let mut task_deps: HashMap<String, Vec<String>> = HashMap::new();
+    fn compute_task_deps_from_specs(task_specs: &HashMap<String, TaskSpec>) -> Result<HashMap<String, Vec<TaskEdge>>> {
+        let mut task_deps: HashMap<String, Vec<TaskEdge>> = HashMap::new();
 
         // Initialize with direct dependencies from 'before' field
         for (task_name, task_spec) in task_specs {
-            let deps: Vec<String> = task_spec.before.iter().map(|e| e.task.clone()).collect();
-            task_deps.insert(task_name.clone(), deps);
+            let edges: Vec<TaskEdge> = task_spec
+                .before
+                .iter()
+                .map(|e| TaskEdge::new(e.task.clone(), e.when))
+                .collect();
+            task_deps.insert(task_name.clone(), edges);
         }
 
+        // `after` on task X means: every task in X's `after` list depends on X.
+        // The condition lives on the inverted edge: X.after = [{task: Y, when: W}]
+        // means Y now has a dependency {task: X, when: W} added to Y's task_deps.
+        //
+        // Dedup is by (task, when) tuple - identical (task, when) pairs collapse to one edge.
         for (task_name, task_spec) in task_specs {
             for after_edge in &task_spec.after {
-                if let Some(deps) = task_deps.get_mut(&after_edge.task)
-                    && !deps.contains(task_name)
-                {
-                    deps.push(task_name.clone());
+                let deps = task_deps.entry(after_edge.task.clone()).or_default();
+                let new_edge = TaskEdge::new(task_name.clone(), after_edge.when);
+                if !deps.iter().any(|d| d.task == new_edge.task && d.when == new_edge.when) {
+                    deps.push(new_edge);
                 }
             }
         }
@@ -1073,12 +1088,12 @@ impl Parser {
         // This catches typos like "install:tx" when only "install:td" exists
         for (task_name, deps) in &task_deps {
             for dep in deps {
-                if !task_specs.contains_key(dep) {
+                if !task_specs.contains_key(&dep.task) {
                     return Err(eyre!(
                         "Task '{}' has unknown dependency '{}'\n\
                          Hint: Check for typos in the task name.",
                         task_name,
-                        dep
+                        dep.task
                     ));
                 }
             }
@@ -1166,7 +1181,7 @@ impl Parser {
     /// - Subtasks (for foreach parent tasks)
     fn collect_transitive_deps(
         task_name: &str,
-        task_deps: &HashMap<String, Vec<String>>,
+        task_deps: &HashMap<String, Vec<TaskEdge>>,
         task_specs: &HashMap<String, TaskSpec>,
         collected: &mut HashSet<String>,
     ) -> Result<()> {
@@ -1179,7 +1194,7 @@ impl Parser {
         // Collect upstream dependencies (before)
         if let Some(deps) = task_deps.get(task_name) {
             for dep in deps {
-                Self::collect_transitive_deps(dep, task_deps, task_specs, collected)?;
+                Self::collect_transitive_deps(&dep.task, task_deps, task_specs, collected)?;
             }
         }
 
@@ -2403,8 +2418,8 @@ mod tests {
     fn test_collect_transitive_deps_basic() {
         let mut task_deps = HashMap::new();
         task_deps.insert("a".to_string(), vec![]);
-        task_deps.insert("b".to_string(), vec!["a".to_string()]);
-        task_deps.insert("c".to_string(), vec!["b".to_string()]);
+        task_deps.insert("b".to_string(), vec![TaskEdge::success("a")]);
+        task_deps.insert("c".to_string(), vec![TaskEdge::success("b")]);
 
         let task_specs = HashMap::new();
         let mut collected = HashSet::new();
@@ -2422,7 +2437,7 @@ mod tests {
         // Test that 'after' tasks are automatically included
         let mut task_deps = HashMap::new();
         task_deps.insert("cov".to_string(), vec![]);
-        task_deps.insert("cov-report".to_string(), vec!["cov".to_string()]);
+        task_deps.insert("cov-report".to_string(), vec![TaskEdge::success("cov")]);
 
         let mut task_specs = HashMap::new();
         let cov_spec = TaskSpec {
@@ -2495,7 +2510,7 @@ mod tests {
         // Running a should include: a, b, and dep
         let mut task_deps = HashMap::new();
         task_deps.insert("a".to_string(), vec![]);
-        task_deps.insert("b".to_string(), vec!["dep".to_string()]);
+        task_deps.insert("b".to_string(), vec![TaskEdge::success("dep")]);
         task_deps.insert("dep".to_string(), vec![]);
 
         let mut task_specs = HashMap::new();
@@ -2534,7 +2549,7 @@ mod tests {
         // Test that circular references via after don't cause infinite loops
         let mut task_deps = HashMap::new();
         task_deps.insert("a".to_string(), vec![]);
-        task_deps.insert("b".to_string(), vec!["a".to_string()]);
+        task_deps.insert("b".to_string(), vec![TaskEdge::success("a")]);
 
         let mut task_specs = HashMap::new();
 
@@ -2614,12 +2629,12 @@ tasks:
 
         // Check that b depends on a and c depends on b
         assert!(
-            b.task_deps.contains(&"install:a".to_string()),
+            b.task_deps.iter().any(|d| d.task == "install:a"),
             "install:b should depend on install:a, got: {:?}",
             b.task_deps
         );
         assert!(
-            c.task_deps.contains(&"install:b".to_string()),
+            c.task_deps.iter().any(|d| d.task == "install:b"),
             "install:c should depend on install:b, got: {:?}",
             c.task_deps
         );
@@ -2671,12 +2686,12 @@ tasks:
 
         // b should NOT depend on a, c should NOT depend on b
         assert!(
-            !b.task_deps.contains(&"install:a".to_string()),
+            !b.task_deps.iter().any(|d| d.task == "install:a"),
             "install:b should NOT depend on install:a when parallel: true, got: {:?}",
             b.task_deps
         );
         assert!(
-            !c.task_deps.contains(&"install:b".to_string()),
+            !c.task_deps.iter().any(|d| d.task == "install:b"),
             "install:c should NOT depend on install:b when parallel: true, got: {:?}",
             c.task_deps
         );
@@ -2717,7 +2732,7 @@ tasks:
 
         // Default (parallel: true) means b should NOT depend on a
         assert!(
-            !subtask_b.task_deps.contains(&"install:a".to_string()),
+            !subtask_b.task_deps.iter().any(|d| d.task == "install:a"),
             "By default, install:b should NOT depend on install:a, got: {:?}",
             subtask_b.task_deps
         );
@@ -2837,7 +2852,7 @@ tasks:
     fn test_collect_transitive_deps_subtask_with_deps() {
         // Subtask with its own dependencies should still collect those
         let mut task_deps = HashMap::new();
-        task_deps.insert("install:td".to_string(), vec!["setup".to_string()]);
+        task_deps.insert("install:td".to_string(), vec![TaskEdge::success("setup")]);
         task_deps.insert("setup".to_string(), vec![]);
 
         let mut task_specs = HashMap::new();
@@ -3035,7 +3050,7 @@ tasks:
         // Test: task 'deploy' depends on a specific subtask 'install:td'
         // Running 'deploy' should collect install:td but NOT other install subtasks
         let mut task_deps = HashMap::new();
-        task_deps.insert("deploy".to_string(), vec!["install:td".to_string()]);
+        task_deps.insert("deploy".to_string(), vec![TaskEdge::success("install:td")]);
 
         let mut task_specs = HashMap::new();
 

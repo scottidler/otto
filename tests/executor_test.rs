@@ -7,6 +7,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
+use otto::executor::task::TaskEdge;
 use otto::executor::{Task, TaskScheduler, TaskStatus, Workspace, workspace::ExecutionContext};
 
 /// Helper to set up a test-specific database path and workspace
@@ -75,7 +76,7 @@ async fn test_task_dependencies() -> Result<()> {
     let task2_spec = Task::new(
         "task2".to_string(),
         None,
-        vec!["task1".to_string()],
+        vec![TaskEdge::success("task1")],
         vec![],
         vec![],
         HashMap::new(),
@@ -86,7 +87,7 @@ async fn test_task_dependencies() -> Result<()> {
     let task3_spec = Task::new(
         "task3".to_string(),
         None,
-        vec!["task2".to_string()],
+        vec![TaskEdge::success("task2")],
         vec![],
         vec![],
         HashMap::new(),
@@ -186,7 +187,7 @@ async fn test_dependency_ordering() -> Result<()> {
     let task1_spec = Task::new(
         "task1".to_string(),
         None,
-        vec!["task2".to_string(), "task3".to_string()],
+        vec![TaskEdge::success("task2"), TaskEdge::success("task3")],
         vec![],
         vec![],
         HashMap::new(),
@@ -197,7 +198,7 @@ async fn test_dependency_ordering() -> Result<()> {
     let task2_spec = Task::new(
         "task2".to_string(),
         None,
-        vec!["task4".to_string()],
+        vec![TaskEdge::success("task4")],
         vec![],
         vec![],
         HashMap::new(),
@@ -208,7 +209,7 @@ async fn test_dependency_ordering() -> Result<()> {
     let task3_spec = Task::new(
         "task3".to_string(),
         None,
-        vec!["task4".to_string()],
+        vec![TaskEdge::success("task4")],
         vec![],
         vec![],
         HashMap::new(),

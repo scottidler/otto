@@ -182,8 +182,8 @@ impl DagVisualizer {
             let task = &node_data.weight;
             let current_index = daggy::NodeIndex::new(node_index);
 
-            for dep_name in &task.task_deps {
-                if let Some(&dep_index) = task_indices.get(dep_name) {
+            for dep in &task.task_deps {
+                if let Some(&dep_index) = task_indices.get(&dep.task) {
                     edges_to_add.push((dep_index, current_index, task.name.clone()));
                 }
             }
@@ -309,8 +309,8 @@ impl DagVisualizer {
         for node in dag.raw_nodes() {
             let task = &node.weight;
             if let Some(target_id) = task_to_id.get(&task.name) {
-                for dep_name in &task.task_deps {
-                    if let Some(source_id) = task_to_id.get(dep_name) {
+                for dep in &task.task_deps {
+                    if let Some(source_id) = task_to_id.get(&dep.task) {
                         dot.push_str(&format!(
                             "  {source_id} -> {target_id} [label=\"depends\", color=\"black\"];\n"
                         ));
@@ -427,8 +427,8 @@ impl DagVisualizer {
                         .map(|t| {
                             t.task_deps
                                 .iter()
-                                .filter(|d| !d.starts_with(&format!("{}:", parent)))
-                                .cloned()
+                                .filter(|d| !d.task.starts_with(&format!("{}:", parent)))
+                                .map(|d| d.task.clone())
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -449,7 +449,7 @@ impl DagVisualizer {
                     task.name.clone(),
                     CollapsedTaskInfo {
                         display_name: task.name.clone(),
-                        deps: task.task_deps.clone(),
+                        deps: task.task_deps.iter().map(|d| d.task.clone()).collect(),
                         file_deps_count: task.file_deps.len(),
                         output_deps_count: task.output_deps.len(),
                     },
@@ -748,7 +748,7 @@ mod tests {
         Task::new(
             name.to_string(),
             parent,
-            deps.into_iter().map(String::from).collect(),
+            deps.into_iter().map(crate::executor::task::TaskEdge::success).collect(),
             vec![],
             vec![],
             HashMap::new(),

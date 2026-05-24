@@ -252,7 +252,8 @@ tasks:
     assert!(compile_spec.output_deps.iter().any(|f| f.contains("build/app")));
 
     let test_spec = task_specs.iter().find(|t| t.name == "test").unwrap();
-    assert_eq!(test_spec.task_deps, vec!["compile"]);
+    assert_eq!(test_spec.task_deps.len(), 1);
+    assert_eq!(test_spec.task_deps[0].task, "compile");
     assert!(test_spec.file_deps.iter().any(|f| f.contains("build/app")));
     assert!(test_spec.output_deps.iter().any(|f| f.contains("test_results.log")));
 

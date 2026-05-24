@@ -247,7 +247,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     let task_deps_completed = blocked_task
                         .task_deps
                         .iter()
-                        .all(|task_dep| completed_set.contains(task_dep));
+                        .all(|task_dep| completed_set.contains(&task_dep.task));
                     if !task_deps_completed {
                         return true; // Keep the task in blocked list
                     }
@@ -326,7 +326,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             while active_tasks.len() < max_concurrent && !ready_queue.is_empty() {
                 let task = ready_queue.pop_front().unwrap();
 
-                let deps_completed = task.task_deps.iter().all(|dep| completed_set.contains(dep));
+                let deps_completed = task.task_deps.iter().all(|dep| completed_set.contains(&dep.task));
                 if !deps_completed {
                     // Put it back at the end of the queue
                     ready_queue.push_back(task);
@@ -393,8 +393,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     active_tasks.remove(&completed_task);
 
                     blocked_tasks.retain(|task| {
-                        let task_deps_completed =
-                            task.task_deps.iter().all(|task_dep| completed_set.contains(task_dep));
+                        let task_deps_completed = task
+                            .task_deps
+                            .iter()
+                            .all(|task_dep| completed_set.contains(&task_dep.task));
                         if !task_deps_completed {
                             return true; // Keep the task in blocked list
                         }
@@ -405,7 +407,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     });
 
                     for remaining_task in &blocked_tasks {
-                        if remaining_task.task_deps.contains(&completed_task)
+                        if remaining_task.task_deps.iter().any(|d| d.task == completed_task)
                             && let Some(degree) = in_degree.get_mut(&remaining_task.name)
                         {
                             *degree = degree.saturating_sub(1);
@@ -476,12 +478,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             {
                 let statuses = task_statuses.lock().await;
                 for dep in &task_deps {
-                    match statuses.get(dep) {
+                    match statuses.get(&dep.task) {
                         Some(TaskStatus::Completed) | Some(TaskStatus::Skipped) => {
                             // Dependency is satisfied
                         }
                         _ => {
-                            return Err(eyre!("Dependency {} not completed for task {}", dep, task_name));
+                            return Err(eyre!("Dependency {} not completed for task {}", dep.task, task_name));
                         }
                     }
                 }
@@ -498,7 +500,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             tokio::fs::create_dir_all(&task_dir).await?;
 
             // Setup dependency input files (symlink outputs from dependencies)
-            for dep_name in &task_deps {
+            for dep_edge in &task_deps {
+                let dep_name = &dep_edge.task;
                 let dep_output_file = workspace.task_output_file(dep_name);
                 let current_input_file = workspace.task_input_file(&task_name, dep_name);
                 let current_input_env_file = workspace.task_input_env_file(&task_name, dep_name);
@@ -915,7 +918,7 @@ mod tests {
             Task::new(
                 "task1".to_string(),
                 None,
-                vec!["task2".to_string()],
+                vec![crate::executor::task::TaskEdge::success("task2")],
                 vec![],
                 vec![],
                 HashMap::new(),
@@ -969,7 +972,7 @@ mod tests {
             Task::new(
                 "task2".to_string(),
                 None,
-                vec!["task1".to_string()],
+                vec![crate::executor::task::TaskEdge::success("task1")],
                 vec![],
                 vec![],
                 HashMap::new(),
@@ -1221,8 +1224,8 @@ mod tests {
         let task2 = Task::new(
             "step2".to_string(),
             None,
-            vec!["step1".to_string()],                             // Task dependency
-            vec![intermediate_file.to_string_lossy().to_string()], // File dependency
+            vec![crate::executor::task::TaskEdge::success("step1")], // Task dependency
+            vec![intermediate_file.to_string_lossy().to_string()],   // File dependency
             vec![output_file.to_string_lossy().to_string()],
             HashMap::new(),
             HashMap::new(),
@@ -1876,7 +1879,10 @@ mod tests {
             Task::new(
                 "dependent_task".to_string(),
                 None,
-                vec!["skip_task".to_string(), "run_task".to_string()],
+                vec![
+                    crate::executor::task::TaskEdge::success("skip_task"),
+                    crate::executor::task::TaskEdge::success("run_task"),
+                ],
                 vec![],
                 vec![],
                 HashMap::new(),

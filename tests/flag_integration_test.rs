@@ -392,7 +392,7 @@ tasks:
         // Check that no subtask depends on another subtask (only parent deps)
         for dep in &task.task_deps {
             assert!(
-                !dep.starts_with("examples:"),
+                !dep.task.starts_with("examples:"),
                 "Parallel subtasks should not depend on each other"
             );
         }
@@ -419,7 +419,7 @@ tasks:
     // Verify that at least some subtasks depend on other subtasks (chained)
     let has_subtask_deps = subtasks
         .iter()
-        .any(|t| t.task_deps.iter().any(|d| d.starts_with("examples:")));
+        .any(|t| t.task_deps.iter().any(|d| d.task.starts_with("examples:")));
 
     assert!(
         has_subtask_deps,

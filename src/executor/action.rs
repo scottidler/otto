@@ -76,7 +76,8 @@ impl<F: FileSystem> ActionProcessor<F> {
             ("", user_action.to_string())
         };
 
-        let prologue = processor.generate_prologue(&task.task_deps, task)?;
+        let dep_names: Vec<String> = task.task_deps.iter().map(|e| e.task.clone()).collect();
+        let prologue = processor.generate_prologue(&dep_names, task)?;
         let epilogue = processor.generate_epilogue()?;
 
         let script = if shebang.is_empty() {
@@ -764,7 +765,7 @@ mod tests {
         let task = Task::new(
             "test_task".to_string(),
             None,
-            vec!["dep_task".to_string()],
+            vec![crate::executor::task::TaskEdge::success("dep_task")],
             vec![],
             vec![],
             task_envs,
@@ -822,7 +823,7 @@ mod tests {
         let task = Task::new(
             "test_task".to_string(),
             None,
-            vec!["dep_task".to_string()],
+            vec![crate::executor::task::TaskEdge::success("dep_task")],
             vec![],
             vec![],
             task_envs,
