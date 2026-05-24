@@ -2,6 +2,7 @@
 
 use eyre::Result;
 use serde::de::{Deserializer, Error, MapAccess, SeqAccess, Visitor};
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -115,7 +116,7 @@ where
     }
     deserializer.deserialize_any(ValueEnum)
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Nargs {
     #[default]
     One,
@@ -124,6 +125,23 @@ pub enum Nargs {
     OneOrMore,
     ZeroOrMore,
     Range(usize, usize),
+}
+
+impl Serialize for Nargs {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let s = match self {
+            Self::One => "1".to_string(),
+            Self::Zero => "0".to_string(),
+            Self::OneOrZero => "?".to_string(),
+            Self::OneOrMore => "+".to_string(),
+            Self::ZeroOrMore => "*".to_string(),
+            Self::Range(min, max) => format!("{}:{}", min + 1, max),
+        };
+        serializer.serialize_str(&s)
+    }
 }
 
 impl fmt::Display for Nargs {
@@ -152,7 +170,6 @@ impl<'de> Deserialize<'de> for Nargs {
             "+" => Self::OneOrMore,
             "*" => Self::ZeroOrMore,
             _ => {
-                println!("s={s}");
                 if s.contains(':') {
                     let parts: Vec<&str> = s.split(':').collect();
                     let min: usize = parts[0].parse().map_err(Error::custom)?;
@@ -488,5 +505,23 @@ mod tests {
         let mut dict = HashMap::new();
         dict.insert("key".to_string(), "value".to_string());
         assert_eq!(Value::Dict(dict).to_string(), "Value::Dict({key: value})");
+    }
+
+    #[test]
+    fn test_nargs_roundtrip_all_variants() {
+        let cases = vec![
+            Nargs::One,
+            Nargs::Zero,
+            Nargs::OneOrZero,
+            Nargs::OneOrMore,
+            Nargs::ZeroOrMore,
+            Nargs::Range(0, 3),
+            Nargs::Range(2, 5),
+        ];
+        for nargs in cases {
+            let yaml = serde_yaml::to_string(&nargs).unwrap();
+            let parsed: Nargs = serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("failed to parse {yaml:?}: {e}"));
+            assert_eq!(nargs, parsed, "round-trip failed for {nargs:?} (yaml: {yaml:?})");
+        }
     }
 }
