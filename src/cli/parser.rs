@@ -713,7 +713,12 @@ impl Parser {
         let serial_tasks: HashSet<String> = self.detect_serial_tasks(requested_tasks);
 
         // Step 0.5: Expand foreach tasks into subtasks
-        let expanded_tasks = self.expand_foreach_tasks_with_serial(&serial_tasks)?;
+        let mut expanded_tasks = self.expand_foreach_tasks_with_serial(&serial_tasks)?;
+
+        // Step 0.6: Desugar `on-failure:` into synthetic `after:` edges.
+        // X with `on-failure: [Y]` becomes `X.after += [{task: Y, when: failure}]`,
+        // which compute_task_deps_from_specs inverts into Y.task_deps += [{X, failure}].
+        Self::apply_on_failure_sugar(&mut expanded_tasks)?;
 
         // Step 1: Compute all task dependencies using simple linear algorithm
         let task_deps = Self::compute_task_deps_from_specs(&expanded_tasks)?;
@@ -1056,9 +1061,54 @@ impl Parser {
         result
     }
 
-    /// Compute task dependencies from a given task specs map.
-    /// This allows computing deps from expanded (foreach-processed) task specs.
+    /// Desugar each host's `on_failure:` field into synthetic `after:` edges.
     ///
+    /// For each host X with `on_failure: [Y]`:
+    /// - Push `EdgeSpec { task: Y, when: Failure, is_injected_sugar: true }` onto X's
+    ///   `after:` list. compute_task_deps_from_specs then inverts this to
+    ///   `Y.task_deps += [{X, failure}]`, so Y depends on X with `when: failure`.
+    /// - The host's `on_failure` field is preserved verbatim so the serializer
+    ///   can re-emit it; `is_injected_sugar` lets the serializer filter the
+    ///   synthetic `after:` entry so it doesn't show up as a duplicate.
+    fn apply_on_failure_sugar(specs: &mut HashMap<String, TaskSpec>) -> Result<()> {
+        // Collect (host, target) pairs first, then mutate. We can't hold a &mut to
+        // `specs` while iterating it. Sort for determinism: HashMap iteration order
+        // is non-deterministic, so without sorting the synthetic-edge order would
+        // sporadically reorder between runs and break byte-equivalent round-trip.
+        let mut pairs: Vec<(String, String)> = specs
+            .iter()
+            .flat_map(|(host, spec)| spec.on_failure.iter().map(move |target| (host.clone(), target.clone())))
+            .collect();
+        pairs.sort();
+
+        for (host, target) in pairs {
+            if host == target {
+                return Err(eyre!(
+                    "on-failure on task '{}' references itself; a task cannot depend on its own failure",
+                    host
+                ));
+            }
+            if !specs.contains_key(&target) {
+                return Err(eyre!(
+                    "on-failure on task '{}' references unknown task '{}'",
+                    host,
+                    target
+                ));
+            }
+            let host_spec = specs
+                .get_mut(&host)
+                .expect("host was iterated from specs and the map has not shrunk");
+            host_spec.after.push(crate::cfg::edge::EdgeSpec {
+                task: target.clone(),
+                when: crate::cfg::edge::When::Failure,
+                from_sugar: false,
+                is_injected_sugar: true,
+            });
+        }
+        Ok(())
+    }
+
+    /// Compute task dependencies from a given task specs map.
     /// Validates that all referenced dependencies exist in the task specs.
     fn compute_task_deps_from_specs(task_specs: &HashMap<String, TaskSpec>) -> Result<HashMap<String, Vec<TaskEdge>>> {
         let mut task_deps: HashMap<String, Vec<TaskEdge>> = HashMap::new();
