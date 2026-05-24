@@ -79,6 +79,7 @@ impl TestFixture {
                 help: None,
                 foreach: None,
                 virtual_parent: false,
+                on_failure: vec![],
             },
             &self.temp_path,
         )
@@ -96,7 +97,10 @@ impl TestFixture {
             &TaskSpec {
                 name: name.to_string(),
                 action: action.to_string(),
-                before: before.iter().map(|s| s.to_string()).collect(),
+                before: before
+                    .iter()
+                    .map(|s| otto::cfg::edge::EdgeSpec::sugar(s.to_string()))
+                    .collect(),
                 after: vec![],
                 input: inputs.iter().map(|s| s.to_string()).collect(),
                 output: outputs.iter().map(|s| s.to_string()).collect(),
@@ -105,6 +109,7 @@ impl TestFixture {
                 help: None,
                 foreach: None,
                 virtual_parent: false,
+                on_failure: vec![],
             },
             &self.temp_path,
         )
@@ -333,6 +338,7 @@ async fn test_file_dependencies_error_handling() -> Result<()> {
             help: None,
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         },
         temp_path,
     );
@@ -379,6 +385,7 @@ async fn test_file_dependencies_error_handling() -> Result<()> {
             help: None,
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         },
         temp_path,
     );
@@ -483,6 +490,7 @@ async fn test_mixed_task_and_file_dependencies() -> Result<()> {
             help: None,
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         },
         temp_path,
     );
@@ -498,7 +506,7 @@ async fn test_mixed_task_and_file_dependencies() -> Result<()> {
                 report_file.display()
             )
             .to_string(),
-            before: vec!["preprocess".to_string()],
+            before: vec![otto::cfg::edge::EdgeSpec::sugar("preprocess")],
             after: vec![],
             input: vec![processed_file.to_string_lossy().to_string()],
             output: vec![report_file.to_string_lossy().to_string()],
@@ -507,6 +515,7 @@ async fn test_mixed_task_and_file_dependencies() -> Result<()> {
             help: None,
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         },
         temp_path,
     );
@@ -587,6 +596,7 @@ async fn test_file_dependencies_incremental_detection() -> Result<()> {
             help: None,
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         },
         temp_path,
     );
@@ -733,6 +743,7 @@ async fn test_file_dependencies_multiple_files() -> Result<()> {
             help: None,
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         },
         temp_path,
     );
@@ -904,6 +915,7 @@ async fn test_file_dependencies_task_skipping() -> Result<()> {
             help: None,
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         },
         temp_path,
     );
@@ -971,6 +983,7 @@ async fn test_file_dependencies_modification_detection() -> Result<()> {
             help: None,
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         },
         &fixture.temp_path,
     );

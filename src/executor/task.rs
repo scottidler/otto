@@ -77,9 +77,6 @@ impl Task {
 
     #[must_use]
     pub fn from_task(task_spec: &TaskSpec) -> Self {
-        let _name = task_spec.name.clone();
-        let _task_deps = task_spec.before.clone();
-
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         Self::from_task_with_cwd_and_global_envs(task_spec, &cwd, &HashMap::new())
@@ -97,7 +94,7 @@ impl Task {
         global_envs: &HashMap<String, String>,
     ) -> Self {
         let name = task_spec.name.clone();
-        let task_deps = task_spec.before.clone();
+        let task_deps: Vec<String> = task_spec.before.iter().map(|e| e.task.clone()).collect();
 
         // Derive parent for subtasks (names with colons like "install:td")
         let parent = if name.contains(':') {
@@ -216,10 +213,11 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_task_spec(name: &str, before: Vec<String>, action: &str) -> TaskSpec {
+        use crate::cfg::edge::EdgeSpec;
         TaskSpec {
             name: name.to_string(),
             help: None,
-            before,
+            before: before.into_iter().map(EdgeSpec::sugar).collect(),
             after: vec![],
             input: vec![],
             output: vec![],
@@ -228,6 +226,7 @@ mod tests {
             action: action.to_string(),
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         }
     }
 

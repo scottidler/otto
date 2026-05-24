@@ -982,6 +982,7 @@ mod tests {
                     ..Default::default()
                 }),
                 virtual_parent: false,
+                on_failure: vec![],
             },
         );
 

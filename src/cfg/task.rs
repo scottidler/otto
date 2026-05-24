@@ -9,6 +9,7 @@ use std::fmt;
 use std::path::Path;
 use std::vec::Vec;
 
+use crate::cfg::edge::EdgeSpec;
 use crate::cfg::param::{ParamSpecs, deserialize_param_map};
 
 pub type TaskSpecs = HashMap<String, TaskSpec>;
@@ -218,8 +219,8 @@ impl ForeachSpec {
 pub struct TaskSpec {
     pub name: String,
     pub help: Option<String>,
-    pub after: Vec<String>,
-    pub before: Vec<String>,
+    pub after: Vec<EdgeSpec>,
+    pub before: Vec<EdgeSpec>,
     pub input: Vec<String>,
     pub output: Vec<String>,
     pub envs: HashMap<String, String>,
@@ -229,6 +230,10 @@ pub struct TaskSpec {
     pub foreach: Option<ForeachSpec>,
     /// True for foreach-created virtual parent tasks (no action, just dependency tracking)
     pub virtual_parent: bool,
+    /// Tasks named here fire when this task fails (parse-time sugar that desugars
+    /// into `after:` edges with `when: failure` on the named target tasks).
+    /// Preserved verbatim for round-trip serialization.
+    pub on_failure: Vec<String>,
 }
 
 // Helper struct for deserialization that accepts bash:, python:, or action: fields
@@ -238,10 +243,10 @@ struct TaskSpecHelper {
     help: Option<String>,
 
     #[serde(default)]
-    after: Vec<String>,
+    after: Vec<EdgeSpec>,
 
     #[serde(default)]
-    before: Vec<String>,
+    before: Vec<EdgeSpec>,
 
     #[serde(default)]
     input: Vec<String>,
@@ -270,6 +275,11 @@ struct TaskSpecHelper {
     // Support for foreach subtask generation
     #[serde(default)]
     foreach: Option<ForeachSpec>,
+
+    // Sugar surface: tasks named here will be wired with when: failure edges
+    // pointing back at this host task. Desugared by the parser before scheduling.
+    #[serde(default, rename = "on-failure")]
+    on_failure: Vec<String>,
 }
 
 impl<'de> Deserialize<'de> for TaskSpec {
@@ -311,6 +321,7 @@ impl<'de> Deserialize<'de> for TaskSpec {
             action,
             foreach: helper.foreach,
             virtual_parent: false,
+            on_failure: helper.on_failure,
         })
     }
 }
@@ -326,12 +337,20 @@ impl Serialize for TaskSpec {
             map.serialize_entry("help", help)?;
         }
 
-        if !self.after.is_empty() {
-            map.serialize_entry("after", &self.after)?;
+        // Filter out injected sugar edges - those are serialized via the host's
+        // `on-failure:` field, not the target's `after:` list.
+        let visible_after: Vec<&EdgeSpec> = self.after.iter().filter(|e| !e.is_injected_sugar).collect();
+        if !visible_after.is_empty() {
+            map.serialize_entry("after", &visible_after)?;
         }
 
-        if !self.before.is_empty() {
-            map.serialize_entry("before", &self.before)?;
+        let visible_before: Vec<&EdgeSpec> = self.before.iter().filter(|e| !e.is_injected_sugar).collect();
+        if !visible_before.is_empty() {
+            map.serialize_entry("before", &visible_before)?;
+        }
+
+        if !self.on_failure.is_empty() {
+            map.serialize_entry("on-failure", &self.on_failure)?;
         }
 
         if !self.input.is_empty() {
@@ -415,8 +434,8 @@ impl TaskSpec {
     pub fn new(
         name: String,
         help: Option<String>,
-        after: Vec<String>,
-        before: Vec<String>,
+        after: Vec<EdgeSpec>,
+        before: Vec<EdgeSpec>,
         input: Vec<String>,
         output: Vec<String>,
         envs: HashMap<String, String>,
@@ -435,6 +454,7 @@ impl TaskSpec {
             action,
             foreach: None,
             virtual_parent: false,
+            on_failure: Vec::new(),
         }
     }
 
@@ -499,6 +519,7 @@ impl TaskSpec {
             action: String::new(), // No action - virtual task
             foreach: None,
             virtual_parent: true,
+            on_failure: self.on_failure.clone(),
         }
     }
 }
@@ -766,8 +787,8 @@ mod foreach_tests {
         let mut task = TaskSpec::new(
             "examples".to_string(),
             Some("Run examples".to_string()),
-            vec!["cleanup".to_string()],
-            vec!["build".to_string()],
+            vec![EdgeSpec::sugar("cleanup")],
+            vec![EdgeSpec::sugar("build")],
             vec!["input.txt".to_string()],
             vec!["output.txt".to_string()],
             HashMap::from([("KEY".to_string(), "value".to_string())]),
@@ -780,8 +801,8 @@ mod foreach_tests {
 
         assert_eq!(parent.name, "examples");
         assert_eq!(parent.help, Some("Run examples".to_string()));
-        assert_eq!(parent.after, vec!["cleanup".to_string()]);
-        assert_eq!(parent.before, vec!["build".to_string()]);
+        assert_eq!(parent.after, vec![EdgeSpec::sugar("cleanup")]);
+        assert_eq!(parent.before, vec![EdgeSpec::sugar("build")]);
         assert!(parent.input.is_empty());
         assert!(parent.output.is_empty());
         assert!(parent.envs.is_empty());

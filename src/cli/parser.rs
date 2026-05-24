@@ -139,7 +139,7 @@ impl Task {
         global_envs: &HashMap<String, String>,
     ) -> Self {
         let name = task_spec.name.clone();
-        let task_deps = task_spec.before.clone();
+        let task_deps: Vec<String> = task_spec.before.iter().map(|e| e.task.clone()).collect();
 
         // Resolve file globs from input to canonical paths using explicit cwd
         let file_deps = Self::resolve_file_globs(&task_spec.input, cwd);
@@ -1055,12 +1055,13 @@ impl Parser {
 
         // Initialize with direct dependencies from 'before' field
         for (task_name, task_spec) in task_specs {
-            task_deps.insert(task_name.clone(), task_spec.before.clone());
+            let deps: Vec<String> = task_spec.before.iter().map(|e| e.task.clone()).collect();
+            task_deps.insert(task_name.clone(), deps);
         }
 
         for (task_name, task_spec) in task_specs {
-            for after_task in &task_spec.after {
-                if let Some(deps) = task_deps.get_mut(after_task)
+            for after_edge in &task_spec.after {
+                if let Some(deps) = task_deps.get_mut(&after_edge.task)
                     && !deps.contains(task_name)
                 {
                     deps.push(task_name.clone());
@@ -1143,7 +1144,7 @@ impl Parser {
                     // If running serially, chain subtasks: each depends on the previous
                     if run_serial {
                         if let Some(prev_name) = &prev_subtask_name {
-                            subtask.before.push(prev_name.clone());
+                            subtask.before.push(crate::cfg::edge::EdgeSpec::sugar(prev_name));
                         }
                         prev_subtask_name = Some(subtask.name.clone());
                     }
@@ -1184,8 +1185,8 @@ impl Parser {
 
         // Collect downstream tasks (after) - these auto-run when this task is requested
         if let Some(spec) = task_specs.get(task_name) {
-            for after_task in &spec.after {
-                Self::collect_transitive_deps(after_task, task_deps, task_specs, collected)?;
+            for after_edge in &spec.after {
+                Self::collect_transitive_deps(&after_edge.task, task_deps, task_specs, collected)?;
             }
         }
 
@@ -1440,6 +1441,7 @@ impl Parser {
             action: "# Built-in graph command".to_string(),
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         };
 
         self.config_spec.tasks.insert("Graph".to_string(), graph_task);
@@ -1518,6 +1520,7 @@ impl Parser {
             action: "# Built-in clean command".to_string(),
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         };
 
         self.config_spec.tasks.insert("Clean".to_string(), clean_task);
@@ -1632,6 +1635,7 @@ impl Parser {
             action: "# Built-in history command".to_string(),
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         };
 
         self.config_spec.tasks.insert("History".to_string(), history_task);
@@ -1710,6 +1714,7 @@ impl Parser {
             action: "# Built-in stats command".to_string(),
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         };
 
         self.config_spec.tasks.insert("Stats".to_string(), stats_task);
@@ -1770,6 +1775,7 @@ impl Parser {
             action: "# Built-in convert command".to_string(),
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         };
 
         self.config_spec.tasks.insert("Convert".to_string(), convert_task);
@@ -1902,6 +1908,7 @@ impl Parser {
             action: "# Built-in upgrade command".to_string(),
             foreach: None,
             virtual_parent: false,
+            on_failure: vec![],
         };
 
         self.config_spec.tasks.insert("Upgrade".to_string(), upgrade_task);
@@ -2420,7 +2427,7 @@ mod tests {
         let mut task_specs = HashMap::new();
         let cov_spec = TaskSpec {
             name: "cov".to_string(),
-            after: vec!["cov-report".to_string()],
+            after: vec![crate::cfg::edge::EdgeSpec::sugar("cov-report")],
             ..Default::default()
         };
         task_specs.insert("cov".to_string(), cov_spec);
@@ -2453,14 +2460,14 @@ mod tests {
 
         let a_spec = TaskSpec {
             name: "a".to_string(),
-            after: vec!["b".to_string()],
+            after: vec![crate::cfg::edge::EdgeSpec::sugar("b")],
             ..Default::default()
         };
         task_specs.insert("a".to_string(), a_spec);
 
         let b_spec = TaskSpec {
             name: "b".to_string(),
-            after: vec!["c".to_string()],
+            after: vec![crate::cfg::edge::EdgeSpec::sugar("c")],
             ..Default::default()
         };
         task_specs.insert("b".to_string(), b_spec);
@@ -2495,7 +2502,7 @@ mod tests {
 
         let a_spec = TaskSpec {
             name: "a".to_string(),
-            after: vec!["b".to_string()],
+            after: vec![crate::cfg::edge::EdgeSpec::sugar("b")],
             ..Default::default()
         };
         task_specs.insert("a".to_string(), a_spec);
@@ -2533,14 +2540,14 @@ mod tests {
 
         let a_spec = TaskSpec {
             name: "a".to_string(),
-            after: vec!["b".to_string()],
+            after: vec![crate::cfg::edge::EdgeSpec::sugar("b")],
             ..Default::default()
         };
         task_specs.insert("a".to_string(), a_spec);
 
         let b_spec = TaskSpec {
             name: "b".to_string(),
-            after: vec!["a".to_string()], // Circular after reference
+            after: vec![crate::cfg::edge::EdgeSpec::sugar("a")], // Circular after reference
             ..Default::default()
         };
         task_specs.insert("b".to_string(), b_spec);
@@ -2991,7 +2998,7 @@ tasks:
         let subtask_td = TaskSpec {
             name: "install:td".to_string(),
             action: "echo td".to_string(),
-            after: vec!["report".to_string()],
+            after: vec![crate::cfg::edge::EdgeSpec::sugar("report")],
             ..Default::default()
         };
         task_specs.insert("install:td".to_string(), subtask_td);

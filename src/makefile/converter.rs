@@ -82,7 +82,12 @@ impl OttoConverter {
 
         // Dependencies in Make become "before" in Otto
         // (task X depends on Y means Y must run before X)
-        let before = target.dependencies.clone();
+        // Emit as sugar (bare-string) edges so converted ottofiles read naturally.
+        let before: Vec<crate::cfg::edge::EdgeSpec> = target
+            .dependencies
+            .iter()
+            .map(crate::cfg::edge::EdgeSpec::sugar)
+            .collect();
 
         Ok(TaskSpec {
             name: target.name.clone(),
@@ -96,6 +101,7 @@ impl OttoConverter {
             action,
             foreach: None,
             virtual_parent: false,
+            on_failure: Vec::new(),
         })
     }
 
@@ -216,8 +222,8 @@ mod tests {
 
         let task = config.tasks.get("build").unwrap();
         assert_eq!(task.before.len(), 2);
-        assert!(task.before.contains(&"test".to_string()));
-        assert!(task.before.contains(&"clean".to_string()));
+        assert!(task.before.iter().any(|e| e.task == "test"));
+        assert!(task.before.iter().any(|e| e.task == "clean"));
     }
 
     #[test]
