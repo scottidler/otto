@@ -123,11 +123,18 @@ enum EdgeState {
 }
 
 /// Evaluate a single dependency edge against the runtime sets.
+/// A Skipped source short-circuits every `when:` variant to Unreachable - the source
+/// reached a terminal state that is neither Completed nor Failed, so waiting longer
+/// cannot make the edge Satisfied.
 fn classify_edge(
     edge: &TaskEdge,
     completed: &std::collections::HashSet<String>,
     failed: &std::collections::HashSet<String>,
+    skipped: &std::collections::HashSet<String>,
 ) -> EdgeState {
+    if skipped.contains(&edge.task) {
+        return EdgeState::Unreachable;
+    }
     match edge.when {
         When::Success => {
             if completed.contains(&edge.task) {
@@ -162,13 +169,18 @@ fn skip_reason_for(
     task: &Task,
     completed: &std::collections::HashSet<String>,
     failed: &std::collections::HashSet<String>,
+    skipped: &std::collections::HashSet<String>,
 ) -> String {
     for edge in &task.task_deps {
-        if matches!(classify_edge(edge, completed, failed), EdgeState::Unreachable) {
-            return match edge.when {
-                When::Success => format!("dep {} failed; this task required when: success", edge.task),
-                When::Failure => format!("dep {} succeeded; this task required when: failure", edge.task),
-                When::Always => format!("dep {} unreachable", edge.task),
+        if matches!(classify_edge(edge, completed, failed, skipped), EdgeState::Unreachable) {
+            return if skipped.contains(&edge.task) {
+                format!("dep {} skipped; cascade", edge.task)
+            } else {
+                match edge.when {
+                    When::Success => format!("dep {} failed; this task required when: success", edge.task),
+                    When::Failure => format!("dep {} succeeded; this task required when: failure", edge.task),
+                    When::Always => format!("dep {} unreachable", edge.task),
+                }
             };
         }
     }
@@ -387,6 +399,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         // Track completed and failed tasks for dependency satisfaction checking.
         let mut completed_set = std::collections::HashSet::new();
         let mut failed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut skipped_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut skip_reasons: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
         // Record the first failure to surface as the run's error; conditional follow-ups
@@ -401,14 +414,15 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 let states: Vec<EdgeState> = task
                     .task_deps
                     .iter()
-                    .map(|e| classify_edge(e, &completed_set, &failed_set))
+                    .map(|e| classify_edge(e, &completed_set, &failed_set, &skipped_set))
                     .collect();
 
                 if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
                     // Dep state contradicts this task's edge condition -> Skip.
-                    let reason = skip_reason_for(&task, &completed_set, &failed_set);
+                    let reason = skip_reason_for(&task, &completed_set, &failed_set, &skipped_set);
                     info!("Skipping task {} ({reason})", task.name);
                     skip_reasons.insert(task.name.clone(), reason);
+                    skipped_set.insert(task.name.clone());
                     {
                         let mut statuses = self.task_statuses.lock().await;
                         statuses.insert(task.name.clone(), TaskStatus::Skipped);
@@ -457,7 +471,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     let states: Vec<EdgeState> = task
                         .task_deps
                         .iter()
-                        .map(|e| classify_edge(e, &completed_set, &failed_set))
+                        .map(|e| classify_edge(e, &completed_set, &failed_set, &skipped_set))
                         .collect();
                     if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
                         newly_skipped.push(task.clone());
@@ -474,9 +488,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     ready_queue.push_back(t);
                 }
                 for t in newly_skipped {
-                    let reason = skip_reason_for(&t, &completed_set, &failed_set);
+                    let reason = skip_reason_for(&t, &completed_set, &failed_set, &skipped_set);
                     info!("Skipping task {} ({reason})", t.name);
                     skip_reasons.insert(t.name.clone(), reason);
+                    skipped_set.insert(t.name.clone());
                     {
                         let mut statuses = self.task_statuses.lock().await;
                         statuses.insert(t.name.clone(), TaskStatus::Skipped);
@@ -510,26 +525,78 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                             .unwrap_or(0)
                     };
 
-                    // Print user-visible success message (only in terminal mode)
+                    // Aggregation override for virtual parent tasks: the parent's
+                    // nominal Completed status is overridden based on its subtasks.
+                    // This MUST run before completed_set.insert and before the
+                    // blocked_tasks sweep - otherwise downstream when: success
+                    // dependents would be queued for a parent that should be Failed.
+                    let parent_task = self.tasks.iter().find(|t| t.name == completed_task);
+                    let final_status = if let Some(t) = parent_task
+                        && t.is_virtual_parent
+                    {
+                        let statuses_guard = self.task_statuses.lock().await;
+                        let subtask_statuses: Vec<TaskStatus> = self
+                            .tasks
+                            .iter()
+                            .filter(|st| st.parent.as_deref() == Some(t.name.as_str()))
+                            .filter_map(|st| statuses_guard.get(&st.name).cloned())
+                            .collect();
+                        drop(statuses_guard);
+                        if subtask_statuses.iter().any(|s| matches!(s, TaskStatus::Failed(_))) {
+                            TaskStatus::Failed("virtual parent: subtask failed".to_string())
+                        } else if subtask_statuses.iter().any(|s| matches!(s, TaskStatus::Skipped)) {
+                            TaskStatus::Skipped
+                        } else {
+                            TaskStatus::Completed
+                        }
+                    } else {
+                        TaskStatus::Completed
+                    };
+
+                    // Print user-visible success/failure message (only in terminal mode)
                     if !self.tui_mode {
-                        let success_msg = format!("{} finished successfully\n", colorize_task_prefix(&completed_task));
-                        print!("{success_msg}");
+                        let msg = match &final_status {
+                            TaskStatus::Completed => {
+                                format!("{} finished successfully\n", colorize_task_prefix(&completed_task))
+                            }
+                            TaskStatus::Failed(_) => format!("{} failed\n", colorize_task_prefix(&completed_task)),
+                            TaskStatus::Skipped => format!("{} skipped\n", colorize_task_prefix(&completed_task)),
+                            _ => format!("{} finished\n", colorize_task_prefix(&completed_task)),
+                        };
+                        print!("{msg}");
                         io::stdout().flush().unwrap_or(());
                     }
 
                     // Broadcast task completion to TUI
+                    let tui_status = Self::to_tui_status(&final_status);
                     self.broadcast_message(TaskMessage::Finished {
                         task_name: completed_task.clone(),
-                        status: TuiTaskStatus::Completed,
+                        status: tui_status,
                         timestamp: std::time::SystemTime::now(),
                         duration_ms,
                     });
 
+                    // Route the (possibly overridden) status to the right tracking set.
+                    match &final_status {
+                        TaskStatus::Completed => {
+                            completed_set.insert(completed_task.clone());
+                        }
+                        TaskStatus::Failed(_) => {
+                            failed_set.insert(completed_task.clone());
+                        }
+                        TaskStatus::Skipped => {
+                            // A virtual parent that aggregated to Skipped (subtasks Skipped
+                            // because their prerequisites failed) must enter skipped_set so
+                            // that downstream `when: failure` edges to this parent become
+                            // Unreachable rather than Pending forever.
+                            skipped_set.insert(completed_task.clone());
+                        }
+                        _ => {}
+                    }
                     {
                         let mut statuses = self.task_statuses.lock().await;
-                        statuses.insert(completed_task.clone(), TaskStatus::Completed);
+                        statuses.insert(completed_task.clone(), final_status);
                     }
-                    completed_set.insert(completed_task.clone());
                     completed_tasks += 1;
                     active_tasks.remove(&completed_task);
 
@@ -540,7 +607,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         let states: Vec<EdgeState> = task
                             .task_deps
                             .iter()
-                            .map(|e| classify_edge(e, &completed_set, &failed_set))
+                            .map(|e| classify_edge(e, &completed_set, &failed_set, &skipped_set))
                             .collect();
                         if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
                             newly_skipped.push(task.clone());
@@ -556,9 +623,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         ready_queue.push_back(t);
                     }
                     for t in newly_skipped {
-                        let reason = skip_reason_for(&t, &completed_set, &failed_set);
+                        let reason = skip_reason_for(&t, &completed_set, &failed_set, &skipped_set);
                         info!("Skipping task {} ({reason})", t.name);
                         skip_reasons.insert(t.name.clone(), reason);
+                        skipped_set.insert(t.name.clone());
                         {
                             let mut statuses = self.task_statuses.lock().await;
                             statuses.insert(t.name.clone(), TaskStatus::Skipped);
@@ -628,7 +696,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                             let states: Vec<EdgeState> = task
                                 .task_deps
                                 .iter()
-                                .map(|e| classify_edge(e, &completed_set, &failed_set))
+                                .map(|e| classify_edge(e, &completed_set, &failed_set, &skipped_set))
                                 .collect();
                             if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
                                 newly_skipped.push(task.clone());
@@ -644,9 +712,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                             ready_queue.push_back(t);
                         }
                         for t in newly_skipped {
-                            let reason = skip_reason_for(&t, &completed_set, &failed_set);
+                            let reason = skip_reason_for(&t, &completed_set, &failed_set, &skipped_set);
                             info!("Skipping task {} ({reason})", t.name);
                             skip_reasons.insert(t.name.clone(), reason);
+                            skipped_set.insert(t.name.clone());
                             {
                                 let mut statuses = self.task_statuses.lock().await;
                                 statuses.insert(t.name.clone(), TaskStatus::Skipped);
@@ -677,9 +746,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         // edges never resolved one way or another, likely because an upstream dep
         // failed and is unreachable for this task's when: condition).
         for task in blocked_tasks.drain(..) {
-            let reason = skip_reason_for(&task, &completed_set, &failed_set);
+            let reason = skip_reason_for(&task, &completed_set, &failed_set, &skipped_set);
             info!("Skipping task {} ({reason})", task.name);
             skip_reasons.insert(task.name.clone(), reason);
+            skipped_set.insert(task.name.clone());
             {
                 let mut statuses = self.task_statuses.lock().await;
                 statuses.insert(task.name.clone(), TaskStatus::Skipped);
@@ -715,10 +785,26 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let execution_context = self.execution_context.clone();
         let suppress_terminal = self.tui_mode;
         let task_streams = self.task_streams.clone();
+        let is_virtual_parent = task.is_virtual_parent;
+        let action_is_empty = task.action.is_empty();
 
         Ok(tokio::spawn(async move {
             // Acquire semaphore permit
             let _permit = semaphore.acquire().await?;
+
+            // Empty-action fast path (used by virtual parent tasks). The parent
+            // task has no script to run - it exists only to aggregate subtask
+            // statuses. We mark it Running briefly so the scheduler's success
+            // arm picks it up and applies the aggregation override.
+            if is_virtual_parent && action_is_empty {
+                {
+                    let mut statuses = task_statuses.lock().await;
+                    statuses.insert(task_name.clone(), TaskStatus::Running);
+                }
+                // Send Ok so the scheduler's Ok arm runs and applies aggregation.
+                let _ = tx.send(Ok(task_name.clone())).await;
+                return Ok(());
+            }
 
             {
                 let statuses = task_statuses.lock().await;

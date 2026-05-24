@@ -147,7 +147,7 @@ impl DagVisualizer {
                 } else {
                     None
                 };
-                Task::new(
+                let mut t = Task::new(
                     parser_task.name,
                     parent,
                     parser_task.task_deps,
@@ -156,7 +156,9 @@ impl DagVisualizer {
                     parser_task.envs,
                     parser_task.values,
                     parser_task.action,
-                )
+                );
+                t.is_virtual_parent = parser_task.is_virtual_parent;
+                t
             })
             .collect();
 

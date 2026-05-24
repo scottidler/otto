@@ -46,6 +46,10 @@ pub struct Task {
     pub values: HashMap<String, Value>,
     pub action: String,
     pub hash: String,
+    /// True for foreach virtual parent tasks. The scheduler short-circuits execution
+    /// of these (empty action) and aggregates their subtasks' statuses to derive the
+    /// parent's final status.
+    pub is_virtual_parent: bool,
 }
 
 impl Task {
@@ -72,6 +76,7 @@ impl Task {
             values,
             action,
             hash,
+            is_virtual_parent: false,
         }
     }
 
@@ -122,7 +127,7 @@ impl Task {
         // The after dependencies will be handled during DAG construction
         let values = HashMap::new();
         let action = task_spec.action.trim().to_string(); // Trim whitespace from script content
-        Self::new(
+        let mut task = Self::new(
             name,
             parent,
             task_deps,
@@ -131,7 +136,9 @@ impl Task {
             evaluated_envs,
             values,
             action,
-        )
+        );
+        task.is_virtual_parent = task_spec.virtual_parent;
+        task
     }
 
     /// Evaluate and merge environment variables from global and task-level sources

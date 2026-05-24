@@ -108,6 +108,7 @@ pub struct Task {
     pub values: HashMap<String, Value>,
     pub action: String,
     pub hash: String,
+    pub is_virtual_parent: bool,
 }
 
 impl Task {
@@ -131,6 +132,7 @@ impl Task {
             values,
             action,
             hash,
+            is_virtual_parent: false,
         }
     }
 
@@ -162,7 +164,9 @@ impl Task {
         // The after dependencies will be handled during DAG construction
         let values = HashMap::new();
         let action = task_spec.action.trim().to_string(); // Trim whitespace from script content
-        Self::new(name, task_deps, file_deps, output_deps, evaluated_envs, values, action)
+        let mut t = Self::new(name, task_deps, file_deps, output_deps, evaluated_envs, values, action);
+        t.is_virtual_parent = task_spec.virtual_parent;
+        t
     }
 
     /// Evaluate and merge environment variables from global and task-level sources
@@ -734,12 +738,9 @@ impl Parser {
                 .get(task_name)
                 .ok_or_else(|| eyre!("Task '{}' not found", task_name))?;
 
-            // Skip virtual parent tasks - they have no action to execute
-            // Virtual parents are created for foreach dependency tracking but have empty actions
-            if task_spec.virtual_parent {
-                continue;
-            }
-
+            // Virtual parent tasks are kept as real (executable) aggregator tasks.
+            // Their action is empty; the scheduler short-circuits execution and aggregates
+            // their subtasks' statuses to derive the parent's final status.
             let mut task = Task::from_task_with_cwd_and_global_envs(task_spec, &self.cwd, &global_envs);
             let mut cli_provided = HashSet::new();
 
@@ -749,8 +750,11 @@ impl Parser {
             if let Some(args) = task_args
                 && args.len() > 1
             {
-                // Parse task arguments using clap
-                let task_command = Self::task_to_command(task_spec);
+                // Parse task arguments using clap. Use the original (unexpanded) task spec
+                // for clap so foreach-derived flags like `--Serial` are still recognized
+                // - the expanded virtual parent has `foreach: None` and would reject the flag.
+                let clap_spec = self.config_spec.tasks.get(task_name).unwrap_or(task_spec);
+                let task_command = Self::task_to_command(clap_spec);
                 let matches = task_command.get_matches_from(args);
 
                 for param_spec in task_spec.params.values() {
@@ -1141,20 +1145,33 @@ impl Parser {
                     log::warn!("foreach task '{}' expanded to 0 subtasks", name);
                 }
 
-                // Add the virtual parent task for dependency resolution
-                // The parent has no action but preserves before/after relationships
-                let parent = spec.as_virtual_parent();
-                expanded.insert(name.clone(), parent);
-
                 // Check if this task should run serially (CLI --Serial flag OR config parallel: false)
                 let run_serial = serial_tasks.contains(name) || spec.foreach.as_ref().is_some_and(|f| !f.parallel);
 
-                // Add all subtasks
-                // Each subtask depends on the parent's dependencies
+                // Build virtual parent. Its `before:` is replaced with When::Always edges
+                // to every subtask, so the scheduler queues the parent only after all
+                // subtasks reach a terminal state (Completed | Failed | Skipped).
+                let mut parent = spec.as_virtual_parent();
+                parent.before = subtasks
+                    .iter()
+                    .map(|st| crate::cfg::edge::EdgeSpec {
+                        task: st.name.clone(),
+                        when: crate::cfg::edge::When::Always,
+                        from_sugar: false,
+                        is_injected_sugar: false,
+                    })
+                    .collect();
+
+                // Add all subtasks. Each subtask inherits the *original* parent's
+                // before dependencies (its prerequisites), not the rewritten one.
+                // Subtasks do NOT inherit the parent's `after:` edges - only the
+                // parent triggers downstreams; otherwise every subtask would
+                // double-fire the downstream task.
                 let mut prev_subtask_name: Option<String> = None;
                 for mut subtask in subtasks {
-                    // Subtask inherits parent's before dependencies
+                    // Subtask inherits parent's original before dependencies
                     subtask.before = spec.before.clone();
+                    subtask.after = Vec::new();
 
                     // If running serially, chain subtasks: each depends on the previous
                     if run_serial {
@@ -1166,6 +1183,8 @@ impl Parser {
 
                     expanded.insert(subtask.name.clone(), subtask);
                 }
+
+                expanded.insert(name.clone(), parent);
             } else {
                 // Non-foreach task - keep as-is
                 expanded.insert(name.clone(), spec.clone());
@@ -3206,12 +3225,13 @@ tasks:
         let result = parser.parse().unwrap();
         let (tasks, _, _, _, _) = result;
 
-        // Should have all subtasks
+        // Should have all subtasks plus the (now executable) virtual parent
         let task_names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
         assert!(task_names.contains(&"install:td"));
         assert!(task_names.contains(&"install:ts"));
         assert!(task_names.contains(&"install:cs"));
-        assert_eq!(tasks.len(), 3); // All 3 subtasks (parent is virtual, filtered out)
+        assert!(task_names.contains(&"install"));
+        assert_eq!(tasks.len(), 4);
     }
 
     #[test]

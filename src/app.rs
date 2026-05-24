@@ -308,7 +308,7 @@ pub async fn execute_with_terminal_output(
             } else {
                 None
             };
-            crate::executor::Task::new(
+            let mut t = crate::executor::Task::new(
                 parser_task.name,
                 parent,
                 parser_task.task_deps,
@@ -317,7 +317,9 @@ pub async fn execute_with_terminal_output(
                 parser_task.envs,
                 parser_task.values,
                 parser_task.action,
-            )
+            );
+            t.is_virtual_parent = parser_task.is_virtual_parent;
+            t
         })
         .collect();
 
@@ -825,6 +827,7 @@ mod tests {
             values: HashMap::new(),
             action: String::new(),
             hash: String::new(),
+            is_virtual_parent: false,
         }
     }
 

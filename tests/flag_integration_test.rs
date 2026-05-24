@@ -387,9 +387,12 @@ tasks:
     let mut parser = Parser::new(args_parallel).unwrap();
     let (tasks_parallel, _, _, _, _) = parser.parse().unwrap();
 
-    // Subtasks should not depend on each other
+    // Subtasks should not depend on each other (parent's When::Always edges to subtasks
+    // are excluded - that's the aggregation gate, not a sibling dependency).
     for task in &tasks_parallel {
-        // Check that no subtask depends on another subtask (only parent deps)
+        if !task.name.contains(':') {
+            continue;
+        }
         for dep in &task.task_deps {
             assert!(
                 !dep.task.starts_with("examples:"),
