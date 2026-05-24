@@ -1,0 +1,57 @@
+otto:
+  api: 1
+  tasks:
+    - fmt-check
+    - test
+
+tasks:
+  # 1. Fixer pattern via on-failure: sugar.
+  # When fmt-check fails, fmt-fix runs to auto-correct formatting.
+  fmt-check:
+    help: Check Rust formatting; auto-fix on failure.
+    bash: |
+      cargo fmt --all --check
+    on-failure:
+      - fmt-fix
+
+  fmt-fix:
+    help: Apply cargo fmt to fix format drift.
+    bash: |
+      cargo fmt --all
+
+  # 2. Same fixer in long form. Equivalent semantics, different locality.
+  # The host task X declares its `after:` -> [{task: Y, when: failure}]:
+  # "Y runs after X (only if X failed)."
+  lint-check:
+    help: Run clippy; if it fails, dump the diff for review.
+    bash: |
+      cargo clippy --all -- -D warnings
+    after:
+      - task: lint-report
+        when: failure
+
+  lint-report:
+    help: Capture diagnostic output when clippy fails.
+    bash: |
+      cargo clippy --all 2>&1 | head -100
+
+  # 3. Cleanup pattern via when: always.
+  # The cleanup task runs whether test passes or fails. Use set +e
+  # in cleanup bodies so cleanup failure doesn't pollute the run's
+  # exit code beyond the original failure.
+  test:
+    help: Run tests, capturing TMPDIR for cleanup.
+    envs:
+      TEST_TMPDIR: "$(mktemp -d)"
+    bash: |
+      cargo test --all-features
+
+  cleanup-tmpdir:
+    help: Remove the test tmpdir; runs whether test passed or failed.
+    after:
+      - task: test
+        when: always
+    bash: |
+      set +e
+      rm -rf "$TEST_TMPDIR"
+      exit 0
