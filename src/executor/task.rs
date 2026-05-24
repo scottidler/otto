@@ -6,10 +6,33 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::cfg::config::Value;
+use crate::cfg::edge::When;
 use crate::cfg::env as env_eval;
 use crate::cfg::task::TaskSpec;
 
 pub type DAG<T> = Dag<T, (), u32>;
+
+/// Runtime equivalent of `EdgeSpec` without the cosmetic serialization fields.
+/// Carries the task name and the condition under which the edge is satisfied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskEdge {
+    pub task: String,
+    pub when: When,
+}
+
+impl TaskEdge {
+    pub fn new(task: impl Into<String>, when: When) -> Self {
+        Self {
+            task: task.into(),
+            when,
+        }
+    }
+
+    /// Construct a `TaskEdge` with default `When::Success`.
+    pub fn success(task: impl Into<String>) -> Self {
+        Self::new(task, When::Success)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Task {
