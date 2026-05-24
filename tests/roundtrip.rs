@@ -106,16 +106,11 @@ tasks:
     );
 }
 
-/// Known failing case: ParamSpec's `name`/`short`/`long`/`param_type` fields
-/// are derived from the params-map KEY during deserialize, but the serializer
-/// emits the map keyed by `name` only — losing the `-v|--verbose` form. On
-/// re-parse, `divine()` can't recover short/long, so FLG/OPT params decay
-/// to POS.
-///
-/// See `docs/design/2026-05-24-paramspec-roundtrip.md`. This test will pass
-/// once the chosen fix (Option E or A) lands.
+/// Exercises ParamMapSerializer's rich-key reconstruction. Before the fix in
+/// `docs/design/2026-05-24-paramspec-roundtrip.md`, this case lost the
+/// `-v|--verbose` form on serialize and decayed FLG/OPT params to POS on
+/// re-parse.
 #[test]
-#[ignore = "ParamSpec key asymmetry, see docs/design/2026-05-24-paramspec-roundtrip.md"]
 fn config_with_params_roundtrips() {
     assert_roundtrips(
         r#"

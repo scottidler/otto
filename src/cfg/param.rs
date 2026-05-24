@@ -10,18 +10,53 @@ use std::vec::Vec;
 
 pub type ParamSpecs = HashMap<String, ParamSpec>;
 
+/// Reconstruct the rich params-map key (e.g. "-v|--verbose") from a ParamSpec's
+/// derived fields. Inverse of `divine` for serialize-side emission.
+fn rich_key(spec: &ParamSpec) -> String {
+    match (spec.short, spec.long.as_deref()) {
+        (Some(s), Some(l)) => format!("-{s}|--{l}"),
+        (Some(s), None) => format!("-{s}"),
+        (None, Some(l)) => format!("--{l}"),
+        (None, None) => spec.name.clone(),
+    }
+}
+
+/// Serializes a `ParamSpecs` map using the rich-key form for each entry's key.
+/// The map's stored key (the divined name) is discarded on serialize because
+/// it would round-trip lossily — see `docs/design/2026-05-24-paramspec-roundtrip.md`.
+pub struct ParamMapSerializer<'a>(pub &'a ParamSpecs);
+
+impl Serialize for ParamMapSerializer<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for spec in self.0.values() {
+            map.serialize_entry(&rich_key(spec), spec)?;
+        }
+        map.end()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ParamSpec {
-    #[serde(skip_deserializing)]
+    // name, short, long, param_type are derived from the params-map KEY by
+    // deserialize_param_map (via divine), not read from inline fields. They
+    // are also reconstructed into the rich key on serialize by
+    // ParamMapSerializer — so they must NOT appear as inline fields in either
+    // direction, otherwise they'd duplicate the key information and the
+    // emitted YAML would diverge from human-authored ottofiles.
+    #[serde(skip)]
     pub name: String,
 
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub short: Option<char>,
 
-    #[serde(skip_deserializing)]
+    #[serde(skip)]
     pub long: Option<String>,
 
-    #[serde(skip_deserializing, default)]
+    #[serde(skip)]
     pub param_type: ParamType,
 
     #[serde(default)]
@@ -45,7 +80,9 @@ pub struct ParamSpec {
     #[serde(default)]
     pub help: Option<String>,
 
-    #[serde(skip_deserializing)]
+    // Runtime state, populated after CLI parsing — never part of the on-disk
+    // ottofile representation.
+    #[serde(skip)]
     pub value: Value,
 }
 

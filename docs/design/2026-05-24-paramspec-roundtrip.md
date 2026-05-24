@@ -1,7 +1,27 @@
 # ParamSpec round-trip asymmetry — design question
 
-**Status:** Open question, not yet implemented
+**Status:** Implemented (Option A, v1.2.3)
 **Date:** 2026-05-24
+
+## Resolution
+
+Option A was selected after Architect consultation. `src/cfg/param.rs` now exposes
+`ParamMapSerializer` and a `rich_key` helper that reconstructs the original
+`-v|--verbose` map key from `name`/`short`/`long` on serialize. `TaskSpec`'s
+hand-written `Serialize` wires the params field through `ParamMapSerializer`.
+The four derived fields (`name`/`short`/`long`/`param_type`) plus the runtime
+`value` field were promoted from `skip_deserializing` to `skip` so they never
+appear as redundant inline entries.
+
+Verified against the 94 real `.otto.yml` files under `~/repos/tatari-tv` and
+`~/repos/scottidler`: 20/94 → 94/94 round-trip cleanly. `tests/roundtrip.rs`
+locks in the discipline going forward.
+
+Options B and C were discarded. Option D (reshape the type so `params` is
+keyed by the rich form natively) remains a reasonable future refactor but
+was not necessary — the Architect's blast-radius correction (0 refs in
+`executor/`/`app/`) makes it cheaper than first estimated, but Option A's
+strict locality made it the lower-risk fix to ship today.
 
 ## Context
 

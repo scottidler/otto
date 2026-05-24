@@ -10,7 +10,7 @@ use std::path::Path;
 use std::vec::Vec;
 
 use crate::cfg::edge::EdgeSpec;
-use crate::cfg::param::{ParamSpecs, deserialize_param_map};
+use crate::cfg::param::{ParamMapSerializer, ParamSpecs, deserialize_param_map};
 
 pub type TaskSpecs = HashMap<String, TaskSpec>;
 
@@ -366,7 +366,7 @@ impl Serialize for TaskSpec {
         }
 
         if !self.params.is_empty() {
-            map.serialize_entry("params", &self.params)?;
+            map.serialize_entry("params", &ParamMapSerializer(&self.params))?;
         }
 
         if let Some(ref foreach) = self.foreach {
