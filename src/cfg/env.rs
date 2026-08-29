@@ -14,14 +14,16 @@ pub fn evaluate_envs(
     let mut iterations = 0;
     const MAX_ITERATIONS: usize = 100; // Prevent infinite loops
 
-    // Get current environment for variable resolution
-    // Start with system environment, but input envs will override
-    let mut current_env: HashMap<String, String> = env::vars().collect();
+    // The environment otto itself was invoked with, before any declared key shadows it.
+    // This is what a declared key's own expression reads when it references itself.
+    let inherited: HashMap<String, String> = env::vars().collect();
 
-    // Remove any keys from current_env that are defined in input envs
-    // This ensures input envs take precedence and prevents outer environment pollution
+    // Baseline context shared by every expression: system environment minus every declared
+    // key, so a reference to a declared-but-not-yet-resolved key defers instead of silently
+    // reading the inherited value.
+    let mut base_env = inherited.clone();
     for key in envs.keys() {
-        current_env.remove(key);
+        base_env.remove(key);
     }
 
     while !pending.is_empty() && iterations < MAX_ITERATIONS {
@@ -31,11 +33,11 @@ pub fn evaluate_envs(
 
         for var_name in pending {
             let raw_value = envs.get(&var_name).unwrap();
+            let context = evaluation_context(&base_env, &evaluated, &inherited, &var_name);
 
-            match evaluate_single_env_value(raw_value, &current_env, working_dir) {
+            match evaluate_single_env_value(raw_value, &context, working_dir) {
                 Ok(resolved_value) => {
-                    evaluated.insert(var_name.clone(), resolved_value.clone());
-                    current_env.insert(var_name, resolved_value);
+                    evaluated.insert(var_name, resolved_value);
                     made_progress = true;
                 }
                 Err(_) => {
@@ -49,10 +51,10 @@ pub fn evaluate_envs(
             // Try to evaluate remaining variables with partial resolution
             for var_name in &still_pending {
                 let raw_value = envs.get(var_name).unwrap();
-                match evaluate_single_env_value(raw_value, &current_env, working_dir) {
+                let context = evaluation_context(&base_env, &evaluated, &inherited, var_name);
+                match evaluate_single_env_value(raw_value, &context, working_dir) {
                     Ok(resolved_value) => {
-                        evaluated.insert(var_name.clone(), resolved_value.clone());
-                        current_env.insert(var_name.clone(), resolved_value);
+                        evaluated.insert(var_name.clone(), resolved_value);
                     }
                     Err(e) => {
                         return Err(eyre!("Failed to resolve environment variable '{}': {}", var_name, e));
@@ -72,6 +74,29 @@ pub fn evaluate_envs(
     }
 
     Ok(evaluated)
+}
+
+/// Build the evaluation context for one expression.
+///
+/// It is (inherited environment minus all declared keys) + declared values resolved so far +
+/// the inherited value of the key currently being evaluated. Seeding the inherited value for
+/// that one key is what lets `MYVAR: '$(echo "${MYVAR:-fallback}")'` read the value otto was
+/// invoked with. Seeding it for every declared key would let a cross-reference to a
+/// not-yet-resolved key resolve to the inherited value instead of deferring, and which one
+/// happened would depend on HashMap iteration order.
+fn evaluation_context(
+    base_env: &HashMap<String, String>,
+    resolved: &HashMap<String, String>,
+    inherited: &HashMap<String, String>,
+    var_name: &str,
+) -> HashMap<String, String> {
+    let mut context = base_env.clone();
+    if let Some(inherited_value) = inherited.get(var_name) {
+        context.insert(var_name.to_string(), inherited_value.clone());
+    }
+    // Resolved declared values win over the inherited seed.
+    context.extend(resolved.iter().map(|(k, v)| (k.clone(), v.clone())));
+    context
 }
 
 /// Evaluate a single environment variable value with shell command substitution and variable resolution
@@ -200,6 +225,7 @@ fn resolve_env_variables(input: &str, env_context: &HashMap<String, String>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::collections::HashMap;
 
     #[test]
@@ -219,6 +245,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_evaluate_envs_simple() {
         let mut envs = HashMap::new();
         envs.insert("GREETING".to_string(), "Hello ${TEST_USER}".to_string());
@@ -256,5 +283,197 @@ mod tests {
         assert_eq!(result.get("BASE").unwrap(), "myapp");
         assert_eq!(result.get("VERSION").unwrap(), "1.0.0");
         assert_eq!(result.get("FULL_NAME").unwrap(), "myapp-1.0.0");
+    }
+
+    /// The motivating idiom: declare a default under the variable's own name and let the
+    /// invoking shell override it. The self-reference must reach the `$()` subprocess.
+    #[test]
+    #[serial]
+    fn test_evaluate_envs_self_reference_reads_inherited_value() {
+        let key = "OTTO_TEST_SELF_INHERITED";
+        unsafe {
+            env::set_var(key, "from-shell");
+        }
+
+        let mut envs = HashMap::new();
+        envs.insert(key.to_string(), format!("$(echo \"${{{key}:-fallback}}\")"));
+
+        let result = evaluate_envs(&envs, None).unwrap();
+
+        unsafe {
+            env::remove_var(key);
+        }
+        assert_eq!(result.get(key).unwrap(), "from-shell");
+    }
+
+    /// Same expression with nothing inherited still takes the declared default.
+    #[test]
+    #[serial]
+    fn test_evaluate_envs_self_reference_falls_back_when_unset() {
+        let key = "OTTO_TEST_SELF_UNSET";
+        unsafe {
+            env::remove_var(key);
+        }
+
+        let mut envs = HashMap::new();
+        envs.insert(key.to_string(), format!("$(echo \"${{{key}:-fallback}}\")"));
+
+        let result = evaluate_envs(&envs, None).unwrap();
+        assert_eq!(result.get(key).unwrap(), "fallback");
+    }
+
+    /// Self-reference outside `$()` resolves against the inherited value too.
+    #[test]
+    #[serial]
+    fn test_evaluate_envs_self_reference_outside_command_substitution() {
+        let key = "OTTO_TEST_SELF_BRACED";
+        unsafe {
+            env::set_var(key, "/base");
+        }
+
+        let mut envs = HashMap::new();
+        envs.insert(key.to_string(), format!("${{{key}}}/suffix"));
+
+        let result = evaluate_envs(&envs, None).unwrap();
+
+        unsafe {
+            env::remove_var(key);
+        }
+        assert_eq!(result.get(key).unwrap(), "/base/suffix");
+    }
+
+    /// All insertion orders of `n` items, so the test drives adversarial orderings rather
+    /// than whichever one HashMap happens to hand back.
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        if n == 0 {
+            return vec![Vec::new()];
+        }
+        let mut out = Vec::new();
+        for smaller in permutations(n - 1) {
+            for position in 0..=smaller.len() {
+                let mut order = smaller.clone();
+                order.insert(position, n - 1);
+                out.push(order);
+            }
+        }
+        out
+    }
+
+    /// Property: a reference to another declared key always resolves to that key's DECLARED
+    /// value, never to its inherited one, no matter what order the map is built or iterated
+    /// in. Every declared key below also exists in the inherited environment, so reading the
+    /// inherited value anywhere shows up in the chain.
+    #[test]
+    #[serial]
+    fn test_evaluate_envs_cross_references_never_read_inherited_values() {
+        let keys = [
+            "OTTO_TEST_ORDER_A",
+            "OTTO_TEST_ORDER_B",
+            "OTTO_TEST_ORDER_C",
+            "OTTO_TEST_ORDER_D",
+        ];
+        unsafe {
+            env::set_var(keys[0], "inherited-a");
+            env::set_var(keys[1], "INHERITED_B");
+            env::set_var(keys[2], "INHERITED_C");
+            env::set_var(keys[3], "INHERITED_D");
+        }
+
+        // A is a self-reference (must read inherited-a); B, C, D are cross-references and
+        // must chain off the DECLARED values, including A's post-self-reference value.
+        let declared = [
+            (keys[0], format!("${{{}}}-x", keys[0])),
+            (keys[1], format!("${{{}}}-b", keys[0])),
+            (keys[2], format!("${{{}}}-c", keys[1])),
+            (keys[3], format!("${{{}}}-d", keys[2])),
+        ];
+
+        let mut failures = Vec::new();
+        for order in permutations(declared.len()) {
+            // Repeat each insertion order: a fresh HashMap gets a fresh hasher, so repeats
+            // sample different iteration orders for the same insertion order.
+            for _ in 0..8 {
+                let mut envs = HashMap::new();
+                for &index in &order {
+                    let (key, value) = &declared[index];
+                    envs.insert((*key).to_string(), value.clone());
+                }
+
+                let result = evaluate_envs(&envs, None).unwrap();
+                let expected = [
+                    (keys[0], "inherited-a-x"),
+                    (keys[1], "inherited-a-x-b"),
+                    (keys[2], "inherited-a-x-b-c"),
+                    (keys[3], "inherited-a-x-b-c-d"),
+                ];
+                for (key, want) in expected {
+                    let got = result.get(key).unwrap();
+                    if got != want {
+                        failures.push(format!("order {order:?}: {key} = {got:?}, want {want:?}"));
+                    }
+                }
+            }
+        }
+
+        unsafe {
+            for key in keys {
+                env::remove_var(key);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "cross-reference resolved wrong:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Two keys defined in terms of each other still fail loudly instead of silently
+    /// resolving to inherited values or spinning forever.
+    #[test]
+    #[serial]
+    fn test_evaluate_envs_circular_reference_still_errors() {
+        let (a, b) = ("OTTO_TEST_CIRCULAR_A", "OTTO_TEST_CIRCULAR_B");
+        unsafe {
+            env::remove_var(a);
+            env::remove_var(b);
+        }
+
+        let mut envs = HashMap::new();
+        envs.insert(a.to_string(), format!("${{{b}}}"));
+        envs.insert(b.to_string(), format!("${{{a}}}"));
+
+        let error = evaluate_envs(&envs, None).unwrap_err().to_string();
+        assert!(
+            error.contains("Failed to resolve environment variable") && error.contains("not found"),
+            "expected a loud circular-reference failure, got: {error}"
+        );
+    }
+
+    /// A circular pair whose keys ARE inherited must still error: the inherited value is
+    /// seeded only for the key under evaluation, never for the key it points at.
+    #[test]
+    #[serial]
+    fn test_evaluate_envs_circular_reference_errors_even_when_inherited() {
+        let (a, b) = ("OTTO_TEST_CIRCULAR_INH_A", "OTTO_TEST_CIRCULAR_INH_B");
+        unsafe {
+            env::set_var(a, "inherited-a");
+            env::set_var(b, "inherited-b");
+        }
+
+        let mut envs = HashMap::new();
+        envs.insert(a.to_string(), format!("${{{b}}}"));
+        envs.insert(b.to_string(), format!("${{{a}}}"));
+
+        let result = evaluate_envs(&envs, None);
+
+        unsafe {
+            env::remove_var(a);
+            env::remove_var(b);
+        }
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("Failed to resolve environment variable") && error.contains("not found"),
+            "expected a loud circular-reference failure, got: {error}"
+        );
     }
 }

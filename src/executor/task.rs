@@ -221,6 +221,7 @@ fn calculate_hash(action: &String) -> String {
 mod tests {
     use super::*;
     use crate::cfg::param::ParamSpecs;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     fn make_task_spec(name: &str, before: Vec<String>, action: &str) -> TaskSpec {
@@ -424,6 +425,28 @@ mod tests {
         let evaluated = result.unwrap();
         // Task-level should override global
         assert_eq!(evaluated.get("VAR"), Some(&"task".to_string()));
+    }
+
+    /// The merged (global + task) evaluation routes through the same evaluator, so a task env
+    /// can read its own inherited value here too.
+    #[test]
+    #[serial]
+    fn test_evaluate_merged_envs_self_reference_reads_inherited_value() {
+        let temp_dir = TempDir::new().unwrap();
+        let key = "OTTO_TEST_MERGED_SELF";
+        unsafe {
+            std::env::set_var(key, "from-shell");
+        }
+
+        let mut task_envs = HashMap::new();
+        task_envs.insert(key.to_string(), format!("$(echo \"${{{key}:-fallback}}\")"));
+
+        let result = Task::evaluate_merged_envs(&HashMap::new(), &task_envs, temp_dir.path());
+
+        unsafe {
+            std::env::remove_var(key);
+        }
+        assert_eq!(result.unwrap().get(key), Some(&"from-shell".to_string()));
     }
 
     #[test]
