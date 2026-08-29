@@ -46,7 +46,7 @@ tasks:
     ];
 
     let mut parser = otto::cli::parser::Parser::new(args)?;
-    let (tasks, hash, parsed_ottofile_path, jobs, _) = parser.parse()?;
+    let (tasks, hash, parsed_ottofile_path, jobs, _, _) = parser.parse()?;
 
     // Verify jobs parameter is valid
     assert!(jobs > 0, "Jobs should be a positive number");
@@ -156,7 +156,7 @@ tasks:
     ];
 
     let mut parser = otto::cli::parser::Parser::new(args.clone())?;
-    let (_, hash, _, jobs, _) = parser.parse()?;
+    let (_, hash, _, jobs, _, _) = parser.parse()?;
 
     // Verify jobs parameter is valid
     assert!(jobs > 0, "Jobs should be a positive number");
@@ -167,7 +167,7 @@ tasks:
 
     // Parse again with same ottofile
     let mut parser2 = otto::cli::parser::Parser::new(args)?;
-    let (_, hash2, _, jobs2, _) = parser2.parse()?;
+    let (_, hash2, _, jobs2, _, _) = parser2.parse()?;
 
     assert_eq!(hash, hash2, "Hash should be consistent for same ottofile");
     assert_eq!(jobs, jobs2, "Jobs should be consistent for same arguments");

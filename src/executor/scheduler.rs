@@ -354,6 +354,12 @@ pub struct TaskScheduler<F: FileSystem = crate::ports::RealFs> {
     tasks: Vec<Task>,
     /// Whether TUI mode is enabled (suppresses terminal output)
     tui_mode: bool,
+    /// Whether to omit the `[task]` prefix from terminal output (`--no-prefix`;
+    /// see docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md Phase 8).
+    /// Defaults to false; set via `set_no_prefix()` so the many existing
+    /// `TaskScheduler::new()` call sites (tests included) don't have to
+    /// thread a flag that almost none of them exercise.
+    no_prefix: bool,
     /// Optional broadcast channel for TUI status updates
     message_tx: Option<tokio::sync::broadcast::Sender<TaskMessage>>,
     /// Pre-created TaskStreams for TUI mode (task_name -> TaskStreams)
@@ -385,6 +391,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             execution_context,
             tasks,
             tui_mode,
+            no_prefix: false,
             message_tx: None,
             task_streams: None,
         })
@@ -392,6 +399,13 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 
     pub fn set_message_channel(&mut self, tx: tokio::sync::broadcast::Sender<TaskMessage>) {
         self.message_tx = Some(tx);
+    }
+
+    /// Enable `--no-prefix`: terminal output for every task streams raw, with
+    /// no `[task]` prefix. No effect on file logs (never prefixed) or on TUI
+    /// mode (terminal output is already fully suppressed there).
+    pub fn set_no_prefix(&mut self, no_prefix: bool) {
+        self.no_prefix = no_prefix;
     }
 
     /// Set pre-created TaskStreams for TUI mode
@@ -905,6 +919,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let tasks_dir = self.workspace.run().join("tasks");
         let execution_context = self.execution_context.clone();
         let suppress_terminal = self.tui_mode;
+        let no_prefix = self.no_prefix;
         let task_streams = self.task_streams.clone();
         let is_virtual_parent = task.is_virtual_parent;
         let action_is_empty = task.action.is_empty();
@@ -1111,7 +1126,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     tokio::spawn(async move {
                         let reader = BufReader::new(stdout);
                         streams
-                            .process_output(task_name, OutputType::Stdout, reader, suppress_terminal)
+                            .process_output(task_name, OutputType::Stdout, reader, suppress_terminal, no_prefix)
                             .await
                     })
                 };
@@ -1122,7 +1137,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     tokio::spawn(async move {
                         let reader = BufReader::new(stderr);
                         streams
-                            .process_output(task_name, OutputType::Stderr, reader, suppress_terminal)
+                            .process_output(task_name, OutputType::Stderr, reader, suppress_terminal, no_prefix)
                             .await
                     })
                 };

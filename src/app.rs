@@ -189,13 +189,16 @@ pub struct RuntimeConfig {
     pub ottofile_path: Option<PathBuf>,
     pub jobs: usize,
     pub tui_mode: bool,
+    /// `--no-prefix`: suppress the `[task]` prefix on terminal output.
+    /// See docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md Phase 8.
+    pub no_prefix: bool,
     pub retention: RetentionSpec,
 }
 
 impl RuntimeConfig {
     /// Build RuntimeConfig from parsed CLI arguments.
     pub fn from_parser(parser: &mut Parser) -> Result<Self> {
-        let (tasks, hash, ottofile_path, jobs, tui_mode) = parser.parse()?;
+        let (tasks, hash, ottofile_path, jobs, tui_mode, no_prefix) = parser.parse()?;
         let retention = parser.retention();
         Ok(Self {
             tasks,
@@ -203,6 +206,7 @@ impl RuntimeConfig {
             ottofile_path,
             jobs,
             tui_mode,
+            no_prefix,
             retention,
         })
     }
@@ -218,18 +222,21 @@ pub async fn run(config: RuntimeConfig) -> Result<()> {
         config.ottofile_path,
         config.jobs,
         config.tui_mode,
+        config.no_prefix,
         config.retention,
     )
     .await
 }
 
 /// Execute tasks based on configuration.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_tasks(
     tasks: Vec<Task>,
     hash: String,
     ottofile_path: Option<PathBuf>,
     jobs: usize,
     tui_mode: bool,
+    no_prefix: bool,
     retention: RetentionSpec,
 ) -> Result<(), Report> {
     if tui_mode {
@@ -248,12 +255,15 @@ pub async fn execute_tasks(
 
         if !atty::is(atty::Stream::Stdout) {
             eprintln!("Warning: --tui requires a TTY, falling back to standard output");
-            return execute_with_terminal_output(tasks, hash, ottofile_path, jobs, retention).await;
+            return execute_with_terminal_output(tasks, hash, ottofile_path, jobs, no_prefix, retention).await;
         }
 
+        // TUI mode already suppresses all terminal output (suppress_terminal
+        // is derived from tui_mode in the scheduler), so no_prefix has nothing
+        // to act on here: no prefix is ever printed to a terminal the TUI owns.
         execute_with_tui(tasks, hash, ottofile_path, jobs, retention).await
     } else {
-        execute_with_terminal_output(tasks, hash, ottofile_path, jobs, retention).await
+        execute_with_terminal_output(tasks, hash, ottofile_path, jobs, no_prefix, retention).await
     }
 }
 
@@ -263,6 +273,7 @@ pub async fn execute_with_terminal_output(
     hash: String,
     ottofile_path: Option<PathBuf>,
     jobs: usize,
+    no_prefix: bool,
     retention: RetentionSpec,
 ) -> Result<(), Report> {
     if tasks.is_empty() {
@@ -314,7 +325,8 @@ pub async fn execute_with_terminal_output(
     // Convert parser tasks to executor tasks
     let executor_tasks: Vec<crate::executor::Task> = execution_tasks.into_iter().map(Into::into).collect();
 
-    let scheduler = TaskScheduler::new(executor_tasks, Arc::new(workspace), execution_context, jobs, false).await?;
+    let mut scheduler = TaskScheduler::new(executor_tasks, Arc::new(workspace), execution_context, jobs, false).await?;
+    scheduler.set_no_prefix(no_prefix);
 
     // Execute all tasks, capturing result
     let result = scheduler.execute_all().await;
@@ -558,6 +570,7 @@ mod tests {
             ottofile_path: Some(PathBuf::from("/tmp/otto.yml")),
             jobs: 4,
             tui_mode: false,
+            no_prefix: false,
             retention: crate::cfg::otto::RetentionSpec::default(),
         };
 
@@ -566,6 +579,7 @@ mod tests {
         assert_eq!(config.ottofile_path, Some(PathBuf::from("/tmp/otto.yml")));
         assert_eq!(config.jobs, 4);
         assert!(!config.tui_mode);
+        assert!(!config.no_prefix);
         assert_eq!(config.retention, crate::cfg::otto::RetentionSpec::default());
     }
 

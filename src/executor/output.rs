@@ -83,15 +83,34 @@ pub struct TeeWriter {
     task_name: String,
     /// Whether to suppress terminal output (for TUI mode)
     suppress_terminal: bool,
+    /// Whether to omit the `[task]` prefix from terminal output (`--no-prefix`,
+    /// see docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md Phase 8).
+    /// File output is never prefixed either way, so this only changes what
+    /// reaches the terminal.
+    no_prefix: bool,
+}
+
+/// Build the bytes that go to the terminal for one chunk of task output:
+/// the colored `[task]` prefix ahead of the data, or the data alone when
+/// `no_prefix` (`--no-prefix`) is set. Pure so the prefix-suppression logic
+/// is unit-testable without capturing real process stdout/stderr.
+fn format_terminal_output(task_name: &str, data: &[u8], no_prefix: bool) -> String {
+    if no_prefix {
+        String::from_utf8_lossy(data).to_string()
+    } else {
+        let colored_prefix = colorize_task_prefix(task_name);
+        format!("{} {}", colored_prefix, String::from_utf8_lossy(data))
+    }
 }
 
 impl TeeWriter {
-    pub async fn new(file: File, is_stderr: bool, task_name: String, suppress_terminal: bool) -> Self {
+    pub async fn new(file: File, is_stderr: bool, task_name: String, suppress_terminal: bool, no_prefix: bool) -> Self {
         Self {
             file,
             is_stderr,
             task_name,
             suppress_terminal,
+            no_prefix,
         }
     }
 
@@ -101,9 +120,8 @@ impl TeeWriter {
 
         // Conditionally write to terminal (suppressed in TUI mode)
         if !self.suppress_terminal {
-            // Write to terminal with colored task name prefix
-            let colored_prefix = colorize_task_prefix(&self.task_name);
-            let terminal_output = format!("{} {}", colored_prefix, String::from_utf8_lossy(data));
+            // Write to terminal, with or without the colored task name prefix
+            let terminal_output = format_terminal_output(&self.task_name, data, self.no_prefix);
             if self.is_stderr {
                 eprint!("{terminal_output}");
             } else {
@@ -162,6 +180,7 @@ impl TaskStreams {
         output_type: OutputType,
         mut reader: impl AsyncBufReadExt + Unpin,
         suppress_terminal: bool,
+        no_prefix: bool,
     ) -> Result<()> {
         let output_file = match output_type {
             OutputType::Stdout => &self.stdout_file,
@@ -174,6 +193,7 @@ impl TaskStreams {
             matches!(output_type, OutputType::Stderr),
             task_name.clone(),
             suppress_terminal,
+            no_prefix,
         )
         .await;
 
@@ -238,7 +258,7 @@ mod tests {
         // Process the output
         let mut cursor = std::io::Cursor::new(test_output);
         streams
-            .process_output("test_task".to_string(), OutputType::Stdout, &mut cursor, false)
+            .process_output("test_task".to_string(), OutputType::Stdout, &mut cursor, false, false)
             .await
             .unwrap();
 
@@ -267,12 +287,24 @@ mod tests {
 
         // Process both streams
         streams
-            .process_output("test_task".to_string(), OutputType::Stdout, &mut stdout_cursor, false)
+            .process_output(
+                "test_task".to_string(),
+                OutputType::Stdout,
+                &mut stdout_cursor,
+                false,
+                false,
+            )
             .await
             .unwrap();
 
         streams
-            .process_output("test_task".to_string(), OutputType::Stderr, &mut stderr_cursor, false)
+            .process_output(
+                "test_task".to_string(),
+                OutputType::Stderr,
+                &mut stderr_cursor,
+                false,
+                false,
+            )
             .await
             .unwrap();
 
@@ -281,5 +313,27 @@ mod tests {
 
         assert_eq!(stdout_contents[0], "stdout line");
         assert_eq!(stderr_contents[0], "stderr line");
+    }
+
+    /// `--no-prefix` (docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md
+    /// Phase 8): terminal output must drop the `[task]` prefix entirely, not
+    /// just the color, leaving exactly the task's own bytes.
+    #[test]
+    fn test_no_prefix_omits_task_prefix() {
+        let out = format_terminal_output("loud-task", b"hello\n", true);
+        assert_eq!(out, "hello\n");
+    }
+
+    /// Same call with `no_prefix: false` (the default) still carries the
+    /// task name, so a future regression that always suppresses the prefix
+    /// would fail this test.
+    #[test]
+    fn test_prefix_present_by_default() {
+        let out = format_terminal_output("loud-task", b"hello\n", false);
+        assert!(
+            out.contains("loud-task"),
+            "expected task name in prefixed output: {out:?}"
+        );
+        assert!(out.contains("hello\n"), "expected data to still be present: {out:?}");
     }
 }

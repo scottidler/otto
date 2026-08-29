@@ -374,7 +374,7 @@ impl Parser {
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn parse(&mut self) -> Result<(Vec<Task>, String, Option<PathBuf>, usize, bool)> {
+    pub fn parse(&mut self) -> Result<(Vec<Task>, String, Option<PathBuf>, usize, bool, bool)> {
         let help_requested = self.args.contains(&"--help".to_string()) || self.args.contains(&"-h".to_string());
 
         let otto_cmd = Self::otto_command();
@@ -461,6 +461,9 @@ impl Parser {
         // Extract tui flag
         let tui_mode = matches.get_flag("tui");
 
+        // Extract no-prefix flag (see docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md Phase 8)
+        let no_prefix = matches.get_flag("no-prefix");
+
         let ottofile_path = Self::divine_ottofile(ottofile_value)?;
         let (config_spec, hash, ottofile) = Self::load_config_from_path(ottofile_path)?;
 
@@ -539,7 +542,14 @@ impl Parser {
         // Process tasks and build DAG
         let tasks = self.process_tasks_with_filter(&tasks_to_run)?;
 
-        Ok((tasks, self.hash.clone(), self.ottofile.clone(), self.jobs, tui_mode))
+        Ok((
+            tasks,
+            self.hash.clone(),
+            self.ottofile.clone(),
+            self.jobs,
+            tui_mode,
+            no_prefix,
+        ))
     }
 
     pub fn parse_all_tasks(&mut self) -> Result<(Vec<Task>, String, Option<PathBuf>)> {
@@ -605,7 +615,7 @@ impl Parser {
     }
 
     /// Single source of truth for otto's global flags: cwd, ottofile,
-    /// list-subtasks, jobs, tui. `otto_command()`, `build_help_command()`,
+    /// list-subtasks, jobs, tui, no-prefix. `otto_command()`, `build_help_command()`,
     /// and `build_help_command_with_error()` all consume this so the
     /// rendered `--help` output can never drift from what's actually parsed
     /// again (see docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md
@@ -654,6 +664,10 @@ impl Parser {
                 .help("Enable interactive TUI dashboard for task monitoring")
                 .action(clap::ArgAction::SetTrue)
                 .global(true),
+            Arg::new("no-prefix")
+                .long("no-prefix")
+                .help("Suppress the [task] prefix on task output")
+                .action(clap::ArgAction::SetTrue),
         ]
     }
 
@@ -2764,7 +2778,7 @@ mod tests {
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse();
         assert!(result.is_ok());
-        let (_, _, _, jobs, _) = result.unwrap();
+        let (_, _, _, jobs, _, _) = result.unwrap();
         assert_eq!(jobs, 4);
     }
 
@@ -2788,7 +2802,7 @@ mod tests {
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse();
         assert!(result.is_ok());
-        let (_, _, _, jobs, _) = result.unwrap();
+        let (_, _, _, jobs, _, _) = result.unwrap();
         assert_eq!(jobs, num_cpus::get());
     }
 
@@ -2814,7 +2828,7 @@ mod tests {
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse();
         assert!(result.is_ok());
-        let (_, _, _, jobs, _) = result.unwrap();
+        let (_, _, _, jobs, _, _) = result.unwrap();
         assert_eq!(jobs, num_cpus::get());
     }
 
@@ -3140,7 +3154,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result;
 
         // Find the subtasks and verify they are chained
         let subtask_a = tasks.iter().find(|t| t.name == "install:a");
@@ -3203,7 +3217,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result;
 
         // Find the subtasks
         let subtask_a = tasks.iter().find(|t| t.name == "install:a");
@@ -3263,7 +3277,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result;
 
         // Find subtask b
         let subtask_b = tasks.iter().find(|t| t.name == "install:b").unwrap();
@@ -3695,7 +3709,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result;
 
         // Should only have install:td, NOT install:ts or install:cs
         let task_names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
@@ -3742,7 +3756,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result;
 
         // Should have all subtasks plus the (now executable) virtual parent
         let task_names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
@@ -3785,7 +3799,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result;
 
         let task_names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
         assert!(task_names.contains(&"deploy"), "deploy should be present");
@@ -3932,7 +3946,7 @@ tasks:
     /// builder. Pinned so a builder that stops calling `global_args()` (or a
     /// change to `global_args()` that isn't propagated) fails loudly instead
     /// of silently dropping flags from `--help` again.
-    const EXPECTED_GLOBAL_OPTIONS_HELP: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile\n          \n          [env: OTTOFILE=]\n          [default: .]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n      --tasks\n          Print the machine-readable task list and exit\n\n      --format <FORMAT>\n          Output format for --tasks (yaml or json); default: yaml on a tty, json when piped\n          \n          [possible values: yaml, json]\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: 32]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
+    const EXPECTED_GLOBAL_OPTIONS_HELP: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile\n          \n          [env: OTTOFILE=]\n          [default: .]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n      --tasks\n          Print the machine-readable task list and exit\n\n      --format <FORMAT>\n          Output format for --tasks (yaml or json); default: yaml on a tty, json when piped\n          \n          [possible values: yaml, json]\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: 32]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n      --no-prefix\n          Suppress the [task] prefix on task output\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
 
     /// Extracts the `Options:` section, from the `Options:` heading through
     /// the auto-appended `-V, --version` entry (always the last flag clap

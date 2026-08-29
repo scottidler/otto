@@ -75,7 +75,7 @@ tasks:
         "install".to_string(),
     ];
     let mut parser = Parser::new(args)?;
-    let (parser_tasks, _, _, _, _) = parser.parse()?;
+    let (parser_tasks, _, _, _, _, _) = parser.parse()?;
 
     let tasks = convert_to_executor_tasks(parser_tasks);
     let workspace = Workspace::new(work_dir).await?;
@@ -121,7 +121,7 @@ tasks:
         "install".to_string(),
     ];
     let mut parser = Parser::new(args)?;
-    let (parser_tasks, _, _, _, _) = parser.parse()?;
+    let (parser_tasks, _, _, _, _, _) = parser.parse()?;
 
     let tasks = convert_to_executor_tasks(parser_tasks);
     let workspace = Workspace::new(work_dir).await?;
@@ -183,7 +183,7 @@ tasks:
         "install".to_string(),
     ];
     let mut parser = Parser::new(args)?;
-    let (parser_tasks, _, _, _, _) = parser.parse()?;
+    let (parser_tasks, _, _, _, _, _) = parser.parse()?;
 
     let tasks = convert_to_executor_tasks(parser_tasks);
     let workspace = Workspace::new(work_dir).await?;
@@ -240,7 +240,7 @@ tasks:
         "install".to_string(),
     ];
     let mut parser = Parser::new(args)?;
-    let (parser_tasks, _, _, _, _) = parser.parse()?;
+    let (parser_tasks, _, _, _, _, _) = parser.parse()?;
 
     let tasks = convert_to_executor_tasks(parser_tasks);
     let workspace = Workspace::new(work_dir).await?;

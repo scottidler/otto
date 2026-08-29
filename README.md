@@ -37,6 +37,37 @@ See [setup-otto](https://github.com/scottidler/setup-otto) for full documentatio
 cargo install --git https://github.com/otto-rs/otto
 ```
 
+## Task Parameters
+
+A task param declared with no short/long flag form binds positionally: the
+bare word following the task name on the command line becomes its value.
+
+```yaml
+tasks:
+  sw:
+    params:
+      svc:
+        help: service name
+    bash: |
+      echo "svc=${svc}"
+```
+
+```bash
+otto sw philo
+# svc=philo
+```
+
+### Positional parameters and the task-name collision edge
+
+otto splits a multi-task command line by scanning for tokens that match a
+declared task name, before params are bound. A positional value that happens
+to equal another task's name is misread as the start of that task instead of
+being bound to the preceding task's param (`otto sw philo` above binds
+`svc=philo` only because no other task in that ottofile is named `philo`).
+Avoid naming a task the same as a value you expect to pass positionally to
+another task. See [`docs/commands/positional-parameters.md`](docs/commands/positional-parameters.md)
+for the full declaration shape and a reproduced example of the collision.
+
 ## Version Reporting
 
 The `otto` binary supports `--version` and `-v` flags:
