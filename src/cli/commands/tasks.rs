@@ -11,13 +11,12 @@
 //! deterministic) between the YAML and JSON encodings.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use eyre::{Result, WrapErr};
 use serde::Serialize;
 
 use crate::cfg::param::ParamType;
-use crate::cfg::task::TaskSpecs;
+use crate::cfg::task::{ForeachItem, ForeachSpec, TaskSpecs};
 use crate::cli::builtins::is_builtin;
 
 /// A dedicated serde view for `--tasks`, deliberately separate from `TaskSpec`'s
@@ -50,15 +49,21 @@ pub type TasksView = BTreeMap<String, TaskView>;
 
 /// Build the `--tasks` view from the loaded (post-builtin-injection) task specs.
 ///
-/// `base_dir` is the ottofile's directory, the same anchor `foreach` glob/range
-/// resolution already uses elsewhere (see `ottofile_base_dir`).
+/// `resolve` turns one task's `foreach` into its items. The parser passes its
+/// per-invocation resolver, which anchors glob/range at the ottofile's
+/// directory and runs a `command:` source at most once (`--tasks` is an
+/// enumeration surface: reporting the real subtask ids is its job, so it does
+/// resolve command sources).
 ///
 /// Any foreach resolution failure aborts the whole view (frozen contract: a
 /// resolution failure exits non-zero with nothing on stdout). A foreach that
 /// legitimately resolves to zero items is not an error: it prints a one-line
 /// notice to stderr and contributes an empty `subtasks` array, matching the
 /// posture `foreach: command:` (Phase 6) is designed around.
-pub fn build_tasks_view(tasks: &TaskSpecs, base_dir: &Path) -> Result<TasksView> {
+pub fn build_tasks_view(
+    tasks: &TaskSpecs,
+    resolve: &dyn Fn(&str, &ForeachSpec) -> Result<Vec<ForeachItem>>,
+) -> Result<TasksView> {
     let mut view = TasksView::new();
 
     let mut names: Vec<&String> = tasks.keys().collect();
@@ -72,10 +77,10 @@ pub fn build_tasks_view(tasks: &TaskSpecs, base_dir: &Path) -> Result<TasksView>
 
         let subtasks = match &spec.foreach {
             Some(foreach) => {
-                let items = foreach
-                    .resolve_items(base_dir)
+                let items = resolve(name, foreach)
                     .wrap_err_with(|| format!("task '{name}': failed to resolve foreach items"))?;
-                if items.is_empty() {
+                if items.is_empty() && !foreach.is_command_source() {
+                    // A command source prints its own empty-scope notice while resolving.
                     eprintln!("Notice: task '{name}' foreach matched 0 items");
                 }
                 items.iter().map(|item| format!("{name}:{}", item.identifier)).collect()
@@ -161,8 +166,13 @@ mod tests {
     use crate::cfg::config::{ParamSpec, TaskSpec, Value};
     use crate::cfg::edge::EdgeSpec;
     use crate::cfg::param::{Nargs, ParamType};
-    use crate::cfg::task::ForeachSpec;
     use std::path::PathBuf;
+
+    /// Stand-in for the parser's resolver: static sources only, anchored at the
+    /// test's cwd, which is all these view-shape tests need.
+    fn static_resolver(_name: &str, foreach: &ForeachSpec) -> Result<Vec<ForeachItem>> {
+        foreach.resolve_items(&PathBuf::from("."))
+    }
 
     fn plain_task(name: &str) -> TaskSpec {
         TaskSpec {
@@ -200,7 +210,7 @@ mod tests {
         tasks.insert("History".to_string(), plain_task("History"));
         tasks.insert("Clean".to_string(), plain_task("Clean"));
 
-        let view = build_tasks_view(&tasks, &PathBuf::from(".")).unwrap();
+        let view = build_tasks_view(&tasks, &static_resolver).unwrap();
 
         assert_eq!(view.keys().collect::<Vec<_>>(), vec!["up"]);
     }
@@ -216,7 +226,7 @@ mod tests {
         let mut tasks = TaskSpecs::new();
         tasks.insert("up".to_string(), parent);
 
-        let view = build_tasks_view(&tasks, &PathBuf::from(".")).unwrap();
+        let view = build_tasks_view(&tasks, &static_resolver).unwrap();
 
         assert_eq!(view.len(), 1, "subtasks must not appear as separate top-level entries");
         let up = &view["up"];
@@ -234,7 +244,7 @@ mod tests {
         let mut tasks = TaskSpecs::new();
         tasks.insert("up".to_string(), parent);
 
-        let view = build_tasks_view(&tasks, &PathBuf::from(".")).unwrap();
+        let view = build_tasks_view(&tasks, &static_resolver).unwrap();
         assert!(view["up"].subtasks.is_empty());
     }
 
@@ -264,7 +274,7 @@ mod tests {
         let mut tasks = TaskSpecs::new();
         tasks.insert("deploy".to_string(), task);
 
-        let view = build_tasks_view(&tasks, &PathBuf::from(".")).unwrap();
+        let view = build_tasks_view(&tasks, &static_resolver).unwrap();
         let deploy = &view["deploy"];
 
         assert_eq!(deploy.edges.before, vec!["build".to_string()]);
@@ -282,7 +292,7 @@ mod tests {
         let mut tasks = TaskSpecs::new();
         tasks.insert("up".to_string(), plain_task("up"));
         tasks.insert("down".to_string(), plain_task("down"));
-        let view = build_tasks_view(&tasks, &PathBuf::from(".")).unwrap();
+        let view = build_tasks_view(&tasks, &static_resolver).unwrap();
 
         let json = render_tasks_view(&view, TasksFormat::Json).unwrap();
         let yaml = render_tasks_view(&view, TasksFormat::Yaml).unwrap();

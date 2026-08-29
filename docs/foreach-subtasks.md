@@ -54,6 +54,7 @@ This runs ~10 examples serially, taking ~2 minutes total when they could run in 
 ### Non-Goals
 
 - Runtime code execution (we stay within YAML's declarative model)
+  - **Amended 2026-08-29** (`docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md`, Phase 6): `foreach: command:` adds one execution site, deliberately and with the tension weighed. otto already shells out at load time for every `envs:` `$()`, unconditionally, on every invocation including `--help`. A command source is *lazier* than that existing posture, not looser: it fires only when the invocation actually needs the expansion, at most once, and never for `--help`. The declarative model still holds for the three static sources, which execute nothing.
 - Complex iteration logic (nested loops, conditionals during expansion)
 - Support for infinite/streaming iteration sources
 - Breaking changes to existing task syntax
@@ -81,6 +82,8 @@ tasks:
       items: [dev, staging, prod]  # Source: explicit list
       # OR
       range: "1-10"                # Source: numeric range (inclusive)
+      # OR
+      command: "scripts/list.sh"   # Source: the command's stdout lines
 
       as: example                  # Variable name (default: "item")
       parallel: true               # Run subtasks in parallel (default: true)
@@ -104,8 +107,49 @@ Subtask names follow the pattern `{parent}:{item_identifier}`:
 | `glob` | Filename without directory (e.g., `01-basic.sh`) | Alphabetically sorted |
 | `items` | The item value itself (e.g., `dev`) | Preserved from YAML |
 | `range` | Zero-padded number (e.g., `01`, `02`) | Numeric order |
+| `command` | The output line, spaces replaced with `_` (e.g., `alpha`) | The command's line order |
 
 **Ordering guarantee:** Glob results are always sorted alphabetically for deterministic, reproducible builds. This ensures `examples:01-basic.sh` always comes before `examples:02-search.sh`.
+
+### Command Source
+
+`command:` draws the item list from a command's stdout, so a task can expand over something computed per invocation (a service registry, a manifest, a `git` query) instead of something written into the ottofile:
+
+```yaml
+tasks:
+  up:
+    foreach:
+      command: "scripts/list-services.sh"
+      as: svc
+      parallel: false
+    bash: |
+      scripts/svc.sh run "${svc}" up
+```
+
+**Items:** the non-empty lines of stdout, each whitespace-trimmed. The identifier is sanitized exactly as a glob identifier is (internal spaces become `_`); the value keeps its original spacing. `max_items` and the duplicate-subtask-name check apply unchanged.
+
+**Execution contract:**
+
+- The command runs via `sh -c`, with cwd = the ottofile's directory.
+- Its environment is otto's inherited environment plus the resolved global `envs:`.
+- **Task params are NOT available.** Params resolve *after* foreach expansion, so `${svc}` (or any other param) is unset while the command runs. Dynamic input comes from the shell environment or from a file the command reads.
+- `command:` is mutually exclusive with `glob:`, `items:`, and `range:`. Combining them is a config error naming the task.
+
+**When it runs (lazy, cached):** unlike the static sources, a command source executes only when the invocation actually needs the expansion, and at most once per invocation:
+
+| Invocation | Runs the command? |
+|------------|-------------------|
+| `otto up` / `otto up:alpha` (the task or one of its subtasks is targeted) | yes, once |
+| `otto <default tasks>` where the task is a default | yes, once |
+| `otto --tasks`, `otto --list-subtasks` (enumeration surfaces) | yes, once |
+| `otto --help`, `otto help up`, `otto up --help` | **never** - help renders `[dynamic]` in place of the item count |
+| `otto build` (an unrelated task) | **never** |
+
+**Failure is loud:**
+
+- Non-zero exit: a config error naming the task, the command, and the exit code; nothing reaches stdout, and otto exits non-zero.
+- Zero lines with exit 0: a legitimate empty scope. otto prints one notice on stderr and the task expands to zero subtasks.
+- Recursion: the command runs with `OTTO_FOREACH_COMMAND=<task>` in its environment. If a nested otto would resolve a command source for a task already named there, it errors with the cycle named instead of recursing. A nested otto that targets ordinary tasks is unaffected.
 
 ### Variable Injection
 

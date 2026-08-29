@@ -21,7 +21,8 @@ use sha2::{Digest, Sha256};
 use crate::cfg::config::{ConfigSpec, ParamSpec, TaskSpec, Value};
 use crate::cfg::env as env_eval;
 use crate::cfg::param::ParamType;
-use crate::cfg::task::TaskSpecs;
+use crate::cfg::resolver::DynamicResolver;
+use crate::cfg::task::{ForeachItem, ForeachSpec, TaskSpecs};
 use crate::cli::builtins::BUILTIN_COMMANDS;
 
 pub type DAG<T> = Dag<T, (), u32>;
@@ -260,6 +261,11 @@ pub struct Parser {
     pargs: Vec<Vec<String>>,
     ottofile: Option<PathBuf>,
     jobs: usize,
+    /// Per-invocation cache for dynamic (command-sourced) config values, plus
+    /// the memoized global `envs:` those commands run with. Interior-mutable so
+    /// the `&self` call sites (partitioning, `--list-subtasks`, `--tasks`,
+    /// expansion) all share one resolution. See src/cfg/resolver.rs.
+    resolver: DynamicResolver,
 }
 
 impl Parser {
@@ -278,6 +284,7 @@ impl Parser {
             pargs: Vec::new(),
             ottofile: None,
             jobs: num_cpus::get(), // Default to number of CPUs
+            resolver: DynamicResolver::new(),
         })
     }
 
@@ -286,6 +293,48 @@ impl Parser {
     /// task execution share one definition of "workspace root."
     fn base_dir(&self) -> &Path {
         ottofile_base_dir(self.ottofile.as_deref(), &self.cwd)
+    }
+
+    /// The resolved global `envs:`, evaluated at most once per invocation.
+    ///
+    /// This is the environment contract for command-sourced foreach: the
+    /// command sees the inherited environment plus these. Memoizing here (and
+    /// having `process_tasks_with_filter` read the same accessor) is what puts
+    /// global env evaluation ahead of arg partitioning: whichever site needs a
+    /// command source first, the envs are resolved before the command runs.
+    /// Global envs do not depend on task args, so the values are identical
+    /// wherever the first ask happens.
+    fn global_envs(&self) -> &HashMap<String, String> {
+        self.resolver.global_envs(|| {
+            if self.config_spec.otto.envs.is_empty() {
+                HashMap::new()
+            } else {
+                env_eval::evaluate_envs(&self.config_spec.otto.envs, Some(&self.cwd)).unwrap_or_else(|e| {
+                    eprintln!("Warning: Failed to evaluate global environment variables: {e}");
+                    HashMap::new()
+                })
+            }
+        })
+    }
+
+    /// Resolve one task's foreach items, running a command source at most once
+    /// per invocation. Static sources (glob / items / range) take exactly the
+    /// path they always have.
+    fn resolve_foreach(&self, task_name: &str, foreach: &ForeachSpec) -> Result<Vec<ForeachItem>> {
+        if !foreach.is_command_source() {
+            return foreach.resolve_items(self.base_dir());
+        }
+        self.resolver.foreach_items(task_name, || {
+            foreach.resolve_command_items(task_name, self.base_dir(), self.global_envs())
+        })
+    }
+
+    /// True when the requested args name `task` or one of its subtasks
+    /// (`up:gamma`). This is the lazy trigger for a command source: no mention,
+    /// no execution.
+    fn args_mention_task(args: &[String], task: &str) -> bool {
+        let prefix = format!("{task}:");
+        args.iter().any(|arg| arg == task || arg.starts_with(&prefix))
     }
 
     /// Returns a reference to the original task specs from the ottofile.
@@ -336,6 +385,7 @@ impl Parser {
                                                 pargs: Vec::new(),
                                                 ottofile: None,
                                                 jobs: num_cpus::get(),
+                                                resolver: DynamicResolver::new(),
                                             };
                                             temp_parser.inject_builtin_commands();
                                             let mut help_cmd = temp_parser.build_help_command();
@@ -401,7 +451,13 @@ impl Parser {
 
         // Handle --list-subtasks flag
         if matches.get_flag("list-subtasks") {
-            self.print_subtasks();
+            if let Err(e) = self.print_subtasks() {
+                // `{e:#}` prints the whole cause chain: a wrapped foreach
+                // failure must name the command and its exit code, not just
+                // the outermost "failed to resolve" context.
+                eprintln!("Error: {e:#}");
+                std::process::exit(1);
+            }
             std::process::exit(0);
         }
 
@@ -410,7 +466,9 @@ impl Parser {
         // Phase 5 for the frozen contract (no builtins, subtasks nested once,
         // stdout is pure data, notices/errors on stderr).
         if matches.get_flag("tasks") {
-            match crate::cli::commands::tasks::build_tasks_view(&self.config_spec.tasks, self.base_dir()) {
+            match crate::cli::commands::tasks::build_tasks_view(&self.config_spec.tasks, &|name, foreach| {
+                self.resolve_foreach(name, foreach)
+            }) {
                 Ok(view) => {
                     let explicit_format = matches.get_one::<String>("format").map(String::as_str);
                     let stdout_is_tty = atty::is(atty::Stream::Stdout);
@@ -421,13 +479,13 @@ impl Parser {
                             std::process::exit(0);
                         }
                         Err(e) => {
-                            eprintln!("Error: {e}");
+                            eprintln!("Error: {e:#}");
                             std::process::exit(1);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error: {e}");
+                    eprintln!("Error: {e:#}");
                     std::process::exit(1);
                 }
             }
@@ -448,7 +506,7 @@ impl Parser {
             self.resolve_default_tasks()?
         } else {
             // Task arguments provided - partition and parse them
-            let task_names = self.get_task_names();
+            let task_names = self.get_task_names(&remaining_args)?;
             let partitions = partitions(&remaining_args, &task_names);
             self.pargs = partitions;
 
@@ -659,7 +717,11 @@ impl Parser {
     }
 
     /// Print all foreach subtasks and their parent tasks.
-    fn print_subtasks(&self) {
+    ///
+    /// `--list-subtasks` is an enumeration surface: giving the real list is its
+    /// job, so it DOES resolve command sources, and it propagates a resolution
+    /// failure as its own loud error instead of printing a partial list.
+    fn print_subtasks(&self) -> Result<()> {
         let mut has_foreach = false;
 
         // Sort tasks by name for consistent output
@@ -672,9 +734,12 @@ impl Parser {
                 has_foreach = true;
 
                 // Get the items for this foreach (resolve relative to ottofile dir)
-                let items = match foreach.resolve_items(self.base_dir()) {
+                let items = match self.resolve_foreach(task_name, foreach) {
                     Ok(items) => items,
                     Err(e) => {
+                        if foreach.is_command_source() {
+                            return Err(e);
+                        }
                         eprintln!("{task_name}: Error resolving items: {e}");
                         continue;
                     }
@@ -691,6 +756,8 @@ impl Parser {
         if !has_foreach {
             println!("No tasks with foreach directive found.");
         }
+
+        Ok(())
     }
 
     fn resolve_default_tasks(&self) -> Result<Vec<String>> {
@@ -728,23 +795,95 @@ impl Parser {
         Ok(resolved_tasks)
     }
 
-    fn get_task_names(&self) -> Vec<String> {
+    /// Every name `partitions()` may split the arg list on: the ottofile's
+    /// tasks, the built-ins, and each foreach task's subtask ids.
+    ///
+    /// `requested` is the raw arg list. A command-sourced foreach resolves here
+    /// only if those args mention it (by parent name or by a subtask-shaped
+    /// token); otherwise its subtask ids are not needed to partition this
+    /// invocation and the command must not run. When it does resolve, a failure
+    /// is returned, not swallowed - the silent `let Ok(items)` that predates
+    /// this phase stays only for static sources, whose failures are reported at
+    /// the expansion site instead.
+    fn get_task_names(&self, requested: &[String]) -> Result<Vec<String>> {
         let mut task_names: Vec<String> = self.config_spec.tasks.keys().cloned().collect();
         task_names.push("graph".to_string()); // Always include built-in tasks
         task_names.push("help".to_string()); // Always include help as a special command
 
         // Also include expanded subtask names for foreach tasks
         for (name, spec) in &self.config_spec.tasks {
-            if let Some(ref foreach) = spec.foreach
-                && let Ok(items) = foreach.resolve_items(self.base_dir())
-            {
+            let Some(ref foreach) = spec.foreach else {
+                continue;
+            };
+            if foreach.is_command_source() {
+                if !Self::args_mention_task(requested, name) {
+                    continue;
+                }
+                for item in self.resolve_foreach(name, foreach)? {
+                    task_names.push(format!("{}:{}", name, item.identifier));
+                }
+            } else if let Ok(items) = self.resolve_foreach(name, foreach) {
                 for item in items {
                     task_names.push(format!("{}:{}", name, item.identifier));
                 }
             }
         }
 
-        task_names
+        Ok(task_names)
+    }
+
+    /// The set of ottofile task names this run can reach from `roots`.
+    ///
+    /// Mirrors `collect_transitive_deps` on the *unexpanded* specs, so it is a
+    /// superset of what the run set can contain: upstream via `before:`,
+    /// downstream via `after:`, and the inverted `after:` relation (X's
+    /// `after: [Y]` makes X a dependency of Y). Subtask-shaped roots collapse
+    /// to their parent. Used to decide which command-sourced foreach tasks may
+    /// stay unresolved.
+    fn reachable_task_names(&self, roots: &[String]) -> HashSet<String> {
+        // name -> tasks that must run when `name` runs, via the inverted `after:` edge.
+        let mut inverted_after: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (name, spec) in &self.config_spec.tasks {
+            for edge in &spec.after {
+                inverted_after
+                    .entry(Self::parent_task_name(&edge.task))
+                    .or_default()
+                    .push(name.as_str());
+            }
+        }
+
+        let mut reachable: HashSet<String> = HashSet::new();
+        let mut queue: Vec<String> = roots
+            .iter()
+            .map(|root| Self::parent_task_name(root).to_string())
+            .collect();
+
+        while let Some(name) = queue.pop() {
+            if !reachable.insert(name.clone()) {
+                continue;
+            }
+            let mut push = |target: &str| queue.push(Self::parent_task_name(target).to_string());
+            if let Some(spec) = self.config_spec.tasks.get(&name) {
+                for edge in &spec.before {
+                    push(&edge.task);
+                }
+                for edge in &spec.after {
+                    push(&edge.task);
+                }
+            }
+            if let Some(dependents) = inverted_after.get(name.as_str()) {
+                for dependent in dependents {
+                    push(dependent);
+                }
+            }
+        }
+
+        reachable
+    }
+
+    /// `up:gamma` -> `up`; anything else unchanged.
+    fn parent_task_name(name: &str) -> &str {
+        name.split_once(':').map_or(name, |(parent, _)| parent)
     }
 
     fn extract_task_names_from_partitions(&self) -> Vec<String> {
@@ -756,20 +895,17 @@ impl Parser {
 
     fn process_tasks_with_filter(&self, requested_tasks: &[String]) -> Result<Vec<Task>> {
         // Step 0: Evaluate global environment variables once
-        let global_envs = if self.config_spec.otto.envs.is_empty() {
-            HashMap::new()
-        } else {
-            env_eval::evaluate_envs(&self.config_spec.otto.envs, Some(&self.cwd)).unwrap_or_else(|e| {
-                eprintln!("Warning: Failed to evaluate global environment variables: {e}");
-                HashMap::new()
-            })
-        };
+        // (memoized: a command-sourced foreach may already have forced this
+        // evaluation at partition time, and both sites must see one result)
+        let global_envs = self.global_envs().clone();
 
         // Step 0.4: Check which requested tasks have --Serial flag
         let serial_tasks: HashSet<String> = self.detect_serial_tasks(requested_tasks);
 
         // Step 0.5: Expand foreach tasks into subtasks
-        let (mut expanded_tasks, serial_membership) = self.expand_foreach_tasks_with_serial(&serial_tasks)?;
+        let mut deferred_foreach: HashSet<String> = HashSet::new();
+        let (mut expanded_tasks, serial_membership) =
+            self.expand_foreach_tasks_with_serial(&serial_tasks, requested_tasks, &mut deferred_foreach)?;
 
         // Step 0.6: Desugar `on-failure:` into synthetic `after:` edges.
         // X with `on-failure: [Y]` becomes `X.after += [{task: Y, when: failure}]`,
@@ -782,6 +918,19 @@ impl Parser {
         let mut tasks_needed = HashSet::new();
         for task_name in requested_tasks {
             Self::collect_transitive_deps(task_name, &task_deps, &expanded_tasks, &mut tasks_needed)?;
+        }
+
+        // The reachability analysis that deferred a command source must be a
+        // superset of the run set. If it ever isn't, we'd silently schedule an
+        // empty parent instead of the subtasks - fail loudly instead.
+        for name in &tasks_needed {
+            if deferred_foreach.contains(Self::parent_task_name(name)) {
+                return Err(eyre!(
+                    "Internal error: task '{}' is in the run set but its command-sourced foreach was \
+                     skipped as unreachable; please report this with the ottofile",
+                    name
+                ));
+            }
         }
 
         // Param resolution uses a multi-phase approach to support propagation:
@@ -1246,19 +1395,42 @@ impl Parser {
     /// ordering is NOT expressed as `before:` edges - "runs after" and "requires" are
     /// different things, and edges are the latter (see the Phase 4 design bullet in
     /// docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md).
+    ///
+    /// `requested_tasks` gates command-sourced foreach: a task the run can't
+    /// reach is left unexpanded so its command never runs (`otto build` must
+    /// not execute an unrelated `up` task's command source). `deferred`
+    /// collects the names left unexpanded, so the caller can prove none of them
+    /// ended up in the run set.
     fn expand_foreach_tasks_with_serial(
         &self,
         serial_tasks: &HashSet<String>,
+        requested_tasks: &[String],
+        deferred: &mut HashSet<String>,
     ) -> Result<(HashMap<String, TaskSpec>, SerialMembership)> {
         use crate::cfg::task::TaskSpecs;
 
         let mut expanded: TaskSpecs = HashMap::new();
         let mut membership: SerialMembership = HashMap::new();
+        let reachable = self.reachable_task_names(requested_tasks);
 
         for (name, spec) in &self.config_spec.tasks {
             if spec.has_foreach() {
+                let foreach = spec.foreach.as_ref().expect("has_foreach() implies Some");
+
+                // Lazy trigger: a command source resolves only for a task this
+                // run can reach. Everything else keeps its virtual parent as a
+                // placeholder and never executes anything.
+                if foreach.is_command_source() && !reachable.contains(name) {
+                    deferred.insert(name.clone());
+                    let mut parent = spec.as_virtual_parent();
+                    parent.before = Vec::new();
+                    expanded.insert(name.clone(), parent);
+                    continue;
+                }
+
                 // Expand foreach task into subtasks (resolve relative to ottofile dir)
-                let subtasks = spec.expand_foreach(self.base_dir())?;
+                let items = self.resolve_foreach(name, foreach)?;
+                let subtasks = spec.expand_foreach_with_items(&items)?;
 
                 if subtasks.is_empty() {
                     // Zero matches - just keep the virtual parent for dependency tracking
@@ -1365,12 +1537,20 @@ impl Parser {
 
         // Build help text, including foreach count if available
         let help_text = if let Some(ref foreach) = task_spec.foreach {
-            let count = cwd
-                .and_then(|cwd| foreach.resolve_items(cwd).ok())
-                .map(|items| items.len())
-                .unwrap_or(0);
+            // A command source is never executed to render help: the item count
+            // isn't knowable without running user code, so help says so and
+            // stays execution-free (design doc Phase 6, and the same rule
+            // Phase 6b applies to dynamic param choices).
+            let foreach_indicator = if foreach.is_command_source() {
+                " [dynamic]".to_string()
+            } else {
+                let count = cwd
+                    .and_then(|cwd| foreach.resolve_items(cwd).ok())
+                    .map(|items| items.len())
+                    .unwrap_or(0);
 
-            let foreach_indicator = if count > 0 { format!(" [{count} items]") } else { " [foreach]".to_string() };
+                if count > 0 { format!(" [{count} items]") } else { " [foreach]".to_string() }
+            };
 
             match &task_spec.help {
                 Some(help) => format!("{help}{foreach_indicator}"),
@@ -2087,10 +2267,24 @@ impl Parser {
             // Validate that no tasks use reserved builtin param names
             Self::validate_no_builtin_params(&config_spec)?;
 
+            // Validate foreach sources (a `command:` source is exclusive with
+            // glob/items/range). Shape-only, executes nothing, so every
+            // surface including `--help` reports the misconfiguration.
+            Self::validate_foreach_sources(&config_spec)?;
+
             Ok((config_spec, hash, Some(ottofile)))
         } else {
             Err(eyre!("{}", ottofile_not_found_message()))
         }
+    }
+
+    fn validate_foreach_sources(config: &ConfigSpec) -> Result<()> {
+        for (task_name, task_spec) in &config.tasks {
+            if let Some(foreach) = &task_spec.foreach {
+                foreach.validate_sources(task_name)?;
+            }
+        }
+        Ok(())
     }
 
     fn validate_no_builtin_params(config: &ConfigSpec) -> Result<()> {
@@ -2687,6 +2881,128 @@ mod tests {
     }
 
     // Tests for foreach parallel: false feature
+
+    // ------------------------------------------------------------------
+    // foreach: command: lazy-resolution seams (Phase 6)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_args_mention_task_matches_parent_and_subtask_tokens() {
+        let args = vec!["up:gamma".to_string(), "--flag".to_string()];
+        assert!(Parser::args_mention_task(&args, "up"));
+        assert!(!Parser::args_mention_task(&args, "upgrade"));
+        assert!(!Parser::args_mention_task(&args, "build"));
+
+        let args = vec!["up".to_string()];
+        assert!(Parser::args_mention_task(&args, "up"));
+    }
+
+    #[test]
+    fn test_parent_task_name_strips_the_subtask_suffix() {
+        assert_eq!(Parser::parent_task_name("up:gamma"), "up");
+        assert_eq!(Parser::parent_task_name("up"), "up");
+    }
+
+    #[test]
+    fn test_reachable_task_names_covers_both_edge_directions() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ottofile_path = temp_dir.path().join("otto.yml");
+        // deps <- build (build requires deps); notify runs after build;
+        // lonely is connected to nothing.
+        let config = r#"
+tasks:
+  deps:
+    bash: echo deps
+  build:
+    before: [deps]
+    bash: echo build
+  notify:
+    after: [build]
+    bash: echo notify
+  lonely:
+    bash: echo lonely
+"#;
+        fs::write(&ottofile_path, config).unwrap();
+
+        let args = vec![
+            "otto".to_string(),
+            "--ottofile".to_string(),
+            ottofile_path.to_string_lossy().to_string(),
+            "build".to_string(),
+        ];
+        let mut parser = Parser::new(args).unwrap();
+        parser.parse().unwrap();
+
+        let reachable = parser.reachable_task_names(&["build".to_string()]);
+        assert!(reachable.contains("build"));
+        assert!(reachable.contains("deps"), "upstream `before:` target is reachable");
+        assert!(
+            reachable.contains("notify"),
+            "a task whose `after:` names build is pulled in by build"
+        );
+        assert!(!reachable.contains("lonely"), "an unrelated task is not reachable");
+
+        // a subtask-shaped root collapses to its parent
+        let reachable = parser.reachable_task_names(&["build:one".to_string()]);
+        assert!(reachable.contains("build"));
+    }
+
+    #[test]
+    fn test_help_renders_dynamic_for_a_command_sourced_foreach() {
+        let mut task_spec = TaskSpec::new(
+            "up".to_string(),
+            Some("Bring up each service".to_string()),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            crate::cfg::param::ParamSpecs::new(),
+            "echo ${svc}".to_string(),
+        );
+        task_spec.foreach = Some(ForeachSpec {
+            // If help ever resolved this, the sentinel file would appear.
+            command: Some("printf 'alpha\n'".to_string()),
+            var_name: "svc".to_string(),
+            ..Default::default()
+        });
+
+        let rendered = Parser::task_to_command_for_help(&task_spec, Some(Path::new(".")))
+            .render_long_help()
+            .to_string();
+
+        assert!(rendered.contains("[dynamic]"), "{rendered}");
+        assert!(!rendered.contains("items]"), "{rendered}");
+    }
+
+    #[test]
+    fn test_help_still_renders_item_counts_for_static_foreach() {
+        let mut task_spec = TaskSpec::new(
+            "up".to_string(),
+            Some("Bring up each service".to_string()),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            crate::cfg::param::ParamSpecs::new(),
+            "echo ${svc}".to_string(),
+        );
+        task_spec.foreach = Some(ForeachSpec {
+            items: vec!["alpha".to_string(), "beta".to_string()],
+            var_name: "svc".to_string(),
+            ..Default::default()
+        });
+
+        let rendered = Parser::task_to_command_for_help(&task_spec, Some(Path::new(".")))
+            .render_long_help()
+            .to_string();
+
+        assert!(rendered.contains("[2 items]"), "{rendered}");
+    }
 
     /// Rewritten in Phase 4 of docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md:
     /// serial ordering used to be sibling `before:` edges, which made "runs after" mean

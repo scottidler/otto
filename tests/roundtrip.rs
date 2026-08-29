@@ -87,6 +87,23 @@ tasks:
     );
 }
 
+/// A `command:` foreach source must survive serialize -> re-parse verbatim,
+/// the same as the three static sources (design doc 2026-08-28, Phase 6).
+#[test]
+fn config_with_foreach_command_roundtrips() {
+    assert_roundtrips(
+        r#"
+tasks:
+  up:
+    action: ./bin/svc.sh ${svc} up
+    foreach:
+      command: "scripts/list-services.sh"
+      as: svc
+      parallel: false
+"#,
+    );
+}
+
 #[test]
 fn config_with_io_specs_roundtrips() {
     assert_roundtrips(

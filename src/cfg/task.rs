@@ -36,6 +36,7 @@ impl Default for ForeachSpec {
             glob: None,
             items: Vec::new(),
             range: None,
+            command: None,
             var_name: default_as(),
             parallel: default_parallel(),
             max_items: default_max_items(),
@@ -58,6 +59,13 @@ pub struct ForeachSpec {
     #[serde(default)]
     pub range: Option<String>,
 
+    /// Shell command whose stdout lines are the items. Mutually exclusive with
+    /// `glob`/`items`/`range`. Unlike the other three sources this one executes,
+    /// so it resolves lazily and at most once per invocation - never for `--help`
+    /// (see docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md, Phase 6).
+    #[serde(default)]
+    pub command: Option<String>,
+
     /// Variable name for the current item (default: "item")
     #[serde(default = "default_as")]
     #[serde(rename = "as")]
@@ -73,7 +81,7 @@ pub struct ForeachSpec {
 }
 
 /// Represents a single item from foreach expansion
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForeachItem {
     /// The identifier used in subtask naming (e.g., "01-basic.sh")
     pub identifier: String,
@@ -82,9 +90,56 @@ pub struct ForeachItem {
 }
 
 impl ForeachSpec {
-    /// Resolve the foreach source into a list of items
+    /// True when the items come from a command's stdout rather than from the
+    /// ottofile itself. Command sources execute, so they resolve lazily and
+    /// only through the parser's `DynamicResolver`.
+    #[must_use]
+    pub fn is_command_source(&self) -> bool {
+        self.command.is_some()
+    }
+
+    /// Reject a `command:` source combined with any static source. Loud config
+    /// error naming the task, checked at load time so `otto --help` reports it
+    /// too (validating the shape executes nothing).
+    pub fn validate_sources(&self, task_name: &str) -> Result<()> {
+        let Some(command) = &self.command else {
+            return Ok(());
+        };
+        let mut combined: Vec<&str> = Vec::new();
+        if self.glob.is_some() {
+            combined.push("glob");
+        }
+        if !self.items.is_empty() {
+            combined.push("items");
+        }
+        if self.range.is_some() {
+            combined.push("range");
+        }
+        if !combined.is_empty() {
+            return Err(eyre!(
+                "Task '{}': foreach command '{}' cannot be combined with {}; \
+                 foreach takes exactly one source (command, glob, items, or range)",
+                task_name,
+                command,
+                combined.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolve a static (glob / items / range) foreach source into a list of items.
+    ///
+    /// A command source is NOT resolvable here: it needs a task name (for the
+    /// recursion guard and error messages) and the resolved global envs, which
+    /// only the parser's resolver has. See `resolve_command_items`.
     pub fn resolve_items(&self, cwd: &Path) -> Result<Vec<ForeachItem>> {
-        let items = if let Some(glob_pattern) = &self.glob {
+        let items = if let Some(command) = &self.command {
+            return Err(eyre!(
+                "foreach command '{}' must be resolved through otto's foreach resolver \
+                 (internal error: reached a call site with no command context)",
+                command
+            ));
+        } else if let Some(glob_pattern) = &self.glob {
             self.resolve_glob(glob_pattern, cwd)?
         } else if !self.items.is_empty() {
             self.resolve_list()
@@ -94,14 +149,7 @@ impl ForeachSpec {
             return Err(eyre!("foreach requires glob, items, or range"));
         };
 
-        // Check max_items limit
-        if items.len() > self.max_items {
-            return Err(eyre!(
-                "foreach matched {} items, exceeding max_items limit ({})",
-                items.len(),
-                self.max_items
-            ));
-        }
+        self.check_max_items(&items)?;
 
         // Warn if zero items
         if items.is_empty() {
@@ -115,6 +163,66 @@ impl ForeachSpec {
         }
 
         Ok(items)
+    }
+
+    /// Resolve a `command:` foreach source: run the command and turn its
+    /// non-empty stdout lines into items.
+    ///
+    /// Contract (design doc Phase 6): `sh -c`, cwd = the ottofile's directory,
+    /// env = inherited environment + `envs` (the resolved global `envs:`); task
+    /// params are NOT available, because params resolve after expansion. A
+    /// non-zero exit is a loud error naming the task and the command; zero
+    /// lines with exit 0 is a legitimate empty scope that prints one notice on
+    /// stderr and expands to zero subtasks.
+    pub fn resolve_command_items(
+        &self,
+        task_name: &str,
+        cwd: &Path,
+        envs: &HashMap<String, String>,
+    ) -> Result<Vec<ForeachItem>> {
+        self.validate_sources(task_name)?;
+        let command = self
+            .command
+            .as_ref()
+            .ok_or_else(|| eyre!("Task '{}': foreach has no command source", task_name))?;
+
+        let context = format!("Task '{task_name}' foreach");
+        let lines = crate::cfg::resolver::run_lines_command(
+            command,
+            cwd,
+            envs,
+            crate::cfg::resolver::FOREACH_GUARD_VAR,
+            task_name,
+            &context,
+        )?;
+
+        let items: Vec<ForeachItem> = lines
+            .into_iter()
+            .map(|line| ForeachItem {
+                // Sanitized exactly as glob identifiers are.
+                identifier: line.replace(' ', "_"),
+                value: line,
+            })
+            .collect();
+
+        self.check_max_items(&items)?;
+
+        if items.is_empty() {
+            eprintln!("Notice: task '{task_name}' foreach command '{command}' produced no items");
+        }
+
+        Ok(items)
+    }
+
+    fn check_max_items(&self, items: &[ForeachItem]) -> Result<()> {
+        if items.len() > self.max_items {
+            return Err(eyre!(
+                "foreach matched {} items, exceeding max_items limit ({})",
+                items.len(),
+                self.max_items
+            ));
+        }
+        Ok(())
     }
 
     fn resolve_glob(&self, pattern: &str, cwd: &Path) -> Result<Vec<ForeachItem>> {
@@ -473,10 +581,24 @@ impl TaskSpec {
         };
 
         let items = foreach.resolve_items(cwd)?;
+        self.expand_foreach_with_items(&items)
+    }
+
+    /// Expand a foreach task over already-resolved items.
+    ///
+    /// The parser uses this so a command source resolves exactly once per
+    /// invocation (through the resolver cache) instead of once per call site;
+    /// the guards after this point - duplicate identifiers, variable injection -
+    /// are identical for every source.
+    pub fn expand_foreach_with_items(&self, items: &[ForeachItem]) -> Result<Vec<TaskSpec>> {
+        let foreach = match &self.foreach {
+            Some(f) => f,
+            None => return Ok(vec![self.clone()]),
+        };
 
         // Check for duplicate identifiers
         let mut seen_identifiers = std::collections::HashSet::new();
-        for item in &items {
+        for item in items {
             if !seen_identifiers.insert(&item.identifier) {
                 return Err(eyre!(
                     "foreach produced duplicate subtask name '{}:{}'",
@@ -721,6 +843,185 @@ mod foreach_tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("foreach requires glob, items, or range"));
+    }
+
+    // ------------------------------------------------------------------
+    // Command source (design doc 2026-08-28, Phase 6)
+    // ------------------------------------------------------------------
+
+    fn command_foreach(command: &str) -> ForeachSpec {
+        ForeachSpec {
+            command: Some(command.to_string()),
+            var_name: "svc".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_foreach_command_items_are_trimmed_non_empty_lines() {
+        let foreach = command_foreach("printf 'alpha\n\n  beta  \n'");
+        let items = foreach
+            .resolve_command_items("up", &PathBuf::from("."), &HashMap::new())
+            .unwrap();
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].identifier, "alpha");
+        assert_eq!(items[1].identifier, "beta");
+        assert_eq!(items[1].value, "beta");
+    }
+
+    #[test]
+    fn test_foreach_command_sanitizes_identifiers_like_glob_does() {
+        let foreach = command_foreach("printf 'two words\n'");
+        let items = foreach
+            .resolve_command_items("up", &PathBuf::from("."), &HashMap::new())
+            .unwrap();
+
+        assert_eq!(items[0].identifier, "two_words");
+        assert_eq!(items[0].value, "two words", "the value keeps the original spacing");
+    }
+
+    #[test]
+    fn test_foreach_command_nonzero_exit_names_task_and_command() {
+        let foreach = command_foreach("exit 7");
+        let err = foreach
+            .resolve_command_items("up", &PathBuf::from("."), &HashMap::new())
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("up"), "{err}");
+        assert!(err.contains("exit 7"), "{err}");
+        assert!(err.contains("exit code 7"), "{err}");
+    }
+
+    #[test]
+    fn test_foreach_command_zero_lines_is_an_empty_expansion_not_an_error() {
+        let foreach = command_foreach("true");
+        let items = foreach
+            .resolve_command_items("up", &PathBuf::from("."), &HashMap::new())
+            .unwrap();
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_foreach_command_respects_max_items() {
+        let foreach = ForeachSpec {
+            max_items: 2,
+            ..command_foreach("printf 'a\nb\nc\n'")
+        };
+        let err = foreach
+            .resolve_command_items("up", &PathBuf::from("."), &HashMap::new())
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("max_items"), "{err}");
+    }
+
+    #[test]
+    fn test_foreach_command_is_exclusive_with_static_sources() {
+        let foreach = ForeachSpec {
+            items: vec!["x".to_string()],
+            range: Some("1-2".to_string()),
+            ..command_foreach("printf 'a\n'")
+        };
+
+        let err = foreach.validate_sources("up").unwrap_err().to_string();
+        assert!(err.contains("Task 'up'"), "{err}");
+        assert!(err.contains("items"), "{err}");
+        assert!(err.contains("range"), "{err}");
+
+        // and the same error blocks resolution, not just load-time validation
+        assert!(
+            foreach
+                .resolve_command_items("up", &PathBuf::from("."), &HashMap::new())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_foreach_static_sources_still_validate_clean() {
+        let foreach = ForeachSpec {
+            items: vec!["x".to_string()],
+            glob: Some("*.sh".to_string()),
+            ..Default::default()
+        };
+        // Only a `command:` source is exclusive; the pre-existing glob/items
+        // precedence is untouched by this phase.
+        assert!(foreach.validate_sources("up").is_ok());
+    }
+
+    #[test]
+    fn test_resolve_items_refuses_a_command_source() {
+        let foreach = command_foreach("printf 'a\n'");
+        let err = foreach.resolve_items(&PathBuf::from(".")).unwrap_err().to_string();
+
+        assert!(
+            err.contains("must be resolved through otto's foreach resolver"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_expand_foreach_with_items_names_subtasks_and_injects_vars() {
+        let mut task = TaskSpec::new(
+            "up".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            ParamSpecs::new(),
+            "echo ${svc}".to_string(),
+        );
+        task.foreach = Some(command_foreach("unused: items are supplied"));
+
+        let items = vec![
+            ForeachItem {
+                identifier: "alpha".to_string(),
+                value: "alpha".to_string(),
+            },
+            ForeachItem {
+                identifier: "beta".to_string(),
+                value: "beta".to_string(),
+            },
+        ];
+        let subtasks = task.expand_foreach_with_items(&items).unwrap();
+
+        assert_eq!(subtasks.len(), 2);
+        assert_eq!(subtasks[0].name, "up:alpha");
+        assert_eq!(subtasks[1].name, "up:beta");
+        assert_eq!(subtasks[1].envs.get("svc"), Some(&"beta".to_string()));
+        assert_eq!(subtasks[1].envs.get("OTTO_FOREACH_INDEX"), Some(&"1".to_string()));
+        assert!(subtasks[0].foreach.is_none(), "subtasks must not re-expand");
+    }
+
+    #[test]
+    fn test_expand_foreach_with_items_rejects_duplicates() {
+        let mut task = TaskSpec::new(
+            "up".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            ParamSpecs::new(),
+            "echo ${svc}".to_string(),
+        );
+        task.foreach = Some(command_foreach("printf 'a\na\n'"));
+
+        let dup = ForeachItem {
+            identifier: "a".to_string(),
+            value: "a".to_string(),
+        };
+        let err = task
+            .expand_foreach_with_items(&[dup.clone(), dup])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("duplicate subtask name 'up:a'"), "{err}");
     }
 
     #[test]
