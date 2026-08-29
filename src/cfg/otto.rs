@@ -124,7 +124,13 @@ fn default_prune_interval_hours() -> u64 {
     24
 }
 
+/// `deny_unknown_fields` turns a stale or misplaced `otto.retention` key into
+/// a loud config-load error naming the field, rather than a silently-ignored
+/// no-op. Per `borg/src/config.rs:281-285`. Every field here is plain
+/// snake_case with no rename; `otto Convert` emits exactly these names, so
+/// its own output stays loadable under this attribute.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetentionSpec {
     /// Delete runs older than this many days (default: 30)
     #[serde(default = "default_keep_days")]
@@ -174,7 +180,13 @@ pub fn default_otto() -> OttoSpec {
     }
 }
 
+/// `deny_unknown_fields` turns a stale or misplaced `otto:` key into a loud
+/// config-load error naming the field, rather than a silently-ignored no-op.
+/// Per `borg/src/config.rs:281-285`. Does not reach `envs`' free-form keys:
+/// the attribute governs `OttoSpec`'s own field names, not the contents of
+/// the `HashMap` that `envs` holds.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OttoSpec {
     #[serde(default = "default_name")]
     pub name: String,
@@ -331,6 +343,30 @@ retention:
         let yaml = "name: test-project";
         let spec: OttoSpec = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(spec.retention, RetentionSpec::default());
+    }
+
+    /// Phase 4 negative test (design doc 2026-08-29, Phase 4 table). Parsed
+    /// through `ConfigSpec`, not `OttoSpec` directly, so the error carries the
+    /// nesting path (`otto`) that a direct-struct parse would not have.
+    #[test]
+    fn deny_unknown_fields_names_a_misspelled_otto_task_key() {
+        use crate::cfg::config::ConfigSpec;
+        let yaml = "otto:\n  task: foo\ntasks:\n  up:\n    bash: echo hi\n";
+        let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+        assert!(err.contains("task"), "must name the field: {err}");
+        assert!(err.contains("otto"), "must name the path: {err}");
+    }
+
+    /// Phase 4 negative test. `keep-days` (kebab) where the schema is snake
+    /// (`keep_days`): the schema mix means the kebab spelling is rejected, not
+    /// silently defaulted.
+    #[test]
+    fn deny_unknown_fields_names_a_kebab_retention_key_the_schema_keeps_snake() {
+        use crate::cfg::config::ConfigSpec;
+        let yaml = "otto:\n  retention:\n    keep-days: 5\ntasks:\n  up:\n    bash: echo hi\n";
+        let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+        assert!(err.contains("keep-days"), "must name the field: {err}");
+        assert!(err.contains("otto.retention"), "must name the path: {err}");
     }
 
     #[test]

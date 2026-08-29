@@ -45,7 +45,13 @@ impl Default for ForeachSpec {
 }
 
 /// Configuration for foreach-based subtask generation
+///
+/// `deny_unknown_fields` turns a stale or misplaced `foreach:` key (e.g.
+/// `parallel:` written here instead of one level up, under the task) into a
+/// loud config-load error naming the field, rather than a silently-ignored
+/// no-op. Per `borg/src/config.rs:281-285`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForeachSpec {
     /// Glob pattern to match files
     #[serde(default)]
@@ -350,7 +356,17 @@ pub struct TaskSpec {
 }
 
 // Helper struct for deserialization that accepts bash:, python:, or action: fields
+//
+// `deny_unknown_fields` turns a stale or misplaced task-level key (e.g.
+// `parallel:` written beside `foreach:` instead of inside it) into a loud
+// config-load error naming the field, rather than a silently-ignored no-op.
+// Per `borg/src/config.rs:281-285`. `TaskSpec`'s hand-written `Deserialize`
+// impl below does nothing but delegate to this helper, so the attribute
+// lives here rather than on `TaskSpec` itself. Does not reach `envs`' or
+// `params`' free-form keys: the attribute governs the helper's own field
+// names, not the contents of the maps those fields hold.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskSpecHelper {
     #[serde(default)]
     help: Option<String>,
@@ -1132,6 +1148,32 @@ mod foreach_tests {
         assert!(parent.action.is_empty());
         assert!(parent.foreach.is_none());
         assert!(parent.virtual_parent);
+    }
+
+    /// Phase 4 negative test (design doc 2026-08-29, Phase 4 table). Parsed
+    /// through `ConfigSpec` so the error carries the full nesting path
+    /// (`tasks.up.foreach`).
+    #[test]
+    fn deny_unknown_fields_names_a_misspelled_foreach_items_key() {
+        use crate::cfg::config::ConfigSpec;
+        let yaml = "tasks:\n  up:\n    foreach:\n      itmes: [a, b]\n    bash: echo hi\n";
+        let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+        assert!(err.contains("itmes"), "must name the field: {err}");
+        assert!(err.contains("tasks.up.foreach"), "must name the path: {err}");
+    }
+
+    /// Phase 4 negative test (design doc 2026-08-29, Phase 4 table). This is
+    /// the doc's motivating incident, verbatim: `parallel:` belongs under
+    /// `foreach:`, not beside it on the task. Before this phase it was
+    /// silently dropped and all subtasks ran concurrently; now it is a loud
+    /// config error naming the field and the path (`tasks.up`).
+    #[test]
+    fn deny_unknown_fields_names_a_wrong_level_parallel_key() {
+        use crate::cfg::config::ConfigSpec;
+        let yaml = "tasks:\n  up:\n    parallel: false\n    foreach: {items: [alpha, beta, gamma], as: svc}\n    bash: |\n      echo \"start ${svc}\"; sleep 0.3; echo \"end ${svc}\"\n";
+        let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+        assert!(err.contains("parallel"), "must name the field: {err}");
+        assert!(err.contains("tasks.up"), "must name the path: {err}");
     }
 
     #[test]

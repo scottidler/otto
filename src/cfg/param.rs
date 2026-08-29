@@ -39,7 +39,18 @@ impl Serialize for ParamMapSerializer<'_> {
     }
 }
 
+/// `deny_unknown_fields` turns a stale or misplaced param key into a loud
+/// config-load error naming the field, rather than a silently-ignored no-op.
+/// Per `borg/src/config.rs:281-285`. This also makes the five `#[serde(skip)]`
+/// fields below (`name`, `short`, `long`, `param_type`, `value`) newly
+/// REJECTED input rather than silently-ignored input: writing e.g. `name:`
+/// under a param, which was always a no-op because these fields are derived
+/// from the params-map key via `divine()`, now errors. Verified: nothing in
+/// this repo or the 159 external ottofiles under `~/repos` writes them. Does
+/// not reach `constant`'s free-form map: the attribute governs `ParamSpec`'s
+/// own field names, not the contents of `Value`'s hand-written `visit_map`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParamSpec {
     // INVARIANT: name/short/long/param_type are derived from the params-map
     // KEY (e.g. "-v|--verbose") by deserialize_param_map via divine(), and
@@ -688,6 +699,21 @@ mod tests {
         assert_eq!(name, "filename");
         assert_eq!(short, None);
         assert_eq!(long, None);
+    }
+
+    /// Phase 4 negative test (design doc 2026-08-29, Phase 4 table). `name:`
+    /// under a param is a `#[serde(skip)]` field, derived from the params-map
+    /// key by `divine()`, never a user-writable key. Before this phase it was
+    /// a silent no-op; now it is REJECTED input, naming the field and the
+    /// path down to the rich param key.
+    #[test]
+    fn deny_unknown_fields_rejects_a_skip_field_written_by_the_user() {
+        use crate::cfg::config::ConfigSpec;
+        let yaml = "tasks:\n  up:\n    params:\n      -s|--svc:\n        name: something\n    bash: echo hi\n";
+        let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+        assert!(err.contains("name"), "must name the field: {err}");
+        assert!(err.contains("tasks.up.params"), "must name the path: {err}");
+        assert!(err.contains("-s|--svc"), "must name the rich param key: {err}");
     }
 
     #[test]
