@@ -436,7 +436,6 @@ mod tests {
         use crate::cfg::task::TaskSpec;
 
         let yaml = r#"
-        name: test_task
         params:
           -v|--verbose:
             default: true
@@ -458,7 +457,6 @@ mod tests {
         use crate::cfg::task::TaskSpec;
 
         let yaml = r#"
-        name: test_task
         params:
           --debug:
             default: false
@@ -480,7 +478,6 @@ mod tests {
         use crate::cfg::task::TaskSpec;
 
         let yaml = r#"
-        name: test_task
         params:
           --enable:
             default: TRUE
@@ -499,7 +496,6 @@ mod tests {
         use crate::cfg::task::TaskSpec;
 
         let yaml = r#"
-        name: test_task
         params:
           -e|--env:
             default: development
@@ -523,7 +519,6 @@ mod tests {
         use crate::cfg::task::TaskSpec;
 
         let yaml = r#"
-        name: test_task
         params:
           -c|--config:
             help: Path to config file
@@ -544,7 +539,6 @@ mod tests {
         use crate::cfg::task::TaskSpec;
 
         let yaml = r#"
-        name: test_task
         params:
           filename:
             help: Input filename
@@ -564,7 +558,6 @@ mod tests {
         use crate::cfg::task::TaskSpec;
 
         let yaml = r#"
-        name: test_task
         params:
           input_file:
             help: Input file path
@@ -583,7 +576,6 @@ mod tests {
         use crate::cfg::task::TaskSpec;
 
         let yaml = r#"
-        name: test_task
         params:
           -v|--verbose:
             default: false
@@ -785,7 +777,6 @@ mod tests {
     fn choices_command_parses_from_the_kebab_case_key() {
         let spec = spec_for(
             r#"
-            name: switch
             params:
               -s|--svc:
                 choices-command: "printf 'alpha\nbeta\n'"
@@ -804,7 +795,6 @@ mod tests {
         // ottofile would silently lose the field on the next parse.
         let spec = spec_for(
             r#"
-            name: switch
             params:
               -s|--svc:
                 choices-command: "list-services"
@@ -820,7 +810,6 @@ mod tests {
     fn a_param_without_choices_command_stays_static() {
         let spec = spec_for(
             r#"
-            name: switch
             params:
               -e|--env:
                 choices: [dev, prod]
@@ -836,7 +825,6 @@ mod tests {
         use crate::cfg::task::TaskSpec;
         let err = serde_yaml::from_str::<TaskSpec>(
             r#"
-            name: switch
             params:
               -s|--svc:
                 choices: [alpha, beta]
@@ -854,7 +842,6 @@ mod tests {
     fn resolve_choices_command_returns_trimmed_non_empty_lines() {
         let spec = spec_for(
             r#"
-            name: switch
             params:
               -s|--svc:
                 choices-command: "printf 'alpha\n\n  beta  \n'"
@@ -871,7 +858,6 @@ mod tests {
     fn resolve_choices_command_nonzero_exit_names_task_param_and_command() {
         let spec = spec_for(
             r#"
-            name: switch
             params:
               -s|--svc:
                 choices-command: "echo nope >&2; exit 4"
@@ -892,7 +878,6 @@ mod tests {
     fn resolve_choices_command_zero_lines_is_an_error_unlike_foreach() {
         let spec = spec_for(
             r#"
-            name: switch
             params:
               -s|--svc:
                 choices-command: "true"
