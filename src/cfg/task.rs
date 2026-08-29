@@ -342,6 +342,11 @@ pub struct TaskSpec {
     /// into `after:` edges with `when: failure` on the named target tasks).
     /// Preserved verbatim for round-trip serialization.
     pub on_failure: Vec<String>,
+    /// Give this task the terminal: inherit stdout/stderr instead of capturing
+    /// them, drop the `[task]` prefix, and run it exclusively (no other task runs
+    /// alongside it). `None` and `Some(false)` are the same behavior; the option
+    /// exists so an absent `tty:` key round-trips as absent.
+    pub tty: Option<bool>,
 }
 
 // Helper struct for deserialization that accepts bash:, python:, or action: fields
@@ -388,6 +393,10 @@ struct TaskSpecHelper {
     // pointing back at this host task. Desugared by the parser before scheduling.
     #[serde(default, rename = "on-failure")]
     on_failure: Vec<String>,
+
+    // Opt-in interactivity: hand this task the terminal.
+    #[serde(default)]
+    tty: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for TaskSpec {
@@ -430,6 +439,7 @@ impl<'de> Deserialize<'de> for TaskSpec {
             foreach: helper.foreach,
             virtual_parent: false,
             on_failure: helper.on_failure,
+            tty: helper.tty,
         })
     }
 }
@@ -479,6 +489,12 @@ impl Serialize for TaskSpec {
 
         if let Some(ref foreach) = self.foreach {
             map.serialize_entry("foreach", foreach)?;
+        }
+
+        // Emitted only when the key was present: `None` is "not written", not
+        // "false", so an ottofile without `tty:` round-trips without gaining one.
+        if let Some(tty) = self.tty {
+            map.serialize_entry("tty", &tty)?;
         }
 
         // Serialize action as "bash:" if it starts with #!/bin/bash
@@ -563,6 +579,7 @@ impl TaskSpec {
             foreach: None,
             virtual_parent: false,
             on_failure: Vec::new(),
+            tty: None,
         }
     }
 
@@ -642,6 +659,11 @@ impl TaskSpec {
             foreach: None,
             virtual_parent: true,
             on_failure: self.on_failure.clone(),
+            // The parent runs no script, so it wants no terminal. `tty:` on a
+            // foreach task is inherited by each subtask (they are clones of the
+            // spec); the aggregating parent must not hold the exclusive permit
+            // for a task that does nothing.
+            tty: None,
         }
     }
 }
@@ -1164,5 +1186,92 @@ mod foreach_tests {
         let foreach = task.foreach.unwrap();
         assert_eq!(foreach.range, Some("1-10".to_string()));
         assert_eq!(foreach.var_name, "num");
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 7: tty: true
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_tty_defaults_to_none_when_absent() {
+        let yaml = "action: echo hi";
+        let spec: TaskSpec = serde_yaml::from_str(yaml).expect("parse failed");
+        assert_eq!(spec.tty, None, "an ottofile without tty: must not gain one");
+    }
+
+    #[test]
+    fn test_tty_parses_both_values() {
+        let on: TaskSpec = serde_yaml::from_str("action: aws sso login\ntty: true").expect("parse failed");
+        assert_eq!(on.tty, Some(true));
+        let off: TaskSpec = serde_yaml::from_str("action: echo hi\ntty: false").expect("parse failed");
+        assert_eq!(off.tty, Some(false));
+    }
+
+    #[test]
+    fn test_tty_serializes_only_when_set() {
+        let mut spec = TaskSpec::new(
+            "login".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            ParamSpecs::new(),
+            "#!/bin/bash\naws sso login".to_string(),
+        );
+        assert!(!serde_yaml::to_string(&spec).unwrap().contains("tty"));
+        spec.tty = Some(true);
+        assert!(serde_yaml::to_string(&spec).unwrap().contains("tty: true"));
+    }
+
+    /// `tty:` on a foreach task means "give each of these the terminal", so every
+    /// generated subtask carries it. The exclusivity gate then serializes them
+    /// even under `parallel: true`; that is documented behavior, not an error.
+    #[test]
+    fn test_foreach_subtasks_inherit_tty() {
+        let mut task = TaskSpec::new(
+            "login".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            ParamSpecs::new(),
+            "#!/bin/bash\necho ${item}".to_string(),
+        );
+        task.tty = Some(true);
+        task.foreach = Some(ForeachSpec {
+            items: vec!["a".to_string(), "b".to_string()],
+            ..Default::default()
+        });
+
+        let subtasks = task.expand_foreach(Path::new(".")).expect("expansion failed");
+
+        assert_eq!(subtasks.len(), 2);
+        for subtask in &subtasks {
+            assert_eq!(subtask.tty, Some(true), "{} lost tty", subtask.name);
+        }
+    }
+
+    /// The virtual parent runs no script, so it must not claim the terminal - it
+    /// would take the exclusive permit to do nothing.
+    #[test]
+    fn test_virtual_parent_drops_tty() {
+        let mut task = TaskSpec::new(
+            "login".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            ParamSpecs::new(),
+            "#!/bin/bash\necho hi".to_string(),
+        );
+        task.tty = Some(true);
+
+        assert_eq!(task.as_virtual_parent().tty, None);
     }
 }

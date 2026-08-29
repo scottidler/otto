@@ -201,6 +201,7 @@ mod tests {
             action: "echo hi".to_string(),
             foreach: None,
             virtual_parent: false,
+            tty: None,
             on_failure: vec![],
         }
     }

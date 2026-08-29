@@ -193,3 +193,46 @@ tasks:
     );
     assert!(!emitted.contains("choices_command"), "emitted snake_case:\n{emitted}");
 }
+
+/// Phase 7: `tty: true` must survive the round-trip. `TaskSpec` has a hand-written
+/// `Serialize`, so a field added to the struct and the deserialize helper but not
+/// to the serializer would parse fine and then vanish - the task would silently
+/// lose its terminal on any re-emit.
+#[test]
+fn config_with_tty_task_roundtrips() {
+    assert_roundtrips(
+        r#"
+tasks:
+  login:
+    action: aws sso login
+    tty: true
+  build:
+    action: cargo build
+  quiet:
+    action: echo quiet
+    tty: false
+"#,
+    );
+}
+
+/// The absent key must stay absent: `tty` is `Option<bool>`, and emitting
+/// `tty: false` for every ordinary task would both bloat the re-emitted ottofile
+/// and turn "unset" into "explicitly off".
+#[test]
+fn tty_absent_stays_absent_and_present_is_emitted() {
+    let yaml = r#"
+tasks:
+  login:
+    action: aws sso login
+    tty: true
+  build:
+    action: cargo build
+"#;
+    let config: ConfigSpec = serde_yaml::from_str(yaml).expect("parse failed");
+    let emitted = serde_yaml::to_string(&config).expect("serialize failed");
+    assert!(emitted.contains("tty: true"), "emitted yaml lost tty: true:\n{emitted}");
+    assert!(
+        !emitted.contains("tty: false"),
+        "an unset tty must not be emitted as false:\n{emitted}"
+    );
+}

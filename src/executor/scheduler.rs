@@ -32,6 +32,47 @@ use crate::cfg::edge::When;
 /// Timeout for output processing after task completion
 const OUTPUT_PROCESSING_TIMEOUT_SECS: u64 = 5;
 
+/// Single line written into a `tty: true` task's stdout/stderr logs.
+///
+/// History records both log paths when the task starts, so an empty file would
+/// claim the task was silent when its output actually went straight to the
+/// terminal. The marker keeps the record honest.
+pub const TTY_LOG_MARKER: &str = "otto: tty task, output not captured";
+
+/// Permits a task must hold to run: one for an ordinary task, the semaphore's
+/// entire initial count for a `tty: true` task, which is what makes it exclusive.
+///
+/// The tty count must be the count the semaphore was *built* with, never the
+/// count free at acquisition time, or "exclusive" would mean "whatever happened
+/// to be idle". A zero count would make `acquire_many(0)` exclude nothing, so it
+/// is asserted rather than assumed - `-j 0` already hangs earlier, in the launch
+/// loop, before any task reaches here.
+fn permits_for(tty: bool, max_parallel: usize) -> Result<u32> {
+    debug_assert!(
+        max_parallel >= 1,
+        "scheduler built with max_parallel = 0; a tty task could not be made exclusive"
+    );
+    let wanted = if tty { max_parallel } else { 1 };
+    debug_assert!(
+        !tty || wanted == max_parallel,
+        "a tty task must request the semaphore's initial permit count ({max_parallel}), asked for {wanted}"
+    );
+    u32::try_from(wanted).map_err(|_| eyre!("max_parallel {max_parallel} exceeds the semaphore's permit limit"))
+}
+
+/// Write the tty marker into a task's stdout/stderr logs.
+///
+/// A tty task skips `TaskStreams` entirely, so nothing else creates these files;
+/// without this the paths recorded in history would dangle or read as empty.
+async fn write_tty_log_markers(tasks_dir: &Path, task_name: &str) -> Result<()> {
+    let task_dir = tasks_dir.join(task_name);
+    tokio::fs::create_dir_all(&task_dir).await?;
+    for file in ["stdout.log", "stderr.log"] {
+        tokio::fs::write(task_dir.join(file), format!("{TTY_LOG_MARKER}\n")).await?;
+    }
+    Ok(())
+}
+
 /// Convert JSON object to shell-sourceable .env format
 /// Handles proper escaping for bash safety
 fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
@@ -301,6 +342,10 @@ pub struct TaskScheduler<F: FileSystem = crate::ports::RealFs> {
     skip_reasons: Arc<Mutex<HashMap<String, String>>>,
     /// Semaphore for task limiting
     semaphore: Arc<Semaphore>,
+    /// The permit count the semaphore was built with. A `tty: true` task acquires
+    /// all of them at once, and the live `available_permits()` is the wrong number
+    /// to ask for at acquisition time (it is whatever is free right then).
+    max_parallel: usize,
     /// Workspace for path management
     workspace: Arc<Workspace<F>>,
     /// Execution context for metadata
@@ -335,6 +380,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             task_start_times,
             skip_reasons: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(max_parallel)),
+            max_parallel,
             workspace,
             execution_context,
             tasks,
@@ -545,7 +591,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let mut completed_tasks = 0;
         let total_tasks = self.tasks.len();
         let mut active_tasks = std::collections::HashMap::new();
-        let max_concurrent = self.semaphore.available_permits();
+        let max_concurrent = self.max_parallel;
 
         // Track completed and failed tasks for dependency satisfaction checking.
         let mut completed_set = std::collections::HashSet::new();
@@ -862,10 +908,14 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let task_streams = self.task_streams.clone();
         let is_virtual_parent = task.is_virtual_parent;
         let action_is_empty = task.action.is_empty();
+        let tty = task.tty;
+        let permits = permits_for(tty, self.max_parallel)?;
 
         Ok(tokio::spawn(async move {
-            // Acquire semaphore permit
-            let _permit = semaphore.acquire().await?;
+            // Acquire semaphore permit. A tty task takes every permit, so nothing
+            // else runs while it owns the terminal; tokio's semaphore is FIFO, so
+            // this wait cannot be starved by later single-permit acquires.
+            let _permit = semaphore.acquire_many(permits).await?;
 
             // Empty-action fast path (used by virtual parent tasks). The parent
             // task has no script to run - it exists only to aggregate subtask
@@ -1009,6 +1059,33 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 
             // Execute without timeout - runs until completion or failure
             let result = async {
+                if tty {
+                    // The task owns the terminal: inherit stdout/stderr (stdin is
+                    // already inherited - otto never redirects it) and skip
+                    // TaskStreams entirely, so there is no capture and no [task]
+                    // prefix. The logs still exist, carrying the marker line.
+                    write_tty_log_markers(&tasks_dir, &task_name).await?;
+                    let mut child = cmd
+                        .stdout(std::process::Stdio::inherit())
+                        .stderr(std::process::Stdio::inherit())
+                        .spawn()?;
+                    let status = child.wait().await?;
+                    if status.success() {
+                        return Ok(());
+                    }
+                    let stdout_log = tasks_dir.join(&task_name).join("stdout.log");
+                    let stderr_log = tasks_dir.join(&task_name).join("stderr.log");
+                    // No stderr preview: nothing was captured, and echoing the
+                    // marker line back as "error output" would be a lie.
+                    return Err(eyre!(
+                        "Task {} failed with exit code {:?}\n\nLogs:\n  stdout: {}\n  stderr: {}",
+                        task_name,
+                        status.code(),
+                        stdout_log.display(),
+                        stderr_log.display()
+                    ));
+                }
+
                 let mut child = cmd
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
@@ -2451,6 +2528,141 @@ mod tests {
         assert_eq!(skip_status, TaskStatus::Skipped);
         assert_eq!(run_status, TaskStatus::Completed);
         assert_eq!(dep_status, TaskStatus::Completed);
+
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 7: tty: true
+    // ------------------------------------------------------------------
+
+    /// An ordinary task takes one permit; a tty task takes the semaphore's whole
+    /// initial count, which is the entire mechanism behind "runs exclusively".
+    #[test]
+    fn test_permits_for_tty_takes_the_whole_semaphore() {
+        for max_parallel in [1usize, 2, 4, 32] {
+            assert_eq!(permits_for(false, max_parallel).unwrap(), 1);
+            assert_eq!(
+                permits_for(true, max_parallel).unwrap(),
+                u32::try_from(max_parallel).unwrap(),
+                "a tty task must request all {max_parallel} permits"
+            );
+        }
+    }
+
+    /// A permit count that cannot be expressed as a u32 is a loud error, not a
+    /// silently clamped request that would fail to be exclusive.
+    #[test]
+    fn test_permits_for_rejects_counts_beyond_u32() {
+        let err = permits_for(true, usize::MAX).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds the semaphore\'s permit limit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The scheduler keeps the count it was built with; `available_permits()` is
+    /// the count free *right now*, which is the wrong number to hand acquire_many.
+    #[tokio::test]
+    #[serial]
+    async fn test_scheduler_records_its_initial_permit_count() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let work_dir = temp_dir.path().to_path_buf();
+        setup_test_db(&work_dir);
+
+        let workspace = Workspace::new(work_dir).await?;
+        workspace.init().await?;
+        let scheduler = TaskScheduler::new(vec![], Arc::new(workspace), ExecutionContext::new(), 7, false).await?;
+
+        assert_eq!(scheduler.max_parallel, 7);
+        let _held = scheduler.semaphore.acquire_many(3).await?;
+        assert_eq!(scheduler.semaphore.available_permits(), 4);
+        assert_eq!(
+            scheduler.max_parallel, 7,
+            "max_parallel must not track live availability"
+        );
+
+        Ok(())
+    }
+
+    /// A tty task never opens TaskStreams, so nothing else would create these
+    /// files. History records both paths at task start; empty files would claim a
+    /// silent task.
+    #[tokio::test]
+    async fn test_tty_log_markers_are_written() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let tasks_dir = temp_dir.path().join("tasks");
+
+        write_tty_log_markers(&tasks_dir, "login").await?;
+
+        for file in ["stdout.log", "stderr.log"] {
+            let content = tokio::fs::read_to_string(tasks_dir.join("login").join(file)).await?;
+            assert_eq!(content, format!("{TTY_LOG_MARKER}\n"), "{file} marker");
+        }
+
+        Ok(())
+    }
+
+    /// End-to-end through the real scheduler: a tty task's output is not captured
+    /// (marker only), while a plain task in the same run still is.
+    #[tokio::test]
+    #[serial]
+    async fn test_tty_task_logs_carry_the_marker_and_plain_tasks_still_capture() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let work_dir = temp_dir.path().to_path_buf();
+        setup_test_db(&work_dir);
+
+        let mut tty_task = Task::new(
+            "interactive".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo from-the-tty-task".to_string(),
+        );
+        tty_task.tty = true;
+        let plain_task = Task::new(
+            "plain".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo from-the-plain-task".to_string(),
+        );
+
+        let workspace = Workspace::new(work_dir).await?;
+        workspace.init().await?;
+        let tasks_dir = workspace.run().join("tasks");
+        let scheduler = TaskScheduler::new(
+            vec![tty_task, plain_task],
+            Arc::new(workspace),
+            ExecutionContext::new(),
+            4,
+            false,
+        )
+        .await?;
+
+        scheduler.execute_all().await?;
+
+        assert_eq!(scheduler.get_task_status("interactive").await, TaskStatus::Completed);
+        assert_eq!(scheduler.get_task_status("plain").await, TaskStatus::Completed);
+
+        let tty_log = tokio::fs::read_to_string(tasks_dir.join("interactive").join("stdout.log")).await?;
+        assert_eq!(tty_log, format!("{TTY_LOG_MARKER}\n"));
+        assert!(
+            !tty_log.contains("from-the-tty-task"),
+            "a tty task must not be captured: {tty_log}"
+        );
+
+        let plain_log = tokio::fs::read_to_string(tasks_dir.join("plain").join("stdout.log")).await?;
+        assert!(
+            plain_log.contains("from-the-plain-task"),
+            "a plain task must still be captured: {plain_log}"
+        );
 
         Ok(())
     }

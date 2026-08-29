@@ -121,6 +121,10 @@ pub struct Task {
     /// Position of this task within `serial_group`, in declared foreach order.
     /// Meaningless when `serial_group` is `None`.
     pub serial_index: usize,
+    /// This task owns the terminal: uncaptured, unprefixed, run exclusively.
+    /// Carried from `TaskSpec::tty` so the `--tui` conflict is decidable before
+    /// anything runs (`app::execute_tasks`).
+    pub tty: bool,
 }
 
 impl Task {
@@ -147,6 +151,7 @@ impl Task {
             is_virtual_parent: false,
             serial_group: None,
             serial_index: 0,
+            tty: false,
         }
     }
 
@@ -180,6 +185,7 @@ impl Task {
         let action = task_spec.action.trim().to_string(); // Trim whitespace from script content
         let mut t = Self::new(name, task_deps, file_deps, output_deps, evaluated_envs, values, action);
         t.is_virtual_parent = task_spec.virtual_parent;
+        t.tty = task_spec.tty.unwrap_or(false);
         t
     }
 
@@ -1807,6 +1813,7 @@ impl Parser {
             action: "# Built-in graph command".to_string(),
             foreach: None,
             virtual_parent: false,
+            tty: None,
             on_failure: vec![],
         };
 
@@ -1889,6 +1896,7 @@ impl Parser {
             action: "# Built-in clean command".to_string(),
             foreach: None,
             virtual_parent: false,
+            tty: None,
             on_failure: vec![],
         };
 
@@ -2009,6 +2017,7 @@ impl Parser {
             action: "# Built-in history command".to_string(),
             foreach: None,
             virtual_parent: false,
+            tty: None,
             on_failure: vec![],
         };
 
@@ -2091,6 +2100,7 @@ impl Parser {
             action: "# Built-in stats command".to_string(),
             foreach: None,
             virtual_parent: false,
+            tty: None,
             on_failure: vec![],
         };
 
@@ -2154,6 +2164,7 @@ impl Parser {
             action: "# Built-in convert command".to_string(),
             foreach: None,
             virtual_parent: false,
+            tty: None,
             on_failure: vec![],
         };
 
@@ -2293,6 +2304,7 @@ impl Parser {
             action: "# Built-in upgrade command".to_string(),
             foreach: None,
             virtual_parent: false,
+            tty: None,
             on_failure: vec![],
         };
 

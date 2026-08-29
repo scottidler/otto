@@ -5,7 +5,7 @@ use crate::cli::commands::stats::StatsCommand;
 use crate::cli::parser::{Task, ottofile_base_dir};
 use crate::cli::{CleanCommand, ConvertCommand, Parser};
 use crate::executor::{DagVisualizer, TaskScheduler, Workspace};
-use eyre::{Report, Result};
+use eyre::{Report, Result, eyre};
 use log::info;
 use std::collections::HashMap;
 use std::env;
@@ -233,6 +233,19 @@ pub async fn execute_tasks(
     retention: RetentionSpec,
 ) -> Result<(), Report> {
     if tui_mode {
+        // Checked before the TTY fallback and before any task runs: the TUI owns
+        // the terminal and a tty task needs it, so there is no run that satisfies
+        // both. Loud error, nothing executed.
+        let tty_tasks: Vec<&str> = tasks.iter().filter(|t| t.tty).map(|t| t.name.as_str()).collect();
+        if !tty_tasks.is_empty() {
+            return Err(eyre!(
+                "--tui cannot run alongside a tty task; the TUI owns the terminal. \
+                 Tasks declaring tty: true in this run: {}. \
+                 Drop --tui, or drop tty: true from the task.",
+                tty_tasks.join(", ")
+            ));
+        }
+
         if !atty::is(atty::Stream::Stdout) {
             eprintln!("Warning: --tui requires a TTY, falling back to standard output");
             return execute_with_terminal_output(tasks, hash, ottofile_path, jobs, retention).await;
@@ -792,6 +805,7 @@ mod tests {
             is_virtual_parent: false,
             serial_group: None,
             serial_index: 0,
+            tty: false,
         }
     }
 

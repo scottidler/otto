@@ -101,6 +101,7 @@ impl OttoConverter {
             action,
             foreach: None,
             virtual_parent: false,
+            tty: None,
             on_failure: Vec::new(),
         })
     }

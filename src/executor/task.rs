@@ -57,6 +57,10 @@ pub struct Task {
     /// Position of this task within `serial_group`, in declared foreach order.
     /// Meaningless when `serial_group` is `None`.
     pub serial_index: usize,
+    /// Give this task the terminal: stdout/stderr inherited rather than captured,
+    /// no `[task]` prefix, and the whole semaphore held for its duration so no
+    /// other task runs alongside it.
+    pub tty: bool,
 }
 
 impl Task {
@@ -86,6 +90,7 @@ impl Task {
             is_virtual_parent: false,
             serial_group: None,
             serial_index: 0,
+            tty: false,
         }
     }
 
@@ -147,6 +152,7 @@ impl Task {
             action,
         );
         task.is_virtual_parent = task_spec.virtual_parent;
+        task.tty = task_spec.tty.unwrap_or(false);
         task
     }
 
@@ -243,6 +249,7 @@ impl From<crate::cli::parser::Task> for Task {
         task.is_virtual_parent = parser_task.is_virtual_parent;
         task.serial_group = parser_task.serial_group;
         task.serial_index = parser_task.serial_index;
+        task.tty = parser_task.tty;
         task
     }
 }
@@ -276,6 +283,7 @@ mod tests {
             foreach: None,
             virtual_parent: false,
             on_failure: vec![],
+            tty: None,
         }
     }
 
@@ -562,5 +570,36 @@ mod tests {
         let task = Task::from_task(&task_spec);
 
         assert_eq!(task.parent, Some("group".to_string()));
+    }
+
+    /// The parser -> executor conversion is the single funnel every runtime path
+    /// goes through, so a field it drops is a field the scheduler never sees.
+    #[test]
+    fn test_from_parser_task_carries_tty() {
+        let mut parser_task = crate::cli::parser::Task::new(
+            "login".to_string(),
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo hi".to_string(),
+        );
+        parser_task.tty = true;
+
+        let task: Task = parser_task.into();
+
+        assert!(task.tty, "tty must survive the parser -> executor conversion");
+    }
+
+    /// And the spec -> executor path used by the non-parser entry points.
+    #[test]
+    fn test_from_task_spec_carries_tty() {
+        let mut spec = make_task_spec("login", vec![], "echo hi");
+        spec.tty = Some(true);
+        assert!(Task::from_task(&spec).tty);
+
+        let off = make_task_spec("plain", vec![], "echo hi");
+        assert!(!Task::from_task(&off).tty, "an absent tty: must mean false");
     }
 }
