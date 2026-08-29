@@ -141,7 +141,7 @@ tasks:
 |------------|-------------------|
 | `otto up` / `otto up:alpha` (the task or one of its subtasks is targeted) | yes, once |
 | `otto <default tasks>` where the task is a default | yes, once |
-| `otto --tasks`, `otto --list-subtasks` (enumeration surfaces) | yes, once |
+| `otto --tasks`, `otto --list-subtasks`, `otto Graph` (enumeration surfaces) | yes, once |
 | `otto --help`, `otto help up`, `otto up --help` | **never** - help renders `[dynamic]` in place of the item count |
 | `otto build` (an unrelated task) | **never** |
 

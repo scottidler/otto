@@ -1096,3 +1096,104 @@ Bite demonstration (house rule): forced `format_terminal_output` to always rende
 `otto ci`: green (`[ci] ✅ All CI checks passed!`) — compile, clippy `-D warnings`, `cargo fmt --check`, lint, full test suite (one `cargo fmt` pass was needed after the initial edits; re-ran clean).
 
 This is the final phase; its commit also flips this design doc's `Status:` to `Implemented` (see the doc itself for the line).
+
+## Post-implementation audit (review-panel round 6, 2026-08-29)
+
+Run against `10e9cac..4ff3206`, Mode 2 (doc is `Status: Implemented`). Both
+seats returned: architect (Gemini) rc=0, staff-engineer (Codex) rc=0.
+Synthesis: `/tmp/review-panel/1arBRh0L/synthesis-r6.md`.
+Verdict: **0 must-fix, 3 cheap-wins (all doc-only), 2 deferred.** Push not blocked.
+
+### Design decisions
+- Applied all three cheap-wins as a separate `docs:` commit rather than amending
+  `4ff3206`, so the one-commit-per-phase history stays legible.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- None.
+
+### Open questions
+- **`deny_unknown_fields` is absent everywhere in `src/`**, so unknown YAML keys
+  are silently ignored. The auditor lost time to this directly: `parallel: false`
+  written at task level (instead of under `foreach:`) is accepted silently and
+  the subtasks run in parallel. Pre-existing, but Phase 4 makes `parallel: false`
+  the headline serial knob, so the foot-gun is now easier to reach. Remediation
+  scope; recorded here because this doc raised its reachability.
+- **`otto ci` now prints `[fmt-fix] skipped (dep fmt-check succeeded; this task
+  required when: failure)` on every green run** — an `on-failure:` task
+  announcing that it correctly did nothing. Consequence of Phase 4's
+  reason-carrying skip print. Cosmetic; the broad-vs-narrow decision is still
+  Scott's.
+
+### Audit findings applied (cheap-wins)
+1. **`otto Graph` was missing from the lazy-resolution trigger list** at the
+   design doc's Phase 6 bullet and in `docs/foreach-subtasks.md`'s invocation
+   table. `parse_all_tasks` (`src/executor/graph.rs`) passes every task name to
+   the reachability filter, making the defer a no-op, so a command source
+   resolves under `Graph`. Verified independently with a counter fixture at
+   `4ff3206`: `Graph` 1, `build` 0, `--help` 0. Not a code defect — `Graph` is an
+   enumeration surface and behaves exactly like the sanctioned
+   `--list-subtasks`, failing loudly and resolving once. The doc's list was
+   written as closed and was incomplete. **Staff-engineer filed this as a BLOCK;
+   the panel overturned the severity** on the grounds that the doc's actual
+   promises (`otto build` never executes it; `--help` never executes it) are both
+   verified true. The read-only seat reasoned over source without running it.
+2. **Three stale line citations, all sitting inside the amendment paragraphs
+   themselves** — the worst place for a wrong coordinate, since those paragraphs
+   exist to carry evidence. Verified and corrected:
+   `scheduler.rs:135` -> `src/executor/scheduler.rs:176` (two sites; 135 is
+   inside a JSON-escaping helper), `env.rs:50-65` -> `src/cfg/env.rs:59-74`,
+   `env.rs:15/29/70` -> `src/cfg/env.rs:15/38/79`. The substance of all three
+   amendments was correct; only the coordinates had drifted.
+3. **The problem statement named a broken idiom.** Doc line 30 cites
+   `${MYVAR:-fallback}` as the idiom defect 1 blocks, but the bare form still
+   does not work after Phase 2: otto's substitution treats `MYVAR:-fallback` as a
+   variable name and errors `Environment variable 'MYVAR:-fallback' not found`
+   (reproduced at `4ff3206`). The working idiom, and the one the Acceptance
+   Criteria and `tests/env_self_reference_test.rs:11` use, is
+   `$(echo "${MYVAR:-fallback}")`. Phase 2 fixed self-reference, not
+   bare-`${VAR:-default}` parsing. Annotated in place.
+
+### Audit confirmations (no action needed)
+- **All four mid-flight doc amendments were genuine doc defects**, re-derived by
+  the panel rather than taken on the orchestrator's word. No criterion was bent
+  to match code. The Phase 4 aggregation one is the significant find: the bullet
+  was marked "verified" and was false.
+- **All five scope-creep deviations ride.** One correction to the orchestrator's
+  framing: the up-to-date skip print is pre-existing (present at `10e9cac`), so
+  Phase 4 did not widen skip printing as far as reported — it added the
+  reason-carrying print at one new site, `mark_skipped`.
+- **All four previously-unverified agent claims confirmed**, including ASCII
+  byte-identity (built `10eb334` in a throwaway worktree and diffed rendered
+  output) and resolve-once across every surface. Tokio FIFO was confirmed at the
+  behavior level only, not from tokio's internals — labelled as such.
+- **The timing-dependent tests bite.** The panel broke the code itself: forcing
+  the tty permit count to 1 produced measured-overlap failures; making
+  `SerialGroups::predecessor` return `None` failed the interleave test. Both
+  reverted, `git status --porcelain -- src/ tests/` clean at `4ff3206`.
+- **No test was weakened anywhere in the range.** Of six modified pre-existing
+  test files, five are mechanical (tuple arity, `tty: None`); the sixth,
+  `tests/flag_integration_test.rs`, is the disclosed Phase 4 rewrite and is
+  strictly stronger — the old test asserted only that some sibling edge existed,
+  the new one pins group name, exact index ordering, and that the ordering is
+  not a sibling edge.
+- **All six deliberately-deferred items confirmed present-and-deferred**, none
+  newly broken.
+
+### Audit environment notes
+- `otto ci` cannot run under the panel's sandbox (sccache dies with
+  `Operation not permitted`); the three gates were run directly with
+  `RUSTC_WRAPPER=""` instead: `cargo test --workspace --all-features` exit 0,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings` exit 0,
+  `cargo fmt --all --check` exit 0.
+- The panel overwrote `/tmp/review-panel/1arBRh0L/synthesis.md`, which held the
+  reconciled write-up for design-review rounds 1-5. Not recoverable, and it
+  self-reported rather than burying it. The underlying material survives
+  (`arch-r1..r5.out`, `staff-r1..r5.out`, prompts, questions, snapshots, round
+  diffs), so rounds 1-5 can be reconstructed from raw seat output; only the
+  prose is gone. This round is at `synthesis-r6.md`.
+- Two stale git worktrees from the Phase 4 agent sit at `/tmp/p4/head-wt` and
+  `/tmp/p4/pre`, both detached at `10eb334`. Outside the repo, no effect on the
+  push, but they appear in `git worktree list`.
