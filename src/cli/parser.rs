@@ -405,6 +405,34 @@ impl Parser {
             std::process::exit(0);
         }
 
+        // Handle --tasks flag: emit the machine-readable task list and exit,
+        // executing no task. See docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md
+        // Phase 5 for the frozen contract (no builtins, subtasks nested once,
+        // stdout is pure data, notices/errors on stderr).
+        if matches.get_flag("tasks") {
+            match crate::cli::commands::tasks::build_tasks_view(&self.config_spec.tasks, self.base_dir()) {
+                Ok(view) => {
+                    let explicit_format = matches.get_one::<String>("format").map(String::as_str);
+                    let stdout_is_tty = atty::is(atty::Stream::Stdout);
+                    let format = crate::cli::commands::tasks::choose_format(explicit_format, stdout_is_tty);
+                    match crate::cli::commands::tasks::render_tasks_view(&view, format) {
+                        Ok(rendered) => {
+                            println!("{rendered}");
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         // Extract remaining arguments after global options
         let remaining_args = self.extract_remaining_args(&matches);
 
@@ -524,6 +552,15 @@ impl Parser {
                 .long("list-subtasks")
                 .help("List all foreach subtasks and exit")
                 .action(clap::ArgAction::SetTrue),
+            Arg::new("tasks")
+                .long("tasks")
+                .help("Print the machine-readable task list and exit")
+                .action(clap::ArgAction::SetTrue),
+            Arg::new("format")
+                .long("format")
+                .value_name("FORMAT")
+                .help("Output format for --tasks (yaml or json); default: yaml on a tty, json when piped")
+                .value_parser(["yaml", "json"]),
             Arg::new("jobs")
                 .short('j')
                 .long("jobs")
@@ -3475,7 +3512,7 @@ tasks:
     /// builder. Pinned so a builder that stops calling `global_args()` (or a
     /// change to `global_args()` that isn't propagated) fails loudly instead
     /// of silently dropping flags from `--help` again.
-    const EXPECTED_GLOBAL_OPTIONS_HELP: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile\n          \n          [env: OTTOFILE=]\n          [default: .]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: 32]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
+    const EXPECTED_GLOBAL_OPTIONS_HELP: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile\n          \n          [env: OTTOFILE=]\n          [default: .]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n      --tasks\n          Print the machine-readable task list and exit\n\n      --format <FORMAT>\n          Output format for --tasks (yaml or json); default: yaml on a tty, json when piped\n          \n          [possible values: yaml, json]\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: 32]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
 
     /// Extracts the `Options:` section, from the `Options:` heading through
     /// the auto-appended `-V, --version` entry (always the last flag clap

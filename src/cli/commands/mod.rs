@@ -2,6 +2,7 @@ pub mod clean;
 pub mod convert;
 pub mod history;
 pub mod stats;
+pub mod tasks;
 pub mod upgrade;
 
 pub use clean::CleanCommand;
