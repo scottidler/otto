@@ -26,6 +26,15 @@ pub fn evaluate_envs(
         base_env.remove(key);
     }
 
+    // Structural check first: an unmatched `$(` is a config error, not a dependency that
+    // might resolve on a later pass. Checking every raw value up front keeps it out of the
+    // retry loop, where it would otherwise masquerade as "waiting on another variable".
+    for (key, value) in envs {
+        if let Err(e) = validate_command_substitutions(value) {
+            return Err(eyre!("Environment variable '{}': {} in value '{}'", key, e, value));
+        }
+    }
+
     while !pending.is_empty() && iterations < MAX_ITERATIONS {
         iterations += 1;
         let mut made_progress = false;
@@ -122,19 +131,129 @@ fn resolve_shell_commands_with_env(
     working_dir: Option<&std::path::Path>,
     env_context: &HashMap<String, String>,
 ) -> Result<String> {
-    let re = Regex::new(r"\$\(([^)]+)\)").unwrap();
-    let mut result = input.to_string();
+    let mut result = String::with_capacity(input.len());
+    let mut rest = input;
 
-    for captures in re.captures_iter(input) {
-        let full_match = &captures[0];
-        let command_str = &captures[1];
+    while let Some((start, end)) = find_command_substitution(rest)? {
+        result.push_str(&rest[..start]);
+
+        // Strip the `$(` and the matching `)`; what's between them is the command.
+        let command_str = &rest[start + 2..end - 1];
 
         // Execute the shell command with controlled environment
         let output = execute_shell_command_with_env(command_str, working_dir, env_context)?;
-        result = result.replace(full_match, &output);
+        result.push_str(&output);
+        rest = &rest[end..];
     }
 
+    result.push_str(rest);
     Ok(result)
+}
+
+/// Which quoting context a byte inside a command substitution sits in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quote {
+    None,
+    Single,
+    Double,
+}
+
+/// Locate the first `$(...)` in `input`, returning `(start, end)` byte offsets where `start`
+/// is the `$` and `end` is one past the MATCHING `)`.
+///
+/// The old `\$\(([^)]+)\)` regex stopped at the first `)` it saw, so `$(echo ")")` and any
+/// nested `$( ... $( ... ) ... )` were truncated mid-command. This walks the substitution
+/// instead, tracking what sh itself tracks when it looks for the closing paren:
+///
+/// - `(` opens a nesting level (subshell or a nested `$(`), `)` closes one
+/// - inside single quotes nothing is special except the closing `'` (not even a backslash)
+/// - inside double quotes a backslash escapes the next byte and `$(` still opens a nested
+///   substitution whose quoting starts fresh, which is why the level stack holds a quote
+///   state per level rather than one state overall
+///
+/// Scope note: only the region between `$(` and its `)` is quote-aware. The search for the
+/// opening `$(` scans the raw value, matching the previous behavior (the value is a YAML
+/// scalar, not shell input, so there is no outer quoting context to honor).
+///
+/// An unmatched `$(` is an error, never a silent literal pass-through.
+fn find_command_substitution(input: &str) -> Result<Option<(usize, usize)>> {
+    let bytes = input.as_bytes();
+    let Some(start) = find_substitution_start(bytes) else {
+        return Ok(None);
+    };
+
+    // One quote state per open level; the outer `$(` is the first.
+    let mut levels = vec![Quote::None];
+    let mut escaped = false;
+    let mut i = start + 2;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+
+        let quote = *levels.last().expect("level stack is never empty while scanning");
+        let opens_substitution = byte == b'$' && bytes.get(i + 1) == Some(&b'(');
+        match quote {
+            Quote::Single => {
+                if byte == b'\'' {
+                    *levels.last_mut().unwrap() = Quote::None;
+                }
+            }
+            // A nested `$(` starts a fresh quoting context even inside double quotes, which
+            // is why each level carries its own state.
+            Quote::Double if opens_substitution => {
+                levels.push(Quote::None);
+                i += 2;
+                continue;
+            }
+            Quote::Double => match byte {
+                b'\\' => escaped = true,
+                b'"' => *levels.last_mut().unwrap() = Quote::None,
+                _ => {}
+            },
+            Quote::None if opens_substitution => {
+                levels.push(Quote::None);
+                i += 2;
+                continue;
+            }
+            Quote::None => match byte {
+                b'\\' => escaped = true,
+                b'\'' => *levels.last_mut().unwrap() = Quote::Single,
+                b'"' => *levels.last_mut().unwrap() = Quote::Double,
+                b'(' => levels.push(Quote::None),
+                b')' => {
+                    levels.pop();
+                    if levels.is_empty() {
+                        return Ok(Some((start, i + 1)));
+                    }
+                }
+                _ => {}
+            },
+        }
+
+        i += 1;
+    }
+
+    Err(eyre!("unmatched '$(' (no closing ')')"))
+}
+
+/// Byte offset of the first `$(` in `bytes`.
+fn find_substitution_start(bytes: &[u8]) -> Option<usize> {
+    (0..bytes.len().saturating_sub(1)).find(|&i| bytes[i] == b'$' && bytes[i + 1] == b'(')
+}
+
+/// Walk every `$(...)` in a value so an unmatched `$(` anywhere is caught, not just a
+/// leading one.
+fn validate_command_substitutions(input: &str) -> Result<()> {
+    let mut rest = input;
+    while let Some((_, end)) = find_command_substitution(rest)? {
+        rest = &rest[end..];
+    }
+    Ok(())
 }
 
 fn execute_shell_command_with_env(
@@ -242,6 +361,260 @@ mod tests {
     fn test_resolve_shell_commands() {
         let result = resolve_shell_commands_with_env("Today is $(date +%Y-%m-%d)", None, &HashMap::new()).unwrap();
         assert!(result.starts_with("Today is 20")); // Should be a date like "Today is 2024-01-15"
+    }
+
+    /// One adversarial `$(...)` case: the raw value, the command text the scanner must carve
+    /// out of it, and what the whole value must resolve to.
+    struct SubstitutionCase {
+        name: &'static str,
+        value: &'static str,
+        command: &'static str,
+        expected: &'static str,
+        /// False when wrapping the value in double quotes would change what sh itself sees,
+        /// so the differential check below skips it.
+        sh_comparable: bool,
+    }
+
+    /// The adversarial table the design doc's risk row calls for ("scanner mismatches sh's
+    /// own parse of an edge case"). Every case here truncated or blew up under the old
+    /// `\$\(([^)]+)\)` regex except the plain and adjacent ones.
+    fn substitution_cases() -> Vec<SubstitutionCase> {
+        vec![
+            SubstitutionCase {
+                name: "plain",
+                value: "$(echo hello)",
+                command: "echo hello",
+                expected: "hello",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "nested substitution",
+                value: r#"$(echo "$(basename /a/b)")"#,
+                command: r#"echo "$(basename /a/b)""#,
+                expected: "b",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "nested substitution, unquoted",
+                value: "$(echo $(echo deep))",
+                command: "echo $(echo deep)",
+                expected: "deep",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "close paren in double quotes",
+                value: r#"$(echo ")")"#,
+                command: r#"echo ")""#,
+                expected: ")",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "close paren in single quotes",
+                value: "$(echo 'a)b')",
+                command: "echo 'a)b'",
+                expected: "a)b",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "open paren in single quotes",
+                value: "$(echo 'a(b')",
+                command: "echo 'a(b'",
+                expected: "a(b",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "backslash-escaped close paren",
+                value: r"$(echo \))",
+                command: r"echo \)",
+                expected: ")",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "backslash-escaped quote inside double quotes",
+                value: r#"$(echo "a\"b)c")"#,
+                command: r#"echo "a\"b)c""#,
+                expected: r#"a"b)c"#,
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "backslash is literal inside single quotes",
+                value: r"$(echo 'a\')",
+                command: r"echo 'a\'",
+                expected: r"a\",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "single quote inside double quotes",
+                value: r#"$(echo "it's )")"#,
+                command: r#"echo "it's )""#,
+                expected: "it's )",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "double quote inside single quotes",
+                value: r#"$(echo 'say ")')"#,
+                command: r#"echo 'say ")'"#,
+                expected: r#"say ")"#,
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "subshell group",
+                value: "$( (echo grouped) )",
+                command: " (echo grouped) ",
+                expected: "grouped",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "adjacent to literal text",
+                value: "pre-$(echo mid)-post",
+                command: "echo mid",
+                expected: "pre-mid-post",
+                sh_comparable: true,
+            },
+            SubstitutionCase {
+                name: "empty substitution",
+                value: "[$()]",
+                command: "",
+                expected: "[]",
+                sh_comparable: true,
+            },
+        ]
+    }
+
+    /// The scanner carves out exactly the command sh would see, and the value resolves to
+    /// what sh would produce.
+    #[test]
+    fn test_command_substitution_adversarial_table() {
+        let mut failures = Vec::new();
+        for case in substitution_cases() {
+            match find_command_substitution(case.value) {
+                Ok(Some((start, end))) => {
+                    let found = &case.value[start + 2..end - 1];
+                    if found != case.command {
+                        failures.push(format!(
+                            "{}: boundary carved {found:?}, want {:?}",
+                            case.name, case.command
+                        ));
+                    }
+                }
+                other => failures.push(format!("{}: expected a substitution, got {other:?}", case.name)),
+            }
+
+            match resolve_shell_commands_with_env(case.value, None, &HashMap::new()) {
+                Ok(resolved) if resolved == case.expected => {}
+                Ok(resolved) => failures.push(format!(
+                    "{}: resolved {resolved:?}, want {:?}",
+                    case.name, case.expected
+                )),
+                Err(e) => failures.push(format!("{}: resolution failed: {e}", case.name)),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "adversarial cases failed:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Differential check against sh itself: the scanner's job is to agree with the shell
+    /// about where a substitution ends, so ask the shell.
+    #[test]
+    fn test_command_substitution_agrees_with_sh() {
+        let mut failures = Vec::new();
+        for case in substitution_cases().into_iter().filter(|c| c.sh_comparable) {
+            let script = format!("printf '%s' \"{}\"", case.value);
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("failed to run sh");
+            let sh_says = String::from_utf8_lossy(&output.stdout).to_string();
+            if sh_says != case.expected {
+                failures.push(format!(
+                    "{}: sh produced {sh_says:?} for {script:?}, table says {:?}",
+                    case.name, case.expected
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "table expectations disagree with sh:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Several substitutions in one value each resolve independently, in order.
+    #[test]
+    fn test_multiple_substitutions_in_one_value() {
+        let result =
+            resolve_shell_commands_with_env(r#"$(echo one)/$(echo "t)wo")/$(echo three)"#, None, &HashMap::new())
+                .unwrap();
+        assert_eq!(result, "one/t)wo/three");
+    }
+
+    /// Repeats of the same substitution each execute and each get their own output, instead
+    /// of one output being pasted over every occurrence.
+    #[test]
+    fn test_repeated_substitution_resolves_each_occurrence() {
+        let result = resolve_shell_commands_with_env("$(echo x)-$(echo x)", None, &HashMap::new()).unwrap();
+        assert_eq!(result, "x-x");
+    }
+
+    /// An unmatched `$(` is a loud error, never a literal pass-through.
+    #[test]
+    fn test_unmatched_substitution_is_an_error() {
+        for value in [
+            "$(echo hello",
+            r#"$(echo ")"#,
+            "$(echo '",
+            "$(echo $(echo inner)",
+            "ok $(echo done) then $(echo oops",
+        ] {
+            let error = resolve_shell_commands_with_env(value, None, &HashMap::new())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("unmatched '$('"),
+                "expected an unmatched-paren error for {value:?}, got: {error}"
+            );
+        }
+    }
+
+    /// The unmatched-paren config error names the offending key and its value, and fires
+    /// before anything is evaluated.
+    #[test]
+    fn test_evaluate_envs_unmatched_substitution_names_key_and_value() {
+        let mut envs = HashMap::new();
+        envs.insert("BROKEN".to_string(), "$(echo hello".to_string());
+
+        let error = evaluate_envs(&envs, None).unwrap_err().to_string();
+        assert!(
+            error.contains("BROKEN") && error.contains("unmatched '$('") && error.contains("$(echo hello"),
+            "expected key and value in the error, got: {error}"
+        );
+    }
+
+    /// Nesting and quoting resolve through the full `evaluate_envs` path, not just the
+    /// scanner, and a sibling key in the same map is unaffected.
+    #[test]
+    fn test_evaluate_envs_nested_and_quoted_substitutions() {
+        let mut envs = HashMap::new();
+        envs.insert("NESTED".to_string(), r#"$(echo "$(basename /a/b)")"#.to_string());
+        envs.insert("PARENQ".to_string(), r#"$(echo ")")"#.to_string());
+        envs.insert("SIBLING".to_string(), "plain-value".to_string());
+
+        let result = evaluate_envs(&envs, None).unwrap();
+        assert_eq!(result.get("NESTED").unwrap(), "b");
+        assert_eq!(result.get("PARENQ").unwrap(), ")");
+        assert_eq!(result.get("SIBLING").unwrap(), "plain-value");
+    }
+
+    /// A value with no substitution at all comes through untouched.
+    #[test]
+    fn test_value_without_substitution_is_unchanged() {
+        let result =
+            resolve_shell_commands_with_env("no substitutions (but parens) here", None, &HashMap::new()).unwrap();
+        assert_eq!(result, "no substitutions (but parens) here");
     }
 
     #[test]
