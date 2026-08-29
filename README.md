@@ -68,6 +68,34 @@ Avoid naming a task the same as a value you expect to pass positionally to
 another task. See [`docs/commands/positional-parameters.md`](docs/commands/positional-parameters.md)
 for the full declaration shape and a reproduced example of the collision.
 
+## Environment Variables
+
+Global environment variables live under `otto.envs:`; task-scoped ones live
+under the task's own `envs:` and are layered on top. **There is no root-level
+`envs:` key** — see [`docs/commands/ottofile-reference.md`](docs/commands/ottofile-reference.md)
+for the full key reference, and
+[`docs/commands/ottofile-strict-schema-migration.md`](docs/commands/ottofile-strict-schema-migration.md)
+for why that distinction matters.
+
+```yaml
+otto:
+  envs:
+    PROJECT_NAME: myproj
+
+tasks:
+  build:
+    envs:
+      BUILD_DIR: build
+    bash: |
+      mkdir -p "$BUILD_DIR"
+      echo "Building $PROJECT_NAME in $BUILD_DIR"
+```
+
+```bash
+otto build
+# Building myproj in build
+```
+
 ## Version Reporting
 
 The `otto` binary supports `--version` and `-v` flags:

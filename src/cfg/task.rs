@@ -1316,4 +1316,178 @@ mod foreach_tests {
 
         assert_eq!(task.as_virtual_parent().tty, None);
     }
+
+    // ========================================================================
+    // Phase 5 drift test (design doc 2026-08-29, Phase 5(b) / Resolved
+    // Decisions "panel round 2"): docs/commands/ottofile-reference.md must
+    // name every key of every deny_unknown_fields struct. Two zero-new-crate
+    // techniques, used together, so the reference cannot drift silently:
+    //
+    // 1. Exhaustive destructuring below is the compile-time TRIGGER: if any
+    //    of the six structs gains or loses a field, the destructuring pattern
+    //    stops matching and the BUILD breaks, before any test even runs. This
+    //    is what reaches private `TaskSpecHelper` from inside this file's own
+    //    `#[cfg(test)]` module.
+    // 2. `expected_keys_from_deny_unknown_fields` recovers each struct's real
+    //    on-disk key list (renames already applied, e.g. `as` not `var_name`)
+    //    straight out of serde's own `deny_unknown_fields` error message, by
+    //    feeding it a single bogus key. Nothing here hand-copies a key list
+    //    that could go stale on its own.
+    // ========================================================================
+
+    use crate::cfg::config::ConfigSpec;
+    use crate::cfg::otto::{OttoSpec, RetentionSpec};
+    use crate::cfg::param::ParamSpec;
+
+    /// Every field on the six `deny_unknown_fields` structs has a default (per
+    /// the design doc's Data Model), so a document containing nothing but one
+    /// bogus key is enough to provoke the "unknown field" error and never a
+    /// "missing field" one instead.
+    const BOGUS_KEY_PROBE: &str = "__ottofile_reference_drift_probe__: true\n";
+
+    /// Parse `T` from [`BOGUS_KEY_PROBE`] and read its real on-disk field names
+    /// back out of the `deny_unknown_fields` error text, rather than hand-
+    /// copying them. Handles all three of serde's phrasings: "expected `a`",
+    /// "expected `a` or `b`", and "expected one of `a`, `b`, ..., `z`".
+    fn expected_keys_from_deny_unknown_fields<T: serde::de::DeserializeOwned>() -> Vec<String> {
+        let err = serde_yaml::from_str::<T>(BOGUS_KEY_PROBE)
+            .err()
+            .expect("bogus key must be rejected")
+            .to_string();
+        let after_expected = err
+            .split("expected")
+            .nth(1)
+            .unwrap_or_else(|| panic!("deny_unknown_fields error names no expected set: {err}"));
+        // A location suffix (" at line N column M") is present except for the
+        // root ConfigSpec case, which has no parent path (Phase 4 table).
+        let before_location = after_expected.split(" at line").next().unwrap();
+        before_location
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// True when `key` appears in the reference doc as the trailing dot-segment
+    /// of some backtick-quoted span (e.g. key `keep_days` matches the doc's
+    /// `` `otto.retention.keep_days` ``). Scoped to backtick spans, not bare
+    /// substring search, so a short/common key name (`as`, `help`, `name`)
+    /// can't pass by accidentally appearing inside unrelated prose.
+    fn reference_doc_mentions_key(doc: &str, key: &str) -> bool {
+        doc.split('`')
+            .skip(1)
+            .step_by(2)
+            .any(|token| token.rsplit('.').next() == Some(key))
+    }
+
+    #[test]
+    fn ottofile_reference_key_inventory_is_exhaustive() {
+        // --- Compile-time trigger: exhaustive destructuring of all six ---
+        // Every field is bound to `_`; the build breaks the moment any struct
+        // gains or loses a field, forcing whoever changed the schema to touch
+        // this test (and, from there, the reference doc) immediately.
+        let ConfigSpec { otto: _, tasks: _ } = ConfigSpec::default();
+        let OttoSpec {
+            name: _,
+            about: _,
+            api: _,
+            jobs: _,
+            home: _,
+            tasks: _,
+            verbosity: _,
+            envs: _,
+            retention: _,
+        } = OttoSpec::default();
+        let RetentionSpec {
+            keep_days: _,
+            keep_last: _,
+            keep_failed: _,
+            auto_prune: _,
+            prune_interval_hours: _,
+        } = RetentionSpec::default();
+        let ForeachSpec {
+            glob: _,
+            items: _,
+            range: _,
+            command: _,
+            var_name: _,
+            parallel: _,
+            max_items: _,
+        } = ForeachSpec::default();
+        let TaskSpecHelper {
+            help: _,
+            after: _,
+            before: _,
+            input: _,
+            output: _,
+            envs: _,
+            params: _,
+            bash: _,
+            python: _,
+            action: _,
+            foreach: _,
+            on_failure: _,
+            tty: _,
+        } = serde_yaml::from_str::<TaskSpecHelper>("{}\n").unwrap();
+        let ParamSpec {
+            name: _,
+            short: _,
+            long: _,
+            param_type: _,
+            dest: _,
+            metavar: _,
+            default: _,
+            constant: _,
+            choices: _,
+            choices_command: _,
+            nargs: _,
+            help: _,
+            value: _,
+        } = serde_yaml::from_str::<ParamSpec>("{}\n").unwrap();
+
+        // --- Runtime check: recovered on-disk keys vs. the reference doc ---
+        let doc = include_str!("../../docs/commands/ottofile-reference.md");
+
+        type KeyProbe = (&'static str, usize, fn() -> Vec<String>);
+        let expectations: &[KeyProbe] = &[
+            ("ConfigSpec", 2, expected_keys_from_deny_unknown_fields::<ConfigSpec>),
+            ("OttoSpec", 9, expected_keys_from_deny_unknown_fields::<OttoSpec>),
+            (
+                "RetentionSpec",
+                5,
+                expected_keys_from_deny_unknown_fields::<RetentionSpec>,
+            ),
+            ("ForeachSpec", 7, expected_keys_from_deny_unknown_fields::<ForeachSpec>),
+            (
+                "TaskSpecHelper",
+                13,
+                expected_keys_from_deny_unknown_fields::<TaskSpecHelper>,
+            ),
+            ("ParamSpec", 8, expected_keys_from_deny_unknown_fields::<ParamSpec>),
+        ];
+
+        let mut total = 0;
+        for (struct_name, expected_count, probe) in expectations {
+            let keys = probe();
+            assert_eq!(
+                keys.len(),
+                *expected_count,
+                "{struct_name}: expected {expected_count} on-disk keys, serde reports {}: {keys:?}",
+                keys.len()
+            );
+            for key in &keys {
+                assert!(
+                    reference_doc_mentions_key(doc, key),
+                    "{struct_name}'s on-disk key `{key}` is not mentioned in \
+                     docs/commands/ottofile-reference.md"
+                );
+            }
+            total += keys.len();
+        }
+        assert_eq!(
+            total, 44,
+            "total on-disk key count drifted from the design doc's count of 44"
+        );
+    }
 }
