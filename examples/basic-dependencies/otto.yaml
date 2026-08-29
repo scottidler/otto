@@ -19,8 +19,6 @@ tasks:
       echo "Creating output file"
       echo "This is some content" > some-file
       echo "example2 completed"
-    show: false
-    verbosity: 1
     help: example2 task
   example3:
     bash: |

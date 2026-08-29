@@ -1,13 +1,13 @@
 tasks:
   shell:
     help: "Interactive bash shell (Ctrl+D to exit)"
-    interactive: true
+    tty: true
     action: |
       bash
 
   read-input:
     help: "Simple interactive input test"
-    interactive: true
+    tty: true
     action: |
       echo "What's your name?"
       read name
@@ -16,7 +16,7 @@ tasks:
 
   vim-edit:
     help: "Interactive vim editor (edit demo.txt)"
-    interactive: true
+    tty: true
     action: |
       echo "This is a test file for vim editing" > demo.txt
       vim demo.txt
@@ -25,19 +25,19 @@ tasks:
 
   python-interactive:
     help: "Interactive Python REPL"
-    interactive: true
+    tty: true
     action: |
       python3
 
   top-monitor:
     help: "Interactive system monitor (q to quit)"
-    interactive: true
+    tty: true
     action: |
       top
 
   htop-monitor:
     help: "Interactive htop if available (q to quit)"
-    interactive: true
+    tty: true
     action: |
       if command -v htop &> /dev/null; then
         htop
@@ -48,7 +48,7 @@ tasks:
 
   colored-menu:
     help: "Interactive menu with colors"
-    interactive: true
+    tty: true
     action: |
       echo -e "\033[1;34m=== Interactive Menu ===\033[0m"
       echo ""

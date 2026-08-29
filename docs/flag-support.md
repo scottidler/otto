@@ -382,7 +382,6 @@ There is an incomplete implementation in the `param_to_arg()` function in `src/c
 
 The Otto repository contains several examples demonstrating flag usage:
 
-- `examples/old/ex1/otto.yml` - Shows boolean flag configuration with `default: false`
 - `examples/ex1/otto.yml` - Demonstrates argument-style flags with choices and defaults
 - `examples/ex2/.otto.yml` - Examples of metavar and dest field usage
 

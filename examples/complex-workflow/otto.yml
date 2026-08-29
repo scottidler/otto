@@ -1,5 +1,6 @@
-name: complex-workflow
-description: Demonstrates complex task dependencies and concurrent execution
+otto:
+  name: complex-workflow
+  about: Demonstrates complex task dependencies and concurrent execution
 
 tasks:
   start:
