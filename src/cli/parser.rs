@@ -483,52 +483,58 @@ impl Parser {
         Ok((tasks, self.hash.clone(), self.ottofile.clone()))
     }
 
+    /// Single source of truth for otto's global flags: cwd, ottofile,
+    /// list-subtasks, jobs, tui. `otto_command()`, `build_help_command()`,
+    /// and `build_help_command_with_error()` all consume this so the
+    /// rendered `--help` output can never drift from what's actually parsed
+    /// again (see docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md
+    /// Phase 1 - the prior drift: the two help builders re-declared only
+    /// `jobs` and `tui`, silently omitting `-C/--cwd`, `-o/--ottofile`, and
+    /// `--list-subtasks` from `otto --help`).
+    fn global_args() -> Vec<Arg> {
+        vec![
+            Arg::new("cwd")
+                .short('C')
+                .long("cwd")
+                .value_name("DIR")
+                .help("Change to DIR before doing anything")
+                .value_parser(value_parser!(String)),
+            Arg::new("ottofile")
+                .short('o')
+                .long("ottofile")
+                .value_name("PATH")
+                .help("path to the ottofile")
+                .default_value(".")
+                .env("OTTOFILE")
+                .value_parser(value_parser!(String)),
+            Arg::new("list-subtasks")
+                .long("list-subtasks")
+                .help("List all foreach subtasks and exit")
+                .action(clap::ArgAction::SetTrue),
+            Arg::new("jobs")
+                .short('j')
+                .long("jobs")
+                .value_name("N")
+                .help("Number of parallel jobs")
+                .default_value(DEFAULT_JOBS.as_str())
+                .value_parser(value_parser!(String)),
+            Arg::new("tui")
+                .short('t')
+                .long("tui")
+                .help("Enable interactive TUI dashboard for task monitoring")
+                .action(clap::ArgAction::SetTrue)
+                .global(true),
+        ]
+    }
+
     fn otto_command() -> Command {
-        Command::new("otto")
+        let mut cmd = Command::new("otto")
             .version(env!("GIT_DESCRIBE"))
-            .about("A task runner")
-            .arg(
-                Arg::new("cwd")
-                    .short('C')
-                    .long("cwd")
-                    .value_name("DIR")
-                    .help("Change to DIR before doing anything")
-                    .value_parser(value_parser!(String)),
-            )
-            .arg(
-                Arg::new("ottofile")
-                    .short('o')
-                    .long("ottofile")
-                    .value_name("PATH")
-                    .help("path to the ottofile")
-                    .default_value(".")
-                    .env("OTTOFILE")
-                    .value_parser(value_parser!(String)),
-            )
-            .arg(
-                Arg::new("jobs")
-                    .short('j')
-                    .long("jobs")
-                    .value_name("N")
-                    .help("Number of parallel jobs")
-                    .default_value(DEFAULT_JOBS.as_str())
-                    .value_parser(value_parser!(String)),
-            )
-            .arg(
-                Arg::new("tui")
-                    .short('t')
-                    .long("tui")
-                    .help("Enable interactive TUI dashboard for task monitoring")
-                    .action(clap::ArgAction::SetTrue)
-                    .global(true),
-            )
-            .arg(
-                Arg::new("list-subtasks")
-                    .long("list-subtasks")
-                    .help("List all foreach subtasks and exit")
-                    .action(clap::ArgAction::SetTrue),
-            )
-            .allow_external_subcommands(true)
+            .about("A task runner");
+        for arg in Self::global_args() {
+            cmd = cmd.arg(arg);
+        }
+        cmd.allow_external_subcommands(true)
     }
 
     fn extract_remaining_args(&self, matches: &ArgMatches) -> Vec<String> {
@@ -1388,24 +1394,11 @@ impl Parser {
     fn build_help_command(&self) -> Command {
         let mut cmd = Command::new("otto")
             .version(env!("GIT_DESCRIBE"))
-            .about("A task runner")
-            .arg(
-                Arg::new("jobs")
-                    .short('j')
-                    .long("jobs")
-                    .value_name("N")
-                    .help("Number of parallel jobs")
-                    .default_value(DEFAULT_JOBS.as_str())
-                    .value_parser(value_parser!(String)),
-            )
-            .arg(
-                Arg::new("tui")
-                    .short('t')
-                    .long("tui")
-                    .help("Enable interactive TUI dashboard for task monitoring")
-                    .action(clap::ArgAction::SetTrue),
-            )
-            .allow_external_subcommands(true);
+            .about("A task runner");
+        for arg in Self::global_args() {
+            cmd = cmd.arg(arg);
+        }
+        cmd = cmd.allow_external_subcommands(true);
 
         if !self.config_spec.tasks.is_empty() {
             // Separate regular tasks from built-in commands
@@ -1441,26 +1434,13 @@ impl Parser {
     }
 
     fn build_help_command_with_error() -> Command {
-        Command::new("otto")
+        let mut cmd = Command::new("otto")
             .version(env!("GIT_DESCRIBE"))
-            .about("A task runner")
-            .arg(
-                Arg::new("jobs")
-                    .short('j')
-                    .long("jobs")
-                    .value_name("N")
-                    .help("Number of parallel jobs")
-                    .default_value(DEFAULT_JOBS.as_str())
-                    .value_parser(value_parser!(String)),
-            )
-            .arg(
-                Arg::new("tui")
-                    .short('t')
-                    .long("tui")
-                    .help("Enable interactive TUI dashboard for task monitoring")
-                    .action(clap::ArgAction::SetTrue),
-            )
-            .after_help(ottofile_not_found_message())
+            .about("A task runner");
+        for arg in Self::global_args() {
+            cmd = cmd.arg(arg);
+        }
+        cmd.after_help(ottofile_not_found_message())
             .allow_external_subcommands(true)
     }
 
@@ -3453,5 +3433,61 @@ tasks:
         let result = parser.parse();
 
         assert!(result.is_ok(), "Valid dependencies should succeed: {:?}", result.err());
+    }
+
+    // =========================================================================
+    // help drift regression (docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md Phase 1)
+    // =========================================================================
+
+    /// The exact `Options:` block otto's global flags must render as, in every
+    /// builder. Pinned so a builder that stops calling `global_args()` (or a
+    /// change to `global_args()` that isn't propagated) fails loudly instead
+    /// of silently dropping flags from `--help` again.
+    const EXPECTED_GLOBAL_OPTIONS_HELP: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile\n          \n          [env: OTTOFILE=]\n          [default: .]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: 32]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
+
+    /// Extracts the `Options:` section, from the `Options:` heading through
+    /// the auto-appended `-V, --version` entry (always the last flag clap
+    /// renders). Builders may append more after that (subcommand-derived
+    /// `after_help` error text, in `build_help_command_with_error()`'s case)
+    /// which is irrelevant to this test and must not pollute the comparison.
+    fn options_section(help: &str) -> &str {
+        let start = help
+            .find("Options:")
+            .expect("help output must contain an Options: section");
+        let rest = &help[start..];
+        let anchor = "Print version";
+        let end = rest.find(anchor).expect("help output must contain -V, --version") + anchor.len();
+        &rest[..end]
+    }
+
+    #[test]
+    fn test_help_global_flags_no_drift() {
+        // Parser::new() doesn't load the ottofile (that happens in parse()),
+        // so build_help_command() sees an empty config_spec and takes its
+        // after_help branch here. That only affects content appended after
+        // the Options: section, which options_section() strips off below -
+        // irrelevant to this test's concern (global flag parity).
+        let args = vec!["otto".to_string()];
+        let parser = Parser::new(args).unwrap();
+
+        let otto_cmd_help = Parser::otto_command().render_long_help().to_string();
+        let help_cmd_help = parser.build_help_command().render_long_help().to_string();
+        let help_cmd_error_help = Parser::build_help_command_with_error().render_long_help().to_string();
+
+        assert_eq!(
+            options_section(&otto_cmd_help),
+            EXPECTED_GLOBAL_OPTIONS_HELP,
+            "otto_command() global flags drifted from the pinned snapshot"
+        );
+        assert_eq!(
+            options_section(&help_cmd_help),
+            EXPECTED_GLOBAL_OPTIONS_HELP,
+            "build_help_command() global flags drifted from the pinned snapshot"
+        );
+        assert_eq!(
+            options_section(&help_cmd_error_help),
+            EXPECTED_GLOBAL_OPTIONS_HELP,
+            "build_help_command_with_error() global flags drifted from the pinned snapshot"
+        );
     }
 }

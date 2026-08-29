@@ -75,6 +75,10 @@ fn apply_cwd_flag(args: Vec<String>) -> Result<Vec<String>, Report> {
             dir_value = Some(d.to_string());
             skip_indices.push(i);
             i += 1;
+        } else if let Some(d) = arg.strip_prefix("-C=") {
+            dir_value = Some(d.to_string());
+            skip_indices.push(i);
+            i += 1;
         } else {
             i += 1;
         }
@@ -307,6 +311,26 @@ mod tests {
         let result = apply_cwd_flag(args).unwrap();
 
         assert_eq!(result, vec!["otto", "ci"]);
+        env::set_current_dir(original_cwd).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn test_apply_cwd_flag_short_equals_form() {
+        // Attached `-C=DIR` form: clap silently swallows this today because
+        // the parser-side `-C` Arg doesn't accept an attached `=` value for a
+        // short flag. apply_cwd_flag must strip it before clap ever sees it.
+        let original_cwd = env::current_dir().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path().to_string_lossy().to_string();
+
+        let args = vec!["otto".into(), format!("-C={}", dir), "ci".into()];
+        let result = apply_cwd_flag(args).unwrap();
+
+        assert_eq!(result, vec!["otto", "ci"]);
+        let new_cwd = env::current_dir().unwrap();
+        assert_eq!(new_cwd.canonicalize().unwrap(), temp_dir.path().canonicalize().unwrap());
+
         env::set_current_dir(original_cwd).unwrap();
     }
 
