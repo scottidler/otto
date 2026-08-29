@@ -2369,6 +2369,12 @@ impl Parser {
             hasher.update(&content);
             let result = hasher.finalize();
             let hash = hex::encode(result)[..8].to_string();
+
+            // Version gate BEFORE the typed parse, against the same string:
+            // reversed, a file from a newer otto reports whichever key it
+            // added instead of telling the operator to upgrade.
+            crate::cfg::otto::check_api_version(&content)?;
+
             let config_spec: ConfigSpec = serde_yaml::from_str(&content)?;
 
             // Validate that no tasks use reserved builtin param names
@@ -3991,6 +3997,64 @@ tasks:
             options_section(&help_cmd_error_help),
             EXPECTED_GLOBAL_OPTIONS_HELP,
             "build_help_command_with_error() global flags drifted from the pinned snapshot"
+        );
+    }
+
+    // =========================================================================
+    // otto.api version gate (design doc 2026-08-29-strict-ottofile-schema)
+    // =========================================================================
+
+    /// Write `content` as an ottofile in a fresh temp dir and load it through
+    /// the real config path.
+    fn load_ottofile(content: &str) -> (tempfile::TempDir, Result<(ConfigSpec, String, Option<PathBuf>)>) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let ottofile_path = temp_dir.path().join("otto.yml");
+        std::fs::write(&ottofile_path, content).unwrap();
+        let result = Parser::load_config_from_path(Some(ottofile_path));
+        // The TempDir rides along so it outlives the load.
+        (temp_dir, result)
+    }
+
+    #[test]
+    fn test_load_config_rejects_an_unsupported_api_version() {
+        let (_dir, result) = load_ottofile("otto:\n  api: 2\ntasks:\n  up:\n    bash: echo hi\n");
+        let err = result.expect_err("api: 2 must not load").to_string();
+        assert!(err.contains("unsupported api version '2'"), "{err}");
+        assert!(err.contains("this otto supports: 1"), "{err}");
+        assert!(err.contains("upgrade otto"), "{err}");
+    }
+
+    #[test]
+    fn test_load_config_accepts_a_supported_and_an_absent_api_version() {
+        let (_dir, declared) = load_ottofile("otto:\n  api: 1\ntasks:\n  up:\n    bash: echo hi\n");
+        let (config, ..) = declared.expect("api: 1 must load");
+        assert_eq!(config.otto.api, "1");
+        assert!(config.tasks.contains_key("up"));
+
+        let (_dir, absent) = load_ottofile("tasks:\n  up:\n    bash: echo hi\n");
+        let (config, ..) = absent.expect("an absent api: must load");
+        assert_eq!(config.otto.api, "1");
+        assert!(config.tasks.contains_key("up"));
+    }
+
+    /// THE ORDERING ASSERT. The api gate runs BEFORE the typed parse, so a file
+    /// that is both too new AND unparseable by this otto reports "upgrade otto"
+    /// rather than a complaint about whichever key it could not read. Reverse
+    /// the two statements in `load_config_from_path` and this test fails on the
+    /// second assert: serde reports `tasks.up.before: invalid type: map,
+    /// expected a sequence`, which tells the operator nothing useful.
+    #[test]
+    fn test_load_config_reports_the_api_error_before_the_parse_error() {
+        let (_dir, result) =
+            load_ottofile("otto:\n  api: 2\ntasks:\n  up:\n    before:\n      some: map\n    bash: echo hi\n");
+        let err = result.expect_err("a file that is too new must not load").to_string();
+        assert!(
+            err.contains("unsupported api version '2'"),
+            "the version error wins: {err}"
+        );
+        assert!(
+            !err.contains("invalid type"),
+            "the parse error must not win over the version error: {err}"
         );
     }
 }
