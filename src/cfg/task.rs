@@ -1320,19 +1320,28 @@ mod foreach_tests {
     // ========================================================================
     // Phase 5 drift test (design doc 2026-08-29, Phase 5(b) / Resolved
     // Decisions "panel round 2"): docs/commands/ottofile-reference.md must
-    // name every key of every deny_unknown_fields struct. Two zero-new-crate
-    // techniques, used together, so the reference cannot drift silently:
+    // name every key of every deny_unknown_fields struct, PLUS EdgeSpec
+    // (src/cfg/edge.rs), whose hand-written `visit_map` enforces the same
+    // "unknown field" contract without the derive macro (round-4 audit
+    // cheap-win: EdgeSpec's `task`/`when` keys had no reference-doc rows and
+    // tripped none of the checks below). Two zero-new-crate techniques, used
+    // together, so the reference cannot drift silently:
     //
     // 1. Exhaustive destructuring below is the compile-time TRIGGER: if any
-    //    of the six structs gains or loses a field, the destructuring pattern
-    //    stops matching and the BUILD breaks, before any test even runs. This
-    //    is what reaches private `TaskSpecHelper` from inside this file's own
-    //    `#[cfg(test)]` module.
+    //    of the seven structs gains or loses a field, the destructuring
+    //    pattern stops matching and the BUILD breaks, before any test even
+    //    runs. This is what reaches private `TaskSpecHelper` from inside this
+    //    file's own `#[cfg(test)]` module.
     // 2. `expected_keys_from_deny_unknown_fields` recovers each struct's real
     //    on-disk key list (renames already applied, e.g. `as` not `var_name`)
-    //    straight out of serde's own `deny_unknown_fields` error message, by
-    //    feeding it a single bogus key. Nothing here hand-copies a key list
-    //    that could go stale on its own.
+    //    straight out of serde's own "unknown field" error message, by
+    //    feeding it a single bogus key. Works identically against EdgeSpec's
+    //    hand-written `visit_map`: it returns `Error::unknown_field(other,
+    //    &["task", "when"])`, which stringifies to the exact same "unknown
+    //    field `x`, expected `task` or `when`" shape serde's derive macro
+    //    produces for a two-field struct (verified directly: no location
+    //    suffix, same phrasing). Nothing here hand-copies a key list that
+    //    could go stale on its own.
     // ========================================================================
 
     use crate::cfg::config::ConfigSpec;
@@ -1369,16 +1378,49 @@ mod foreach_tests {
             .collect()
     }
 
-    /// True when `key` appears in the reference doc as the trailing dot-segment
-    /// of some backtick-quoted span (e.g. key `keep_days` matches the doc's
-    /// `` `otto.retention.keep_days` ``). Scoped to backtick spans, not bare
-    /// substring search, so a short/common key name (`as`, `help`, `name`)
-    /// can't pass by accidentally appearing inside unrelated prose.
-    fn reference_doc_mentions_key(doc: &str, key: &str) -> bool {
-        doc.split('`')
-            .skip(1)
-            .step_by(2)
-            .any(|token| token.rsplit('.').next() == Some(key))
+    /// True when `expected_path` appears in the reference doc as the ENTIRE
+    /// value of some backtick-quoted span (e.g. `otto.retention.keep_days`
+    /// matches the doc's `` `otto.retention.keep_days` `` row exactly).
+    ///
+    /// This is a full-path match, not a trailing-dot-segment match. Three
+    /// on-disk key names are reused at more than one level (`tasks`: root
+    /// `ConfigSpec.tasks` vs. `otto.tasks`; `envs`: `otto.envs` vs.
+    /// `tasks.<name>.envs`; `help`: `tasks.<name>.help` vs.
+    /// `...params.<title>.help`), so a bare trailing-segment match (matching
+    /// `tasks` against ANY span ending in `.tasks`) would let one level's row
+    /// silently vouch for a different level's key, going undetected if that
+    /// key's own row were deleted. Requiring the full path per level closes
+    /// that hole (round-4 implementation audit, cheap-win 3).
+    fn reference_doc_mentions_key_at(doc: &str, expected_path: &str) -> bool {
+        doc.split('`').skip(1).step_by(2).any(|token| token == expected_path)
+    }
+
+    /// Doc-path builders, one per struct, mirroring the reference doc's own
+    /// level headings (`## otto:`, `## otto.retention:`, `## tasks.<name>:`,
+    /// `## tasks.<name>.foreach:`, `## tasks.<name>.params.<title>:`) plus one
+    /// for `EdgeSpec`'s `tasks.<name>.after[]`/`before[]` object. Applying the
+    /// right prefix to a recovered on-disk key name is what lets the exact
+    /// match above tell same-named keys at different levels apart.
+    fn root_path(key: &str) -> String {
+        key.to_string()
+    }
+    fn otto_path(key: &str) -> String {
+        format!("otto.{key}")
+    }
+    fn retention_path(key: &str) -> String {
+        format!("otto.retention.{key}")
+    }
+    fn task_path(key: &str) -> String {
+        format!("tasks.<name>.{key}")
+    }
+    fn foreach_path(key: &str) -> String {
+        format!("tasks.<name>.foreach.{key}")
+    }
+    fn param_path(key: &str) -> String {
+        format!("...params.<title>.{key}")
+    }
+    fn edge_path(key: &str) -> String {
+        format!("tasks.<name>.after[].{key}")
     }
 
     #[test]
@@ -1445,30 +1487,69 @@ mod foreach_tests {
             help: _,
             value: _,
         } = serde_yaml::from_str::<ParamSpec>("{}\n").unwrap();
+        // EdgeSpec has two bookkeeping fields (`from_sugar`, `is_injected_sugar`)
+        // alongside its two on-disk keys (`task`, `when`); all four are bound
+        // here so the destructuring still breaks on ANY field added or removed,
+        // but only `task`/`when` are on-disk keys checked against the doc below.
+        let EdgeSpec {
+            task: _,
+            when: _,
+            from_sugar: _,
+            is_injected_sugar: _,
+        } = EdgeSpec::sugar("probe");
 
         // --- Runtime check: recovered on-disk keys vs. the reference doc ---
         let doc = include_str!("../../docs/commands/ottofile-reference.md");
 
-        type KeyProbe = (&'static str, usize, fn() -> Vec<String>);
+        type PathBuilder = fn(&str) -> String;
+        type KeyProbe = (&'static str, usize, fn() -> Vec<String>, PathBuilder);
         let expectations: &[KeyProbe] = &[
-            ("ConfigSpec", 2, expected_keys_from_deny_unknown_fields::<ConfigSpec>),
-            ("OttoSpec", 9, expected_keys_from_deny_unknown_fields::<OttoSpec>),
+            (
+                "ConfigSpec",
+                2,
+                expected_keys_from_deny_unknown_fields::<ConfigSpec>,
+                root_path,
+            ),
+            (
+                "OttoSpec",
+                9,
+                expected_keys_from_deny_unknown_fields::<OttoSpec>,
+                otto_path,
+            ),
             (
                 "RetentionSpec",
                 5,
                 expected_keys_from_deny_unknown_fields::<RetentionSpec>,
+                retention_path,
             ),
-            ("ForeachSpec", 7, expected_keys_from_deny_unknown_fields::<ForeachSpec>),
+            (
+                "ForeachSpec",
+                7,
+                expected_keys_from_deny_unknown_fields::<ForeachSpec>,
+                foreach_path,
+            ),
             (
                 "TaskSpecHelper",
                 13,
                 expected_keys_from_deny_unknown_fields::<TaskSpecHelper>,
+                task_path,
             ),
-            ("ParamSpec", 8, expected_keys_from_deny_unknown_fields::<ParamSpec>),
+            (
+                "ParamSpec",
+                8,
+                expected_keys_from_deny_unknown_fields::<ParamSpec>,
+                param_path,
+            ),
+            (
+                "EdgeSpec",
+                2,
+                expected_keys_from_deny_unknown_fields::<EdgeSpec>,
+                edge_path,
+            ),
         ];
 
         let mut total = 0;
-        for (struct_name, expected_count, probe) in expectations {
+        for (struct_name, expected_count, probe, path_for) in expectations {
             let keys = probe();
             assert_eq!(
                 keys.len(),
@@ -1477,17 +1558,19 @@ mod foreach_tests {
                 keys.len()
             );
             for key in &keys {
+                let expected_path = path_for(key);
                 assert!(
-                    reference_doc_mentions_key(doc, key),
-                    "{struct_name}'s on-disk key `{key}` is not mentioned in \
+                    reference_doc_mentions_key_at(doc, &expected_path),
+                    "{struct_name}'s on-disk key `{key}` (expected doc path \
+                     `{expected_path}`) is not mentioned in \
                      docs/commands/ottofile-reference.md"
                 );
             }
             total += keys.len();
         }
         assert_eq!(
-            total, 44,
-            "total on-disk key count drifted from the design doc's count of 44"
+            total, 46,
+            "total on-disk key count drifted from the design doc's count of 46"
         );
     }
 }

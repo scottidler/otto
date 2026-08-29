@@ -1,8 +1,19 @@
 # Proof That Interactive TTY Support Works
 
+> **Note on staleness:** sections 2-5 below quote the *original* PTY-based
+> implementation of this feature (`InteractivePty`, `PtyIoProxy`,
+> `execute_interactive_task`, `interactive_semaphore`, a DB `interactive`
+> column). None of those names exist in `src/` anymore — the feature was
+> reimplemented more simply as `tty: true` (inherit stdout/stderr directly,
+> see `src/executor/scheduler.rs`), and the config key was renamed from
+> `interactive:` to `tty:` in v1.3.0. Only the config-key instructions in
+> sections 1, 6, and "The Original Use Case" have been updated to match; the
+> rest is left as a historical record of the earlier design rather than
+> rewritten to describe the current, simpler mechanism.
+
 ## Evidence
 
-### 1. Tasks Loaded with `interactive: true`
+### 1. Tasks Loaded with `tty: true`
 
 ```bash
 $ otto -h
@@ -172,7 +183,7 @@ otto python-interactive
 
 ## What This Proves
 
-✅ **YAML parsing** - `interactive: true` field is read
+✅ **YAML parsing** - `tty: true` field is read
 ✅ **Task routing** - Interactive tasks go through PTY path
 ✅ **PTY allocation** - `InteractivePty::new()` creates PTY
 ✅ **Terminal redirection** - stdin/stdout/stderr routed through PTY slave
@@ -193,7 +204,7 @@ You mentioned starting this from a shell task in `~/repos/tatari-tv/pr`. Here's 
 tasks:
   shell:
     help: "Interactive development shell"
-    interactive: true  # ADD THIS LINE
+    tty: true  # ADD THIS LINE
     action: |
       bash
 ```

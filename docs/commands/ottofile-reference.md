@@ -9,11 +9,14 @@ top-level `envs:` key that never did anything (see the migration note,
 `docs/commands/ottofile-strict-schema-migration.md`).
 
 Levels below mirror the six Rust structs `deny_unknown_fields` is applied to
-(design doc Architecture table). "Type" is the on-disk YAML shape, not the
-Rust type. "Default" is what applies when the key is omitted; "required"
-means omitting it is fine only in the sense that nothing defaults it to a
-useful value (there is no ottofile-level "required" key at all — every field
-across all six structs has a default).
+(design doc Architecture table), plus one more: `EdgeSpec` (`src/cfg/edge.rs`),
+which is not in that table but enforces the identical "unknown field" contract
+by hand via a hand-written `visit_map` rather than the derive macro — see
+**Edge object** below. "Type" is the on-disk YAML shape, not the Rust type.
+"Default" is what applies when the key is omitted; "required" means omitting
+it is fine only in the sense that nothing defaults it to a useful value (there
+is no ottofile-level "required" key at all — every field across all seven
+structs has a default, except `EdgeSpec.task`, which is genuinely required).
 
 ## Root (`ConfigSpec`) — 2 keys
 
@@ -69,8 +72,8 @@ value is a task, whose own keys are fixed and listed here.
 | key | type | default | notes |
 |---|---|---|---|
 | `tasks.<name>.help` | string | none | Help text shown for this task. |
-| `tasks.<name>.after` | list of edges | `[]` | Tasks this one runs after. Each edge is either a bare task-name string (sugar, implies `when: success`) or a map `{task: <name>, when: success\|failure\|always}`. |
-| `tasks.<name>.before` | list of edges | `[]` | Tasks this one runs before. Same edge shape as `after`. |
+| `tasks.<name>.after` | list of edges | `[]` | Tasks this one runs after. Each edge is either a bare task-name string (sugar, implies `when: success`) or a map `{task: <name>, when: success\|failure\|always}`. See **Edge object** below. |
+| `tasks.<name>.before` | list of edges | `[]` | Tasks this one runs before. Same edge shape as `after`. See **Edge object** below. |
 | `tasks.<name>.input` | list of strings | `[]` | File glob(s) this task reads; drives up-to-date skipping. |
 | `tasks.<name>.output` | list of strings | `[]` | File glob(s) this task writes; drives up-to-date skipping. |
 | `tasks.<name>.envs` | map: string -> string | `{}` | Task-scoped environment variables, layered over `otto.envs`. Free-form key site, same as `otto.envs`. |
@@ -85,6 +88,22 @@ value is a task, whose own keys are fixed and listed here.
 **`parallel:` is not a task-level key.** It belongs under `foreach:` — see
 below. Writing it here (the bug this whole design doc was written to catch)
 is now a loud `unknown field 'parallel'` error naming path `tasks.<name>`.
+
+## Edge object (`EdgeSpec`) — 2 keys
+
+Each entry in `tasks.<name>.after`/`tasks.<name>.before` is either a bare
+task-name string (sugar for `{task: <name>, when: success}`, and the form
+`otto` always writes back for a `success`-only edge) or a map with these two
+keys. `EdgeSpec` is not one of the six Architecture-table structs — it isn't
+`#[serde(deny_unknown_fields)]` — but its hand-written `visit_map`
+(`src/cfg/edge.rs`) rejects any key besides these two with the same
+"unknown field" error shape the derive macro produces, so it is inventoried
+here too.
+
+| key | type | default | notes |
+|---|---|---|---|
+| `tasks.<name>.after[].task` | string | none (**required**) | Name of the task this edge refers to. Same key at `tasks.<name>.before[].task`. |
+| `tasks.<name>.after[].when` | string: `success`\|`failure`\|`always` | `success` | Condition under which this edge fires. Same key at `tasks.<name>.before[].when`. |
 
 ## `tasks.<name>.foreach:` (`ForeachSpec`) — 7 keys
 
@@ -139,16 +158,18 @@ accept arbitrary keys:
 4. **`constant:` (`tasks.<name>.params.<title>.constant`)**, only when given
    as a YAML map — keys and values are both arbitrary strings.
 
-## Total: 44 fixed keys across the six structs
+## Total: 46 fixed keys across the seven structs
 
 `ConfigSpec` 2 + `OttoSpec` 9 + `RetentionSpec` 5 + `ForeachSpec` 7 +
-`TaskSpecHelper` 13 + `ParamSpec` 8 = **44**. This count, and every key name
-above, is pinned by an automated drift test
+`TaskSpecHelper` 13 + `ParamSpec` 8 + `EdgeSpec` 2 = **46**. This count, and
+every key name above, is pinned by an automated drift test
 (`ottofile_reference_key_inventory_is_exhaustive`, in
 `src/cfg/task.rs`'s `#[cfg(test)]` module): it destructures a live instance of
 each struct (a compile-time trigger — the build breaks the moment a struct
 gains or loses a field, before any test even runs) and separately recovers
-each struct's real on-disk key list from serde's own `deny_unknown_fields`
-error message (fed a deliberately bogus key), then asserts every one of those
-44 recovered keys is mentioned, verbatim, on this page. If this page and the
+each struct's real on-disk key list from its "unknown field" error message
+(fed a deliberately bogus key — `deny_unknown_fields`'s derive-generated
+error for the six Architecture-table structs, `EdgeSpec`'s hand-written
+`visit_map` error for the seventh), then asserts every one of those 46
+recovered keys is mentioned, verbatim, on this page. If this page and the
 schema ever drift, `cargo test` fails — it does not merely go stale quietly.
