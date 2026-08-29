@@ -88,6 +88,21 @@ fn ottofile_not_found_message() -> String {
     )
 }
 
+/// The truthful epilogue for the other config-failure state: the ottofile was
+/// found and could not be parsed. Naming the file and the serde diagnostic
+/// (field path, line, column) is the whole point - the not-found message would
+/// be a lie here.
+fn ottofile_parse_error_message(ottofile: &std::path::Path, err: &eyre::Report) -> String {
+    use colored::Colorize;
+
+    format!(
+        "{} {}\n{}",
+        "ERROR: failed to parse ottofile:".red().bold(),
+        ottofile.display().to_string().bright_yellow(),
+        err
+    )
+}
+
 #[derive(Debug)]
 pub struct OttofileNotFound;
 
@@ -395,7 +410,7 @@ impl Parser {
                             match ottofile_path {
                                 Ok(Some(path)) => {
                                     // Ottofile exists, load config and show normal help with tasks
-                                    match Self::load_config_from_path(Some(path)) {
+                                    match Self::load_config_from_path(Some(path.clone())) {
                                         Ok((config_spec, _, _)) => {
                                             let mut temp_parser = Self {
                                                 prog: self.prog.clone(),
@@ -414,10 +429,19 @@ impl Parser {
                                             help_cmd.print_help().expect("Failed to print help");
                                             std::process::exit(0);
                                         }
-                                        Err(_) => {
-                                            // Failed to load config, show help with error message
-                                            let mut help_cmd = Self::build_help_command_with_error();
+                                        Err(e) => {
+                                            // The ottofile EXISTS and failed to
+                                            // parse. Render the global flags
+                                            // without the not-found epilogue -
+                                            // claiming the file is missing when
+                                            // it is merely malformed sends the
+                                            // operator hunting for the wrong
+                                            // problem - and put the real serde
+                                            // diagnostic on stderr, the same
+                                            // stream `--tasks` reports on.
+                                            let mut help_cmd = Self::build_bare_help_command();
                                             help_cmd.print_help().expect("Failed to print help");
+                                            eprintln!("{}", ottofile_parse_error_message(&path, &e));
                                             std::process::exit(2);
                                         }
                                     }
@@ -1753,15 +1777,22 @@ impl Parser {
         cmd
     }
 
-    fn build_help_command_with_error() -> Command {
+    /// Global flags only, no epilogue: the shared base for both config-failure
+    /// help fallbacks. Split out so the "found but unparseable" path can render
+    /// the same flag list without inheriting the not-found claim.
+    fn build_bare_help_command() -> Command {
         let mut cmd = Command::new("otto")
             .version(env!("GIT_DESCRIBE"))
             .about("A task runner");
         for arg in Self::global_args() {
             cmd = cmd.arg(arg);
         }
-        cmd.after_help(ottofile_not_found_message())
-            .allow_external_subcommands(true)
+        cmd.allow_external_subcommands(true)
+    }
+
+    /// The fallback for the "no ottofile anywhere up the tree" state only.
+    fn build_help_command_with_error() -> Command {
+        Self::build_bare_help_command().after_help(ottofile_not_found_message())
     }
 
     fn inject_graph_meta_task(&mut self) {
