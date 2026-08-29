@@ -150,3 +150,46 @@ tasks:
 "#,
     );
 }
+
+/// Phase 6b: a `choices-command:` param must re-serialize under its own kebab
+/// name. ParamSpec has no struct-level rename, so a deserialize-only
+/// `#[serde(rename)]` would parse this fine and then emit `choices_command`,
+/// which the reparse would drop back to `None` - structural drift this catches.
+#[test]
+fn config_with_choices_command_roundtrips() {
+    assert_roundtrips(
+        r#"
+tasks:
+  switch:
+    action: echo "switching to ${svc}"
+    params:
+      -s|--svc:
+        choices-command: "printf 'alpha\nbeta\n'"
+        help: Service to switch to
+      -e|--env:
+        choices: [dev, prod]
+        help: Static sibling, must be unaffected
+"#,
+    );
+}
+
+/// The round-trip above proves the value survives; this proves the *spelling*
+/// does, which is what a human reading the re-emitted ottofile depends on.
+#[test]
+fn choices_command_emits_its_kebab_case_key_verbatim() {
+    let yaml = r#"
+tasks:
+  switch:
+    action: echo hi
+    params:
+      -s|--svc:
+        choices-command: "list-services --all"
+"#;
+    let config: ConfigSpec = serde_yaml::from_str(yaml).expect("parse failed");
+    let emitted = serde_yaml::to_string(&config).expect("serialize failed");
+    assert!(
+        emitted.contains("choices-command: list-services --all"),
+        "emitted yaml lost the kebab-case key:\n{emitted}"
+    );
+    assert!(!emitted.contains("choices_command"), "emitted snake_case:\n{emitted}");
+}

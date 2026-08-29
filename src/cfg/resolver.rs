@@ -32,11 +32,15 @@ use crate::cfg::task::ForeachItem;
 /// Read by a nested otto to refuse an infinite resolution cycle.
 pub const FOREACH_GUARD_VAR: &str = "OTTO_FOREACH_COMMAND";
 
+/// Environment variable naming the `task:param` choices source(s) currently
+/// being resolved. Symmetric with `FOREACH_GUARD_VAR`.
+pub const CHOICES_GUARD_VAR: &str = "OTTO_CHOICES_COMMAND";
+
 /// Per-invocation cache for everything a dynamic source resolves.
 ///
-/// Keyed by task name for foreach. Phase 6b's dynamic param `choices` adds a
-/// sibling map keyed by `task:param` - the point of this type is that both
-/// share one cache lifetime (the invocation) and one execution contract.
+/// Keyed by task name for foreach, by `task:param` for dynamic param choices -
+/// the point of this type is that both share one cache lifetime (the
+/// invocation) and one execution contract.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DynamicResolver {
     /// Resolved global `envs:`, evaluated at most once and only when a dynamic
@@ -45,6 +49,8 @@ pub struct DynamicResolver {
     global_envs: OnceCell<HashMap<String, String>>,
     /// task name -> resolved items, for command-sourced foreach only.
     foreach: RefCell<HashMap<String, Vec<ForeachItem>>>,
+    /// `task:param` -> resolved value set, for `choices-command` params only.
+    choices: RefCell<HashMap<String, Vec<String>>>,
 }
 
 impl DynamicResolver {
@@ -81,6 +87,30 @@ impl DynamicResolver {
     #[must_use]
     pub fn has_foreach(&self, task: &str) -> bool {
         self.foreach.borrow().contains_key(task)
+    }
+
+    /// Cached dynamic `choices` for `key` (`task:param`), resolved on first ask.
+    ///
+    /// This is what makes the two bind triggers (direct invocation and
+    /// propagation validation) add up to one execution: whichever fires first
+    /// pays for the command, the other reads the cache. As with foreach, a
+    /// failure is not cached, so every asking surface sees it loudly.
+    pub fn choices<F>(&self, key: &str, resolve: F) -> Result<Vec<String>>
+    where
+        F: FnOnce() -> Result<Vec<String>>,
+    {
+        if let Some(values) = self.choices.borrow().get(key) {
+            return Ok(values.clone());
+        }
+        let values = resolve()?;
+        self.choices.borrow_mut().insert(key.to_string(), values.clone());
+        Ok(values)
+    }
+
+    /// Whether `key`'s (`task:param`) choices command has already run this invocation.
+    #[must_use]
+    pub fn has_choices(&self, key: &str) -> bool {
+        self.choices.borrow().contains_key(key)
     }
 }
 
@@ -253,5 +283,54 @@ mod tests {
             });
         }
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn choices_resolves_once_and_caches() {
+        let resolver = DynamicResolver::new();
+        let calls = std::cell::Cell::new(0);
+        let resolve = || {
+            calls.set(calls.get() + 1);
+            Ok(vec!["alpha".to_string()])
+        };
+        // The two bind triggers (direct invocation, propagation validation) ask
+        // for the same key; only the first may execute.
+        let first = resolver.choices("switch:svc", resolve).unwrap();
+        let second = resolver.choices("switch:svc", resolve).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            calls.get(),
+            1,
+            "a choices command must resolve at most once per invocation"
+        );
+        assert!(resolver.has_choices("switch:svc"));
+        assert!(!resolver.has_choices("switch:other"));
+    }
+
+    #[test]
+    fn choices_does_not_cache_a_failure() {
+        let resolver = DynamicResolver::new();
+        assert!(resolver.choices("switch:svc", || Err(eyre!("boom"))).is_err());
+        assert!(!resolver.has_choices("switch:svc"));
+    }
+
+    #[test]
+    fn run_lines_command_refuses_to_recurse_on_the_same_choices_key() {
+        // Stands in for a nested otto: the guard var already names this key.
+        unsafe { std::env::set_var(CHOICES_GUARD_VAR, "switch:svc") };
+        let err = run_lines_command(
+            "printf 'alpha\n'",
+            &PathBuf::from("."),
+            &no_envs(),
+            CHOICES_GUARD_VAR,
+            "switch:svc",
+            "Task 'switch' param 'svc' choices-command",
+        )
+        .unwrap_err()
+        .to_string();
+        unsafe { std::env::remove_var(CHOICES_GUARD_VAR) };
+        assert!(err.contains("recursion detected"), "{err}");
+        assert!(err.contains("switch:svc"), "{err}");
+        assert!(err.contains(CHOICES_GUARD_VAR), "{err}");
     }
 }

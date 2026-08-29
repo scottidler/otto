@@ -30,11 +30,20 @@ pub struct TaskView {
     pub subtasks: Vec<String>,
 }
 
+/// `choices` and `choices-command` are mutually exclusive at the config level
+/// (`deserialize_param_map` enforces it), so exactly one of them is emitted per
+/// param: a static param carries its list (possibly empty), a dynamic one
+/// carries the command verbatim in its place. `--tasks` reports the provenance
+/// and executes nothing: the rule stays "a surface executes only what it needs",
+/// and a consumer asking for the task list has no need of the values.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ParamView {
     pub name: String,
     pub flags: Vec<String>,
-    pub choices: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<String>>,
+    #[serde(rename = "choices-command", skip_serializing_if = "Option::is_none")]
+    pub choices_command: Option<String>,
     pub default: Option<String>,
     pub positional: bool,
 }
@@ -118,10 +127,15 @@ fn param_view(spec: &crate::cfg::config::ParamSpec) -> ParamView {
     if let Some(l) = &spec.long {
         flags.push(format!("--{l}"));
     }
+    let (choices, choices_command) = match &spec.choices_command {
+        Some(command) => (None, Some(command.clone())),
+        None => (Some(spec.choices.clone()), None),
+    };
     ParamView {
         name: spec.name.clone(),
         flags,
-        choices: spec.choices.clone(),
+        choices,
+        choices_command,
         default: spec.default.clone(),
         positional: spec.param_type == ParamType::POS,
     }
@@ -264,6 +278,7 @@ mod tests {
                 metavar: None,
                 default: Some("web".to_string()),
                 constant: Value::Empty,
+                choices_command: None,
                 choices: vec!["web".to_string(), "api".to_string()],
                 nargs: Nargs::One,
                 help: Some("service name".to_string()),
@@ -282,7 +297,10 @@ mod tests {
         assert_eq!(deploy.params.len(), 1);
         assert_eq!(deploy.params[0].name, "svc");
         assert_eq!(deploy.params[0].flags, vec!["-s".to_string(), "--svc".to_string()]);
-        assert_eq!(deploy.params[0].choices, vec!["web".to_string(), "api".to_string()]);
+        assert_eq!(
+            deploy.params[0].choices,
+            Some(vec!["web".to_string(), "api".to_string()])
+        );
         assert_eq!(deploy.params[0].default, Some("web".to_string()));
         assert!(!deploy.params[0].positional);
     }

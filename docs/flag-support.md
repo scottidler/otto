@@ -184,6 +184,51 @@ tasks:
       echo "Creating ${format} package with ${compression} compression"
 ```
 
+### Dynamic Choices from a Command
+
+When the valid set isn't knowable when the ottofile is written (a service
+registry, a set of AWS profiles, whatever the environment currently holds), use
+`choices-command:` instead of `choices:`. Otto runs the command and treats its
+non-empty stdout lines, whitespace-trimmed, as the allowed values:
+
+```yaml
+tasks:
+  switch:
+    params:
+      -s|--svc:
+        choices-command: "scripts/list-services.sh"
+        help: Service to switch to
+    bash: |
+      echo "switching to ${svc}"
+```
+
+`choices` and `choices-command` are mutually exclusive; declaring both is a
+config error naming the param.
+
+**When the command runs.** Only when a value actually has to be validated: you
+passed arguments to the task, or a value propagated into the task from a
+dependent (a dependency's `choices-command` runs when it receives a propagated
+value, because its param has to validate too). It runs at most once per otto
+invocation, no matter how many places ask.
+
+**When it never runs.** Every help surface (`otto --help`, `otto help <task>`,
+`<task> --help`) and `otto --tasks`. Help renders `[dynamic choices: <command>]`
+in place of the value list, and `--tasks` reports the command in a
+`choices-command` field: both name the command so you can run it yourself. This
+is the same rule `foreach: command:` follows.
+
+**Execution context**, identical to `foreach: command:`: `sh -c`, cwd = the
+ottofile's directory, environment = the inherited environment plus the resolved
+global `envs:`. Task params are not available.
+
+**Failure is loud.** A non-zero exit is an error naming the task, the param, the
+command, and the exit code. So is *empty* output: unlike a `foreach:` that
+legitimately matches nothing, a param whose valid set is empty could never be
+given a value, so that is a misconfiguration rather than a valid state.
+
+A nested otto that would resolve the same `task:param` errors instead of
+recursing (the guard rides `OTTO_CHOICES_COMMAND`).
+
 ### Help Text and Metadata
 
 All flag types support comprehensive help documentation:

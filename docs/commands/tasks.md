@@ -41,12 +41,19 @@ This shape is a contract other tools build against. It will not change without a
 | `params` | array | One entry per declared param, sorted by name |
 | `params[].name` | string | The param's divined name |
 | `params[].flags` | array of strings | CLI flags, e.g. `["-s", "--svc"]` |
-| `params[].choices` | array of strings | Static `choices:` values (empty if none) |
+| `params[].choices` | array of strings | Static `choices:` values (empty if none). Absent entirely for a `choices-command:` param |
+| `params[].choices-command` | string | The param's `choices-command:`, verbatim. Present only for a dynamic-choices param, in place of `choices` |
 | `params[].default` | string or null | The param's `default:` value |
 | `params[].positional` | bool | `true` for a bare-named (positional) param |
 | `edges.before` | array of strings | Task names this task's `before:` edges point at |
 | `edges.after` | array of strings | Task names this task's `after:` edges point at |
 | `subtasks` | array of strings | Expanded subtask ids (`<task>:<item>`) for a `foreach:` task; empty for an ordinary task |
+
+`choices` and `choices-command` are mutually exclusive in the ottofile, so
+exactly one of the two keys appears per param. `--tasks` reports the command
+verbatim and never runs it: a surface executes only what it needs, and the task
+list needs subtask ids (so a `foreach: command:` does resolve), not the value
+set behind a param. Run the printed command yourself to see the current values.
 
 ## Example
 

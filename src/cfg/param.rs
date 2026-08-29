@@ -81,6 +81,13 @@ pub struct ParamSpec {
     #[serde(default)]
     pub choices: Vec<String>,
 
+    // ParamSpec has no struct-level kebab rename, so the on-disk `choices-command`
+    // key needs an explicit one here. It must apply to BOTH directions: a
+    // deserialize-only rename would parse the ottofile and then re-emit
+    // `choices_command`, which is the asymmetry tests/roundtrip.rs pins.
+    #[serde(default, rename = "choices-command")]
+    pub choices_command: Option<String>,
+
     #[serde(default)]
     pub nargs: Nargs,
 
@@ -91,6 +98,62 @@ pub struct ParamSpec {
     // ottofile representation.
     #[serde(skip)]
     pub value: Value,
+}
+
+impl ParamSpec {
+    /// True when the valid value set comes from a command's stdout rather than
+    /// from the ottofile itself. A dynamic set executes, so it resolves lazily
+    /// and only through the parser's `DynamicResolver`.
+    #[must_use]
+    pub fn has_dynamic_choices(&self) -> bool {
+        self.choices_command.is_some()
+    }
+
+    /// Resolve a `choices-command:` param source: run the command and turn its
+    /// non-empty stdout lines into the allowed value set.
+    ///
+    /// Contract (design doc Phase 6b), identical to `foreach: command:`: `sh -c`,
+    /// cwd = the ottofile's directory, env = inherited environment + `envs` (the
+    /// resolved global `envs:`); task params are NOT available. A non-zero exit
+    /// is a loud error naming the task, the param, and the command.
+    ///
+    /// Zero lines is ALSO a loud error, deliberately unlike foreach's legitimate
+    /// empty scope: a param whose valid set is empty can accept no value at all,
+    /// which is a misconfiguration, and fail-closed beats accept-anything.
+    pub fn resolve_choices_command(
+        &self,
+        task_name: &str,
+        cwd: &std::path::Path,
+        envs: &HashMap<String, String>,
+    ) -> Result<Vec<String>> {
+        let command = self.choices_command.as_ref().ok_or_else(|| {
+            eyre::eyre!(
+                "Task '{}' param '{}': no choices-command to resolve",
+                task_name,
+                self.name
+            )
+        })?;
+
+        let key = format!("{task_name}:{}", self.name);
+        let context = format!("Task '{task_name}' param '{}' choices-command", self.name);
+        let values = crate::cfg::resolver::run_lines_command(
+            command,
+            cwd,
+            envs,
+            crate::cfg::resolver::CHOICES_GUARD_VAR,
+            &key,
+            &context,
+        )?;
+
+        if values.is_empty() {
+            return Err(eyre::eyre!(
+                "{context}: command '{command}' produced no values; a param whose \
+                 valid set is empty can never be given a value"
+            ));
+        }
+
+        Ok(values)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize)]
@@ -330,6 +393,20 @@ where
                 param_spec.short = short;
                 param_spec.long = long;
 
+                // Checked here, after divine(), so the error can name the param
+                // by the identity the user will recognize. A static list and a
+                // command are two answers to "what is valid?"; picking one
+                // silently is exactly the kind of guess that hides a typo.
+                if let Some(command) = &param_spec.choices_command
+                    && !param_spec.choices.is_empty()
+                {
+                    return Err(M::Error::custom(format!(
+                        "param '{name}': choices-command '{command}' cannot be combined with \
+                         choices [{}]; a param takes exactly one source of valid values",
+                        param_spec.choices.join(", ")
+                    )));
+                }
+
                 if param_spec.long.is_some() || param_spec.short.is_some() {
                     if let Some(ref value) = param_spec.default {
                         // Case-insensitive boolean detection
@@ -562,6 +639,7 @@ mod tests {
             metavar: None,
             default: Some("false".to_string()),
             constant: Value::Empty,
+            choices_command: None,
             choices: vec![],
             nargs: Nargs::default(),
             help: None,
@@ -659,6 +737,7 @@ mod tests {
                 metavar: None,
                 default: None,
                 constant: value.clone(),
+                choices_command: None,
                 choices: vec![],
                 nargs: Nargs::default(),
                 help: None,
@@ -690,5 +769,142 @@ mod tests {
             let parsed: Nargs = serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("failed to parse {yaml:?}: {e}"));
             assert_eq!(nargs, parsed, "round-trip failed for {nargs:?} (yaml: {yaml:?})");
         }
+    }
+
+    // =========================================================================
+    // choices-command (design doc Phase 6b)
+    // =========================================================================
+
+    fn spec_for(yaml: &str, param: &str) -> ParamSpec {
+        use crate::cfg::task::TaskSpec;
+        let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+        task_spec.params.get(param).unwrap().clone()
+    }
+
+    #[test]
+    fn choices_command_parses_from_the_kebab_case_key() {
+        let spec = spec_for(
+            r#"
+            name: switch
+            params:
+              -s|--svc:
+                choices-command: "printf 'alpha\nbeta\n'"
+                help: Service to switch to
+            "#,
+            "svc",
+        );
+        assert_eq!(spec.choices_command.as_deref(), Some("printf 'alpha\nbeta\n'"));
+        assert!(spec.has_dynamic_choices());
+        assert!(spec.choices.is_empty());
+    }
+
+    #[test]
+    fn choices_command_serializes_back_to_the_kebab_case_key() {
+        // A deserialize-only rename would emit `choices_command` here, and the
+        // ottofile would silently lose the field on the next parse.
+        let spec = spec_for(
+            r#"
+            name: switch
+            params:
+              -s|--svc:
+                choices-command: "list-services"
+            "#,
+            "svc",
+        );
+        let emitted = serde_yaml::to_string(&spec).unwrap();
+        assert!(emitted.contains("choices-command: list-services"), "{emitted}");
+        assert!(!emitted.contains("choices_command"), "{emitted}");
+    }
+
+    #[test]
+    fn a_param_without_choices_command_stays_static() {
+        let spec = spec_for(
+            r#"
+            name: switch
+            params:
+              -e|--env:
+                choices: [dev, prod]
+            "#,
+            "env",
+        );
+        assert!(!spec.has_dynamic_choices());
+        assert_eq!(spec.choices, vec!["dev".to_string(), "prod".to_string()]);
+    }
+
+    #[test]
+    fn choices_and_choices_command_together_is_a_loud_config_error() {
+        use crate::cfg::task::TaskSpec;
+        let err = serde_yaml::from_str::<TaskSpec>(
+            r#"
+            name: switch
+            params:
+              -s|--svc:
+                choices: [alpha, beta]
+                choices-command: "list-services"
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("svc"), "must name the param: {err}");
+        assert!(err.contains("list-services"), "must name the command: {err}");
+        assert!(err.contains("alpha, beta"), "must name the static choices: {err}");
+    }
+
+    #[test]
+    fn resolve_choices_command_returns_trimmed_non_empty_lines() {
+        let spec = spec_for(
+            r#"
+            name: switch
+            params:
+              -s|--svc:
+                choices-command: "printf 'alpha\n\n  beta  \n'"
+            "#,
+            "svc",
+        );
+        let values = spec
+            .resolve_choices_command("switch", std::path::Path::new("."), &HashMap::new())
+            .unwrap();
+        assert_eq!(values, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn resolve_choices_command_nonzero_exit_names_task_param_and_command() {
+        let spec = spec_for(
+            r#"
+            name: switch
+            params:
+              -s|--svc:
+                choices-command: "echo nope >&2; exit 4"
+            "#,
+            "svc",
+        );
+        let err = spec
+            .resolve_choices_command("switch", std::path::Path::new("."), &HashMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("switch"), "{err}");
+        assert!(err.contains("svc"), "{err}");
+        assert!(err.contains("echo nope >&2; exit 4"), "{err}");
+        assert!(err.contains("exit code 4"), "{err}");
+    }
+
+    #[test]
+    fn resolve_choices_command_zero_lines_is_an_error_unlike_foreach() {
+        let spec = spec_for(
+            r#"
+            name: switch
+            params:
+              -s|--svc:
+                choices-command: "true"
+            "#,
+            "svc",
+        );
+        let err = spec
+            .resolve_choices_command("switch", std::path::Path::new("."), &HashMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("switch"), "{err}");
+        assert!(err.contains("svc"), "{err}");
+        assert!(err.contains("no values"), "{err}");
     }
 }
