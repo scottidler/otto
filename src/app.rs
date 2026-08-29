@@ -299,29 +299,7 @@ pub async fn execute_with_terminal_output(
     workspace.save_execution_context(execution_context.clone()).await?;
 
     // Convert parser tasks to executor tasks
-    let executor_tasks: Vec<crate::executor::Task> = execution_tasks
-        .into_iter()
-        .map(|parser_task| {
-            // Derive parent for subtasks (names with colons like "install:td")
-            let parent = if parser_task.name.contains(':') {
-                parser_task.name.split(':').next().map(|s| s.to_string())
-            } else {
-                None
-            };
-            let mut t = crate::executor::Task::new(
-                parser_task.name,
-                parent,
-                parser_task.task_deps,
-                parser_task.file_deps,
-                parser_task.output_deps,
-                parser_task.envs,
-                parser_task.values,
-                parser_task.action,
-            );
-            t.is_virtual_parent = parser_task.is_virtual_parent;
-            t
-        })
-        .collect();
+    let executor_tasks: Vec<crate::executor::Task> = execution_tasks.into_iter().map(Into::into).collect();
 
     let scheduler = TaskScheduler::new(executor_tasks, Arc::new(workspace), execution_context, jobs, false).await?;
 
@@ -382,23 +360,7 @@ pub async fn execute_with_tui(
         let streams = crate::executor::output::TaskStreams::new(&task_name, &output_dir).await?;
         task_streams_map.insert(task_name.clone(), streams);
 
-        // Derive parent for subtasks (names with colons like "install:td")
-        let parent = if parser_task.name.contains(':') {
-            parser_task.name.split(':').next().map(|s| s.to_string())
-        } else {
-            None
-        };
-        let executor_task = crate::executor::Task::new(
-            parser_task.name,
-            parent,
-            parser_task.task_deps,
-            parser_task.file_deps,
-            parser_task.output_deps,
-            parser_task.envs,
-            parser_task.values,
-            parser_task.action,
-        );
-        executor_tasks.push(executor_task);
+        executor_tasks.push(crate::executor::Task::from(parser_task));
     }
 
     // Initialize TUI
@@ -828,6 +790,8 @@ mod tests {
             action: String::new(),
             hash: String::new(),
             is_virtual_parent: false,
+            serial_group: None,
+            serial_index: 0,
         }
     }
 

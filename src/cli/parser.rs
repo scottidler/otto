@@ -98,6 +98,9 @@ impl std::fmt::Display for OttofileNotFound {
 
 impl std::error::Error for OttofileNotFound {}
 
+/// Serial foreach group membership: subtask name -> (group name, order index).
+type SerialMembership = HashMap<String, (String, usize)>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Task {
     pub name: String,
@@ -109,6 +112,14 @@ pub struct Task {
     pub action: String,
     pub hash: String,
     pub is_virtual_parent: bool,
+    /// Name of the serial foreach group this task belongs to (the parent task name),
+    /// or `None` for tasks that carry no ordering constraint. Serial ordering is a
+    /// property of the task, not a dependency edge: it constrains start order without
+    /// pulling predecessors into the run set.
+    pub serial_group: Option<String>,
+    /// Position of this task within `serial_group`, in declared foreach order.
+    /// Meaningless when `serial_group` is `None`.
+    pub serial_index: usize,
 }
 
 impl Task {
@@ -133,6 +144,8 @@ impl Task {
             action,
             hash,
             is_virtual_parent: false,
+            serial_group: None,
+            serial_index: 0,
         }
     }
 
@@ -719,7 +732,7 @@ impl Parser {
         let serial_tasks: HashSet<String> = self.detect_serial_tasks(requested_tasks);
 
         // Step 0.5: Expand foreach tasks into subtasks
-        let mut expanded_tasks = self.expand_foreach_tasks_with_serial(&serial_tasks)?;
+        let (mut expanded_tasks, serial_membership) = self.expand_foreach_tasks_with_serial(&serial_tasks)?;
 
         // Step 0.6: Desugar `on-failure:` into synthetic `after:` edges.
         // X with `on-failure: [Y]` becomes `X.after += [{task: Y, when: failure}]`,
@@ -803,6 +816,12 @@ impl Parser {
 
             // Override task_deps with computed dependencies
             task.task_deps = task_deps.get(task_name).map(|deps| deps.to_vec()).unwrap_or_default();
+
+            // Carry serial-group membership through to the scheduler's ready loop.
+            if let Some((group, index)) = serial_membership.get(task_name) {
+                task.serial_group = Some(group.clone());
+                task.serial_index = *index;
+            }
 
             cli_provided_params.insert(task_name.clone(), cli_provided);
             task_entries.push((task_name.clone(), task));
@@ -1185,11 +1204,19 @@ impl Parser {
     /// - Non-foreach tasks unchanged
     /// - Foreach tasks replaced by: virtual parent + N subtasks
     ///
-    /// When a task is in serial_tasks, subtasks are chained sequentially.
-    fn expand_foreach_tasks_with_serial(&self, serial_tasks: &HashSet<String>) -> Result<HashMap<String, TaskSpec>> {
+    /// When a task is in serial_tasks, its subtasks join a serial group: the returned
+    /// membership map records `subtask name -> (group name, order index)`. Serial
+    /// ordering is NOT expressed as `before:` edges - "runs after" and "requires" are
+    /// different things, and edges are the latter (see the Phase 4 design bullet in
+    /// docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md).
+    fn expand_foreach_tasks_with_serial(
+        &self,
+        serial_tasks: &HashSet<String>,
+    ) -> Result<(HashMap<String, TaskSpec>, SerialMembership)> {
         use crate::cfg::task::TaskSpecs;
 
         let mut expanded: TaskSpecs = HashMap::new();
+        let mut membership: SerialMembership = HashMap::new();
 
         for (name, spec) in &self.config_spec.tasks {
             if spec.has_foreach() {
@@ -1223,18 +1250,14 @@ impl Parser {
                 // Subtasks do NOT inherit the parent's `after:` edges - only the
                 // parent triggers downstreams; otherwise every subtask would
                 // double-fire the downstream task.
-                let mut prev_subtask_name: Option<String> = None;
-                for mut subtask in subtasks {
+                for (index, mut subtask) in subtasks.into_iter().enumerate() {
                     // Subtask inherits parent's original before dependencies
                     subtask.before = spec.before.clone();
                     subtask.after = Vec::new();
 
-                    // If running serially, chain subtasks: each depends on the previous
+                    // Serial ordering is recorded as group membership, not as an edge.
                     if run_serial {
-                        if let Some(prev_name) = &prev_subtask_name {
-                            subtask.before.push(crate::cfg::edge::EdgeSpec::sugar(prev_name));
-                        }
-                        prev_subtask_name = Some(subtask.name.clone());
+                        membership.insert(subtask.name.clone(), (name.clone(), index));
                     }
 
                     expanded.insert(subtask.name.clone(), subtask);
@@ -1247,7 +1270,7 @@ impl Parser {
             }
         }
 
-        Ok(expanded)
+        Ok((expanded, membership))
     }
 
     /// Collect all tasks needed to run a given task, including:
@@ -2628,8 +2651,11 @@ mod tests {
 
     // Tests for foreach parallel: false feature
 
+    /// Rewritten in Phase 4 of docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md:
+    /// serial ordering used to be sibling `before:` edges, which made "runs after" mean
+    /// "requires". It is now group membership plus an order index.
     #[test]
-    fn test_foreach_subtasks_chained_when_parallel_false() {
+    fn test_foreach_subtasks_grouped_when_parallel_false() {
         use std::fs;
         use tempfile::TempDir;
 
@@ -2668,25 +2694,27 @@ tasks:
         assert!(subtask_b.is_some(), "subtask install:b should exist");
         assert!(subtask_c.is_some(), "subtask install:c should exist");
 
-        // With parallel: false, subtasks should be chained:
-        // - install:a has no subtask dependency (first in chain)
-        // - install:b depends on install:a
-        // - install:c depends on install:b
-        let _a = subtask_a.unwrap();
+        // With parallel: false, subtasks join one serial group in declared order and
+        // carry NO sibling edges - ordering must not pull siblings into the run set.
+        let a = subtask_a.unwrap();
         let b = subtask_b.unwrap();
         let c = subtask_c.unwrap();
 
-        // Check that b depends on a and c depends on b
-        assert!(
-            b.task_deps.iter().any(|d| d.task == "install:a"),
-            "install:b should depend on install:a, got: {:?}",
-            b.task_deps
-        );
-        assert!(
-            c.task_deps.iter().any(|d| d.task == "install:b"),
-            "install:c should depend on install:b, got: {:?}",
-            c.task_deps
-        );
+        for (task, index) in [(a, 0), (b, 1), (c, 2)] {
+            assert_eq!(
+                task.serial_group.as_deref(),
+                Some("install"),
+                "{} should be in serial group 'install'",
+                task.name
+            );
+            assert_eq!(task.serial_index, index, "{} order index", task.name);
+            assert!(
+                !task.task_deps.iter().any(|d| d.task.starts_with("install:")),
+                "{} should carry no sibling edge, got: {:?}",
+                task.name,
+                task.task_deps
+            );
+        }
     }
 
     #[test]
@@ -2744,6 +2772,10 @@ tasks:
             "install:c should NOT depend on install:b when parallel: true, got: {:?}",
             c.task_deps
         );
+
+        // ...and they join no serial group, so the scheduler's ordering gate is inert.
+        assert_eq!(b.serial_group, None);
+        assert_eq!(c.serial_group, None);
     }
 
     #[test]

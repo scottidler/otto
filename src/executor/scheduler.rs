@@ -164,9 +164,100 @@ fn classify_edge(
     }
 }
 
-/// Format a skip reason describing which edge made this task unreachable.
+/// Serial foreach ordering, indexed for the ready loop.
+///
+/// Serial ordering is a property of the tasks, not a dependency edge: it constrains the
+/// order in which members of a group may start, and never expands the run set. The only
+/// consumer is the readiness check below.
+#[derive(Debug, Default)]
+struct SerialGroups {
+    /// Group name -> member names sorted by declared foreach order. Only members that
+    /// are actually in the run set appear here, which is what makes `otto up:gamma`
+    /// schedule gamma alone.
+    members: HashMap<String, Vec<String>>,
+}
+
+impl SerialGroups {
+    fn new(tasks: &[Task]) -> Self {
+        let mut ordered: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+        for task in tasks {
+            if let Some(group) = &task.serial_group {
+                ordered
+                    .entry(group.clone())
+                    .or_default()
+                    .push((task.serial_index, task.name.clone()));
+            }
+        }
+        let members = ordered
+            .into_iter()
+            .map(|(group, mut entries)| {
+                entries.sort();
+                (group, entries.into_iter().map(|(_, name)| name).collect())
+            })
+            .collect();
+        Self { members }
+    }
+
+    /// The nearest preceding member of this task's group that is in the run set.
+    fn predecessor(&self, task: &Task) -> Option<&str> {
+        let group = task.serial_group.as_ref()?;
+        let members = self.members.get(group)?;
+        let position = members.iter().position(|name| name == &task.name)?;
+        members.get(position.checked_sub(1)?).map(String::as_str)
+    }
+
+    /// Classify the serial ordering gate for a task, using the same terminal sets the
+    /// dependency edges are classified against.
+    ///
+    /// - no predecessor in the run set -> Satisfied (ordering never expands the run set)
+    /// - predecessor Completed or up-to-date-skipped (`completed_set`) -> Satisfied
+    /// - predecessor in any other terminal state -> Unreachable, so this member is
+    ///   skipped with a reason and the cascade propagates through the same rule
+    /// - otherwise the predecessor has not finished -> Pending
+    fn classify(
+        &self,
+        task: &Task,
+        completed: &std::collections::HashSet<String>,
+        failed: &std::collections::HashSet<String>,
+        skipped: &std::collections::HashSet<String>,
+    ) -> EdgeState {
+        match self.predecessor(task) {
+            None => EdgeState::Satisfied,
+            Some(pred) => {
+                if completed.contains(pred) {
+                    EdgeState::Satisfied
+                } else if failed.contains(pred) || skipped.contains(pred) {
+                    EdgeState::Unreachable
+                } else {
+                    EdgeState::Pending
+                }
+            }
+        }
+    }
+}
+
+/// Classify every gate on a task: its dependency edges plus the serial ordering gate.
+/// The serial gate composes with dependency readiness, it never replaces it.
+fn classify_gates(
+    task: &Task,
+    serial_groups: &SerialGroups,
+    completed: &std::collections::HashSet<String>,
+    failed: &std::collections::HashSet<String>,
+    skipped: &std::collections::HashSet<String>,
+) -> Vec<EdgeState> {
+    let mut states: Vec<EdgeState> = task
+        .task_deps
+        .iter()
+        .map(|e| classify_edge(e, completed, failed, skipped))
+        .collect();
+    states.push(serial_groups.classify(task, completed, failed, skipped));
+    states
+}
+
+/// Format a skip reason describing which edge or ordering gate made this task unreachable.
 fn skip_reason_for(
     task: &Task,
+    serial_groups: &SerialGroups,
     completed: &std::collections::HashSet<String>,
     failed: &std::collections::HashSet<String>,
     skipped: &std::collections::HashSet<String>,
@@ -184,6 +275,17 @@ fn skip_reason_for(
             };
         }
     }
+    if matches!(
+        serial_groups.classify(task, completed, failed, skipped),
+        EdgeState::Unreachable
+    ) && let Some(pred) = serial_groups.predecessor(task)
+    {
+        return if failed.contains(pred) {
+            format!("serial predecessor {pred} failed")
+        } else {
+            format!("serial predecessor {pred} skipped; cascade")
+        };
+    }
     "unreachable dependency".to_string()
 }
 
@@ -193,6 +295,10 @@ pub struct TaskScheduler<F: FileSystem = crate::ports::RealFs> {
     task_statuses: Arc<Mutex<HashMap<String, TaskStatus>>>,
     /// Task start times tracking (for duration calculation)
     task_start_times: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    /// Reason each skipped task was skipped, for tasks skipped by an unreachable
+    /// dependency edge or a serial-group cascade. Up-to-date skips are not recorded
+    /// here: they are successes, not gated-out tasks.
+    skip_reasons: Arc<Mutex<HashMap<String, String>>>,
     /// Semaphore for task limiting
     semaphore: Arc<Semaphore>,
     /// Workspace for path management
@@ -227,6 +333,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         Ok(Self {
             task_statuses,
             task_start_times,
+            skip_reasons: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(max_parallel)),
             workspace,
             execution_context,
@@ -265,6 +372,33 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         }
     }
 
+    /// Record a task as Skipped with a user-visible reason.
+    ///
+    /// Every skip that is not an up-to-date skip goes through here: unreachable
+    /// dependency edges and serial-group cascades alike. The reason lands in
+    /// `skip_reasons`, the name lands in `skipped_set` so downstream gates classify
+    /// against it, and the terminal prints it so a skipped task is never silent.
+    async fn mark_skipped(&self, task: &Task, reason: String, skipped_set: &mut std::collections::HashSet<String>) {
+        info!("Skipping task {} ({reason})", task.name);
+        if !self.tui_mode {
+            let msg = format!("{} skipped ({reason})\n", colorize_task_prefix(&task.name));
+            print!("{msg}");
+            io::stdout().flush().unwrap_or(());
+        }
+        self.skip_reasons.lock().await.insert(task.name.clone(), reason);
+        skipped_set.insert(task.name.clone());
+        {
+            let mut statuses = self.task_statuses.lock().await;
+            statuses.insert(task.name.clone(), TaskStatus::Skipped);
+        }
+        self.broadcast_message(TaskMessage::Finished {
+            task_name: task.name.clone(),
+            status: TuiTaskStatus::Skipped,
+            timestamp: std::time::SystemTime::now(),
+            duration_ms: 0,
+        });
+    }
+
     /// Try to start a ready task, handling skipping and errors
     #[allow(clippy::too_many_arguments)]
     async fn try_start_ready_task(
@@ -277,6 +411,9 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         ready_queue: &mut std::collections::VecDeque<Task>,
         completed_tasks: &mut usize,
         total_tasks: usize,
+        serial_groups: &SerialGroups,
+        failed_set: &std::collections::HashSet<String>,
+        skipped_set: &std::collections::HashSet<String>,
     ) -> Result<()> {
         match self.needs_rebuild(&task).await {
             Ok(true) => {
@@ -330,6 +467,15 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         return true; // Keep the task in blocked list
                     }
 
+                    // The serial gate composes with dependency readiness: a member whose
+                    // predecessor has not finished stays blocked.
+                    if !matches!(
+                        serial_groups.classify(blocked_task, completed_set, failed_set, skipped_set),
+                        EdgeState::Satisfied
+                    ) {
+                        return true;
+                    }
+
                     // All dependencies are completed, move to ready queue
                     ready_queue.push_back(blocked_task.clone());
                     false // Remove from blocked list
@@ -380,11 +526,16 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let mut ready_queue = std::collections::VecDeque::new();
         let mut blocked_tasks = Vec::new();
 
+        // Serial foreach ordering, resolved against the run set (not the whole config).
+        let serial_groups = SerialGroups::new(&self.tasks);
+
         for task in &self.tasks {
             in_degree.insert(task.name.clone(), task.task_deps.len());
 
-            // Tasks with no dependencies can be queued immediately
-            if task.task_deps.is_empty() {
+            // Tasks with no dependencies AND no serial predecessor can be queued
+            // immediately. A member waiting on a predecessor starts blocked so the
+            // ready loop never has to spin on a gate that cannot yet be satisfied.
+            if task.task_deps.is_empty() && serial_groups.predecessor(task).is_none() {
                 ready_queue.push_back(task.clone());
             } else {
                 blocked_tasks.push(task.clone());
@@ -400,7 +551,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let mut completed_set = std::collections::HashSet::new();
         let mut failed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut skipped_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut skip_reasons: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
         // Record the first failure to surface as the run's error; conditional follow-ups
         // (when: failure / when: always) still get a chance to run.
@@ -411,28 +561,13 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             while active_tasks.len() < max_concurrent && !ready_queue.is_empty() {
                 let task = ready_queue.pop_front().unwrap();
 
-                let states: Vec<EdgeState> = task
-                    .task_deps
-                    .iter()
-                    .map(|e| classify_edge(e, &completed_set, &failed_set, &skipped_set))
-                    .collect();
+                let states = classify_gates(&task, &serial_groups, &completed_set, &failed_set, &skipped_set);
 
                 if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
-                    // Dep state contradicts this task's edge condition -> Skip.
-                    let reason = skip_reason_for(&task, &completed_set, &failed_set, &skipped_set);
-                    info!("Skipping task {} ({reason})", task.name);
-                    skip_reasons.insert(task.name.clone(), reason);
-                    skipped_set.insert(task.name.clone());
-                    {
-                        let mut statuses = self.task_statuses.lock().await;
-                        statuses.insert(task.name.clone(), TaskStatus::Skipped);
-                    }
-                    self.broadcast_message(TaskMessage::Finished {
-                        task_name: task.name.clone(),
-                        status: TuiTaskStatus::Skipped,
-                        timestamp: std::time::SystemTime::now(),
-                        duration_ms: 0,
-                    });
+                    // Dep state contradicts this task's edge condition, or its serial
+                    // predecessor reached a non-success terminal state -> Skip.
+                    let reason = skip_reason_for(&task, &serial_groups, &completed_set, &failed_set, &skipped_set);
+                    self.mark_skipped(&task, reason, &mut skipped_set).await;
                     completed_tasks += 1;
                     continue;
                 }
@@ -457,6 +592,9 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     &mut ready_queue,
                     &mut completed_tasks,
                     total_tasks,
+                    &serial_groups,
+                    &failed_set,
+                    &skipped_set,
                 )
                 .await?;
             }
@@ -468,11 +606,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 let mut newly_ready = Vec::new();
                 let mut newly_skipped: Vec<Task> = Vec::new();
                 blocked_tasks.retain(|task| {
-                    let states: Vec<EdgeState> = task
-                        .task_deps
-                        .iter()
-                        .map(|e| classify_edge(e, &completed_set, &failed_set, &skipped_set))
-                        .collect();
+                    let states = classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
                     if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
                         newly_skipped.push(task.clone());
                         return false;
@@ -488,20 +622,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     ready_queue.push_back(t);
                 }
                 for t in newly_skipped {
-                    let reason = skip_reason_for(&t, &completed_set, &failed_set, &skipped_set);
-                    info!("Skipping task {} ({reason})", t.name);
-                    skip_reasons.insert(t.name.clone(), reason);
-                    skipped_set.insert(t.name.clone());
-                    {
-                        let mut statuses = self.task_statuses.lock().await;
-                        statuses.insert(t.name.clone(), TaskStatus::Skipped);
-                    }
-                    self.broadcast_message(TaskMessage::Finished {
-                        task_name: t.name.clone(),
-                        status: TuiTaskStatus::Skipped,
-                        timestamp: std::time::SystemTime::now(),
-                        duration_ms: 0,
-                    });
+                    let reason = skip_reason_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
+                    self.mark_skipped(&t, reason, &mut skipped_set).await;
                     completed_tasks += 1;
                 }
                 if !progressed && ready_queue.is_empty() {
@@ -604,11 +726,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     let mut newly_ready = Vec::new();
                     let mut newly_skipped: Vec<Task> = Vec::new();
                     blocked_tasks.retain(|task| {
-                        let states: Vec<EdgeState> = task
-                            .task_deps
-                            .iter()
-                            .map(|e| classify_edge(e, &completed_set, &failed_set, &skipped_set))
-                            .collect();
+                        let states = classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
                         if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
                             newly_skipped.push(task.clone());
                             return false;
@@ -623,20 +741,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         ready_queue.push_back(t);
                     }
                     for t in newly_skipped {
-                        let reason = skip_reason_for(&t, &completed_set, &failed_set, &skipped_set);
-                        info!("Skipping task {} ({reason})", t.name);
-                        skip_reasons.insert(t.name.clone(), reason);
-                        skipped_set.insert(t.name.clone());
-                        {
-                            let mut statuses = self.task_statuses.lock().await;
-                            statuses.insert(t.name.clone(), TaskStatus::Skipped);
-                        }
-                        self.broadcast_message(TaskMessage::Finished {
-                            task_name: t.name.clone(),
-                            status: TuiTaskStatus::Skipped,
-                            timestamp: std::time::SystemTime::now(),
-                            duration_ms: 0,
-                        });
+                        let reason = skip_reason_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
+                        self.mark_skipped(&t, reason, &mut skipped_set).await;
                         completed_tasks += 1;
                     }
 
@@ -693,11 +799,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         let mut newly_ready = Vec::new();
                         let mut newly_skipped: Vec<Task> = Vec::new();
                         blocked_tasks.retain(|task| {
-                            let states: Vec<EdgeState> = task
-                                .task_deps
-                                .iter()
-                                .map(|e| classify_edge(e, &completed_set, &failed_set, &skipped_set))
-                                .collect();
+                            let states =
+                                classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
                             if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
                                 newly_skipped.push(task.clone());
                                 return false;
@@ -712,20 +815,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                             ready_queue.push_back(t);
                         }
                         for t in newly_skipped {
-                            let reason = skip_reason_for(&t, &completed_set, &failed_set, &skipped_set);
-                            info!("Skipping task {} ({reason})", t.name);
-                            skip_reasons.insert(t.name.clone(), reason);
-                            skipped_set.insert(t.name.clone());
-                            {
-                                let mut statuses = self.task_statuses.lock().await;
-                                statuses.insert(t.name.clone(), TaskStatus::Skipped);
-                            }
-                            self.broadcast_message(TaskMessage::Finished {
-                                task_name: t.name.clone(),
-                                status: TuiTaskStatus::Skipped,
-                                timestamp: std::time::SystemTime::now(),
-                                duration_ms: 0,
-                            });
+                            let reason = skip_reason_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
+                            self.mark_skipped(&t, reason, &mut skipped_set).await;
                             completed_tasks += 1;
                         }
                     }
@@ -746,25 +837,9 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         // edges never resolved one way or another, likely because an upstream dep
         // failed and is unreachable for this task's when: condition).
         for task in blocked_tasks.drain(..) {
-            let reason = skip_reason_for(&task, &completed_set, &failed_set, &skipped_set);
-            info!("Skipping task {} ({reason})", task.name);
-            skip_reasons.insert(task.name.clone(), reason);
-            skipped_set.insert(task.name.clone());
-            {
-                let mut statuses = self.task_statuses.lock().await;
-                statuses.insert(task.name.clone(), TaskStatus::Skipped);
-            }
-            self.broadcast_message(TaskMessage::Finished {
-                task_name: task.name.clone(),
-                status: TuiTaskStatus::Skipped,
-                timestamp: std::time::SystemTime::now(),
-                duration_ms: 0,
-            });
+            let reason = skip_reason_for(&task, &serial_groups, &completed_set, &failed_set, &skipped_set);
+            self.mark_skipped(&task, reason, &mut skipped_set).await;
         }
-
-        // skip_reasons is currently only logged. A future change can surface them
-        // on the public TaskScheduler API or run-history record.
-        drop(skip_reasons);
 
         if let Some(err) = final_error {
             return Err(err);
@@ -1116,6 +1191,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         self.task_statuses.lock().await.clone()
     }
 
+    /// Reasons for tasks skipped by an unreachable dependency edge or a serial-group
+    /// cascade, keyed by task name. Up-to-date skips are absent by design.
+    pub async fn get_skip_reasons(&self) -> HashMap<String, String> {
+        self.skip_reasons.lock().await.clone()
+    }
+
     pub async fn get_task_status(&self, task_name: &str) -> TaskStatus {
         let statuses = self.task_statuses.lock().await;
         statuses.get(task_name).cloned().unwrap_or(TaskStatus::Pending)
@@ -1221,6 +1302,126 @@ mod tests {
             std::env::set_var("OTTO_DB_PATH", &db_path);
             std::env::set_var("OTTO_HOME", &otto_home);
         }
+    }
+
+    fn serial_member(name: &str, group: &str, index: usize) -> Task {
+        let mut task = Task::new(
+            name.to_string(),
+            Some(group.to_string()),
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo hi".to_string(),
+        );
+        task.serial_group = Some(group.to_string());
+        task.serial_index = index;
+        task
+    }
+
+    /// Ordering constrains the run set, it never expands it: the predecessor of a member
+    /// is the nearest preceding member THAT IS IN THE RUN SET, so a targeted subtask has
+    /// no predecessor at all.
+    #[test]
+    fn test_serial_predecessor_is_nearest_member_in_the_run_set() {
+        let tasks = vec![serial_member("up:alpha", "up", 0), serial_member("up:gamma", "up", 2)];
+        let groups = SerialGroups::new(&tasks);
+
+        assert_eq!(groups.predecessor(&tasks[0]), None);
+        assert_eq!(groups.predecessor(&tasks[1]), Some("up:alpha"));
+
+        let lone = vec![serial_member("up:gamma", "up", 2)];
+        assert_eq!(SerialGroups::new(&lone).predecessor(&lone[0]), None);
+    }
+
+    /// Every terminal state of a predecessor is covered, so the gate can never leave a
+    /// successor waiting forever.
+    #[test]
+    fn test_serial_gate_classifies_every_predecessor_terminal_state() {
+        let tasks = vec![serial_member("up:alpha", "up", 0), serial_member("up:beta", "up", 1)];
+        let groups = SerialGroups::new(&tasks);
+        let beta = &tasks[1];
+
+        let empty = std::collections::HashSet::new();
+        let one = |name: &str| std::collections::HashSet::from([name.to_string()]);
+
+        // Nothing terminal yet.
+        assert!(matches!(
+            groups.classify(beta, &empty, &empty, &empty),
+            EdgeState::Pending
+        ));
+        // Completed, or up-to-date-skipped, both land in completed_set.
+        assert!(matches!(
+            groups.classify(beta, &one("up:alpha"), &empty, &empty),
+            EdgeState::Satisfied
+        ));
+        // Failed predecessor.
+        assert!(matches!(
+            groups.classify(beta, &empty, &one("up:alpha"), &empty),
+            EdgeState::Unreachable
+        ));
+        // Skipped for any other reason, including an ordinary when: edge going unreachable.
+        assert!(matches!(
+            groups.classify(beta, &empty, &empty, &one("up:alpha")),
+            EdgeState::Unreachable
+        ));
+        // A task with no group is never gated.
+        let plain = Task::new(
+            "plain".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo hi".to_string(),
+        );
+        assert!(matches!(
+            groups.classify(&plain, &empty, &empty, &empty),
+            EdgeState::Satisfied
+        ));
+    }
+
+    /// The gate composes with dependency readiness rather than replacing it.
+    #[test]
+    fn test_classify_gates_reports_both_edges_and_ordering() {
+        let mut beta = serial_member("up:beta", "up", 1);
+        beta.task_deps = vec![TaskEdge::success("dep")];
+        let tasks = vec![serial_member("up:alpha", "up", 0), beta];
+        let groups = SerialGroups::new(&tasks);
+
+        let completed = std::collections::HashSet::from(["dep".to_string()]);
+        let empty = std::collections::HashSet::new();
+
+        // Dependency satisfied, ordering still pending -> not ready.
+        let states = classify_gates(&tasks[1], &groups, &completed, &empty, &empty);
+        assert_eq!(states.len(), 2);
+        assert!(states.iter().any(|s| matches!(s, EdgeState::Pending)));
+
+        // Both satisfied -> ready.
+        let completed = std::collections::HashSet::from(["dep".to_string(), "up:alpha".to_string()]);
+        let states = classify_gates(&tasks[1], &groups, &completed, &empty, &empty);
+        assert!(states.iter().all(|s| matches!(s, EdgeState::Satisfied)));
+    }
+
+    #[test]
+    fn test_skip_reason_names_the_serial_predecessor() {
+        let tasks = vec![serial_member("up:alpha", "up", 0), serial_member("up:beta", "up", 1)];
+        let groups = SerialGroups::new(&tasks);
+        let empty = std::collections::HashSet::new();
+
+        let failed = std::collections::HashSet::from(["up:alpha".to_string()]);
+        assert_eq!(
+            skip_reason_for(&tasks[1], &groups, &empty, &failed, &empty),
+            "serial predecessor up:alpha failed"
+        );
+
+        let skipped = std::collections::HashSet::from(["up:alpha".to_string()]);
+        assert_eq!(
+            skip_reason_for(&tasks[1], &groups, &empty, &empty, &skipped),
+            "serial predecessor up:alpha skipped; cascade"
+        );
     }
 
     #[tokio::test]

@@ -401,7 +401,14 @@ tasks:
         }
     }
 
-    // With --Serial, subtasks should be chained (each depends on previous)
+    // Parallel subtasks join no serial group either.
+    for task in tasks_parallel.iter().filter(|t| t.name.starts_with("examples:")) {
+        assert_eq!(task.serial_group, None, "{} should carry no ordering", task.name);
+    }
+
+    // With --Serial, subtasks join one ordered group. Rewritten in Phase 4 of
+    // docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md: ordering used to be
+    // sibling `before:` edges, which made `otto examples:d` drag in a, b and c.
     let args_serial = vec![
         "otto".to_string(),
         "-o".to_string(),
@@ -413,20 +420,32 @@ tasks:
     let mut parser = Parser::new(args_serial).unwrap();
     let (tasks_serial, _, _, _, _) = parser.parse().unwrap();
 
-    // Collect subtask names and their dependencies
-    let subtasks: Vec<_> = tasks_serial
-        .iter()
-        .filter(|t| t.name.starts_with("examples:"))
-        .collect();
+    let mut ordered: Vec<(usize, String)> = Vec::new();
+    for task in tasks_serial.iter().filter(|t| t.name.starts_with("examples:")) {
+        assert_eq!(
+            task.serial_group.as_deref(),
+            Some("examples"),
+            "{} should be in serial group 'examples'",
+            task.name
+        );
+        assert!(
+            !task.task_deps.iter().any(|d| d.task.starts_with("examples:")),
+            "Serial ordering must not be a sibling edge, got: {:?}",
+            task.task_deps
+        );
+        ordered.push((task.serial_index, task.name.clone()));
+    }
 
-    // Verify that at least some subtasks depend on other subtasks (chained)
-    let has_subtask_deps = subtasks
-        .iter()
-        .any(|t| t.task_deps.iter().any(|d| d.task.starts_with("examples:")));
-
-    assert!(
-        has_subtask_deps,
-        "Serial subtasks should have dependencies on previous subtasks"
+    ordered.sort();
+    assert_eq!(
+        ordered,
+        vec![
+            (0, "examples:a".to_string()),
+            (1, "examples:b".to_string()),
+            (2, "examples:c".to_string()),
+            (3, "examples:d".to_string()),
+        ],
+        "Serial subtasks should be indexed in declared foreach order"
     );
 }
 

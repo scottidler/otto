@@ -140,26 +140,7 @@ impl DagVisualizer {
         let executor_tasks: Vec<Task> = tasks
             .into_iter()
             .filter(|task| task.name != "graph") // Exclude graph task itself
-            .map(|parser_task| {
-                // Derive parent for subtasks (names with colons like "install:td")
-                let parent = if parser_task.name.contains(':') {
-                    parser_task.name.split(':').next().map(|s| s.to_string())
-                } else {
-                    None
-                };
-                let mut t = Task::new(
-                    parser_task.name,
-                    parent,
-                    parser_task.task_deps,
-                    parser_task.file_deps,
-                    parser_task.output_deps,
-                    parser_task.envs,
-                    parser_task.values,
-                    parser_task.action,
-                );
-                t.is_virtual_parent = parser_task.is_virtual_parent;
-                t
-            })
+            .map(Task::from)
             .collect();
 
         Self::create_dag_from_tasks(executor_tasks)
@@ -254,6 +235,33 @@ impl DagVisualizer {
         ))
     }
 
+    /// Consecutive (predecessor, successor) pairs of every serial foreach group in the
+    /// graph, derived from each task's group name and order index.
+    fn serial_order_pairs(dag: &DAG<Task>) -> Vec<(String, String)> {
+        let mut groups: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+        for node in dag.raw_nodes() {
+            let task = &node.weight;
+            if let Some(group) = &task.serial_group {
+                groups
+                    .entry(group.clone())
+                    .or_default()
+                    .push((task.serial_index, task.name.clone()));
+            }
+        }
+
+        let mut pairs = Vec::new();
+        let mut group_names: Vec<String> = groups.keys().cloned().collect();
+        group_names.sort();
+        for group in group_names {
+            let members = groups.get_mut(&group).expect("group name came from the map");
+            members.sort();
+            for window in members.windows(2) {
+                pairs.push((window[0].1.clone(), window[1].1.clone()));
+            }
+        }
+        pairs
+    }
+
     pub fn generate_dot(&self, dag: &DAG<Task>) -> Result<String> {
         let mut dot = String::new();
 
@@ -323,6 +331,17 @@ impl DagVisualizer {
                         ));
                     }
                 }
+            }
+        }
+
+        // Serial foreach ordering is a task property, not a dependency edge, so it has
+        // no entry in task_deps. Render it as a dashed `order` edge between consecutive
+        // group members so the ordering stays visible without claiming to be a `depends`.
+        for (source, target) in Self::serial_order_pairs(dag) {
+            if let (Some(source_id), Some(target_id)) = (task_to_id.get(&source), task_to_id.get(&target)) {
+                dot.push_str(&format!(
+                    "  {source_id} -> {target_id} [label=\"order\", color=\"gray40\", style=\"dashed\"];\n"
+                ));
             }
         }
 
@@ -782,6 +801,55 @@ mod tests {
         assert!(dot.contains("task_1"));
         assert!(dot.contains("Otto Task DAG"));
 
+        Ok(())
+    }
+
+    fn create_serial_member(name: &str, group: &str, index: usize) -> Task {
+        let mut task = create_test_task(name, vec![]);
+        task.serial_group = Some(group.to_string());
+        task.serial_index = index;
+        task
+    }
+
+    /// Serial ordering has no `task_deps` entry, so DOT renders it from the group index
+    /// as a dashed `order` edge - visually distinct from a `depends` edge, because the
+    /// two mean different things.
+    #[test]
+    fn test_dot_renders_serial_group_as_order_edges() -> Result<()> {
+        let mut dag = DAG::new();
+        dag.add_node(create_serial_member("up:alpha", "up", 0));
+        dag.add_node(create_serial_member("up:beta", "up", 1));
+        dag.add_node(create_serial_member("up:gamma", "up", 2));
+
+        let visualizer = DagVisualizer::with_defaults();
+        let dot = visualizer.generate_dot(&dag)?;
+
+        assert!(
+            dot.contains(r#"task_0 -> task_1 [label="order", color="gray40", style="dashed"];"#),
+            "expected an order edge alpha -> beta, got:\n{dot}"
+        );
+        assert!(
+            dot.contains(r#"task_1 -> task_2 [label="order", color="gray40", style="dashed"];"#),
+            "expected an order edge beta -> gamma, got:\n{dot}"
+        );
+        assert!(
+            !dot.contains(r#"label="depends""#),
+            "serial ordering must not be rendered as a depends edge, got:\n{dot}"
+        );
+        Ok(())
+    }
+
+    /// Only members actually in the graph are chained: a targeted run of one member
+    /// renders no ordering edge at all.
+    #[test]
+    fn test_dot_emits_no_order_edge_for_a_lone_group_member() -> Result<()> {
+        let mut dag = DAG::new();
+        dag.add_node(create_serial_member("up:gamma", "up", 2));
+
+        let visualizer = DagVisualizer::with_defaults();
+        let dot = visualizer.generate_dot(&dag)?;
+
+        assert!(!dot.contains(r#"label="order""#), "got:\n{dot}");
         Ok(())
     }
 

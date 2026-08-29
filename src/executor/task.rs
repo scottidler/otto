@@ -50,6 +50,13 @@ pub struct Task {
     /// of these (empty action) and aggregates their subtasks' statuses to derive the
     /// parent's final status.
     pub is_virtual_parent: bool,
+    /// Name of the serial foreach group this task belongs to (the parent task name),
+    /// or `None` when the task carries no ordering constraint. The scheduler's ready
+    /// loop gates each member on the nearest preceding member that is in the run set.
+    pub serial_group: Option<String>,
+    /// Position of this task within `serial_group`, in declared foreach order.
+    /// Meaningless when `serial_group` is `None`.
+    pub serial_index: usize,
 }
 
 impl Task {
@@ -77,6 +84,8 @@ impl Task {
             action,
             hash,
             is_virtual_parent: false,
+            serial_group: None,
+            serial_index: 0,
         }
     }
 
@@ -207,6 +216,34 @@ impl Task {
         }
 
         resolved_files
+    }
+}
+
+/// Single source of truth for parser task -> executor task conversion. Every runtime
+/// path (plain execution, TUI, graph) goes through here so a field added to one struct
+/// can't be silently dropped on one of the paths.
+impl From<crate::cli::parser::Task> for Task {
+    fn from(parser_task: crate::cli::parser::Task) -> Self {
+        // Derive parent for subtasks (names with colons like "install:td")
+        let parent = if parser_task.name.contains(':') {
+            parser_task.name.split(':').next().map(|s| s.to_string())
+        } else {
+            None
+        };
+        let mut task = Self::new(
+            parser_task.name,
+            parent,
+            parser_task.task_deps,
+            parser_task.file_deps,
+            parser_task.output_deps,
+            parser_task.envs,
+            parser_task.values,
+            parser_task.action,
+        );
+        task.is_virtual_parent = parser_task.is_virtual_parent;
+        task.serial_group = parser_task.serial_group;
+        task.serial_index = parser_task.serial_index;
+        task
     }
 }
 
