@@ -263,7 +263,7 @@ impl StateStore for MemoryStateStore {
             .cloned()
             .collect();
 
-        result.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        result.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
         result.truncate(limit);
 
         Ok(result)
@@ -274,7 +274,7 @@ impl StateStore for MemoryStateStore {
 
         let mut result: Vec<TaskRecord> = tasks.iter().filter(|t| t.run_id == run_id).cloned().collect();
 
-        result.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        result.sort_by_key(|r| r.started_at);
 
         Ok(result)
     }
@@ -284,7 +284,7 @@ impl StateStore for MemoryStateStore {
 
         let mut result: Vec<TaskRecord> = tasks.iter().filter(|t| t.name == task_name).cloned().collect();
 
-        result.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        result.sort_by_key(|r| std::cmp::Reverse(r.started_at));
         result.truncate(limit);
 
         Ok(result)
@@ -316,7 +316,7 @@ impl StateStore for MemoryStateStore {
     fn get_all_projects(&self) -> Result<Vec<ProjectSummary>> {
         let projects = self.projects.read().unwrap();
         let mut result = projects.clone();
-        result.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        result.sort_by_key(|r| std::cmp::Reverse(r.last_seen));
         Ok(result)
     }
 
@@ -377,7 +377,7 @@ impl StateStore for MemoryStateStore {
             all_stats.extend(self.get_task_stats(task_name)?);
         }
 
-        all_stats.sort_by(|a, b| b.total_executions.cmp(&a.total_executions));
+        all_stats.sort_by_key(|s| std::cmp::Reverse(s.total_executions));
 
         if let Some(limit) = limit {
             all_stats.truncate(limit);
@@ -406,7 +406,7 @@ impl StateStore for MemoryStateStore {
             .cloned()
             .collect();
 
-        result.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        result.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
         result.truncate(limit);
 
         Ok(result)
@@ -438,7 +438,7 @@ impl StateStore for MemoryStateStore {
             .cloned()
             .collect();
 
-        filtered_runs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        filtered_runs.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
 
         let keep_count = keep_last.unwrap_or(0);
         let mut runs_to_delete = Vec::new();
