@@ -739,3 +739,115 @@ OTTO_HOME=/tmp/ottohome-final2 otto ci -> exit 0, [ci] ✅ All CI checks passed!
   variable set added 30 `.tmpXXXXXX-<hash>` projects to `~/.otto/otto.db`. That
   is test hygiene across several files, not a Phase 4 bullet; it looks like Phase
   11 material.
+
+## Phase 5: Upgrade and HTTP safety
+
+### Design decisions
+
+- **The download call returns an owning handle, not a path.**
+  `DownloadedArchive` (`upgrade.rs`) holds both the `PathBuf` and the `TempDir`,
+  and `download_with_progress` returns it. The lifetime is now expressed in the
+  type instead of in a comment, so the archive cannot be deleted out from under
+  `install_from_archive` again. A test drops the handle and asserts the file
+  disappears, which pins that the cleanup is real rather than leaked with
+  `.keep()`.
+- **Install is stage-beside-then-rename, shared by upgrade and rollback.**
+  `stage_beside` copies into the *target's own directory* under
+  `.<name>.upgrade-<pid>` and chmods it; `commit_staged` renames it over the
+  target and removes the staged file if the rename fails. Both `install_binary`
+  callers (`install_from_archive` and `execute_rollback`) go through it, so the
+  rollback path cannot drift from the install path. Staging beside the target is
+  what makes the rename atomic: `tempfile::tempdir()` is usually a different
+  filesystem and `rename` across filesystems fails.
+- **Checksum verification is fail-closed and matches install.sh.**
+  `download_and_verify` fetches `<asset_url>.sha256`, the per-tarball sibling
+  `install.sh:53-60` already verifies. A missing sibling, an empty file, or
+  anything that is not a 64-character hex digest is an error, not a skipped
+  check. Verification happens before the backup and before anything touches the
+  install target.
+- **One client, two timeout regimes.** `build_http_client` sets
+  `connect_timeout` + `read_timeout` (between-bytes) and is built once per
+  command, then passed to every request. The small metadata requests (release
+  JSON, checksum sibling) additionally carry a whole-request
+  `METADATA_TIMEOUT`; the archive download deliberately does not, so a slow link
+  is not mistaken for a stall. `error_for_status()` now guards the download and
+  the checksum fetch, not just `fetch_releases`.
+- **`verify_binary` retries ETXTBSY.** Exec of a file that is open for writing
+  anywhere on the system fails with `Text file busy`, and it is transient: a
+  `fork` on another thread that momentarily inherits the write descriptor is
+  enough to cause it. Found the hard way - `otto ci` went red once on
+  `upgrade_installs_a_fixture_release_end_to_end` with `Failed to execute new
+  binary / Text file busy (os error 26)` while 653 other tests were forking in
+  parallel. Bounded at 10 attempts, 50 ms apart, and only for that errno; any
+  other spawn failure still fails immediately.
+- **Verify the binary before it replaces anything.** `install_from_archive`
+  chmods the extracted binary *before* `verify_binary` (the old order would fail
+  on any archive that did not carry the exec bit), and `execute_rollback` now
+  verifies the backup at its own path instead of copying first and verifying the
+  result.
+
+### Deviations
+
+- **Two seams added for testability, both at the correct level.**
+  `install_from_archive` now takes the install target as a parameter instead of
+  calling `env::current_exe()` internally, and `fetch_releases` takes the URL
+  instead of hardcoding it (the hardcoded value moved to a `RELEASES_URL`
+  const). The doc did not ask for either, but without them no test can exercise
+  the install without aiming at the developer's own binary. The production call
+  sites pass exactly what the old code hardcoded, so behavior is unchanged.
+- **`install_from_archive`'s unused `_version` parameter is gone**, replaced by
+  the target path. It had no readers.
+- **NEW defect found and fixed, not in any bullet: `otto Upgrade` could never
+  find its asset on linux/x86_64.** `PlatformInfo::detect` mapped
+  `("linux", "x86_64")` to `"linux"`, so `find_asset` looked for
+  `otto-v1.4.0-linux.tar.gz`. Every published asset is
+  `otto-v1.4.0-linux-amd64.tar.gz` (`install.sh:112`,
+  `release-and-publish.yml:39`). Observed against the live release API before
+  the fix: `No asset found for platform: linux (looking for
+  otto-v1.4.0-linux.tar.gz)`. This is a second, independent blocker on the same
+  success criterion as the phase's first bullet, so it is fixed here.
+  `platform_strings_match_the_published_asset_suffixes` reads `install.sh` and
+  asserts the detected suffix is one it publishes, so the two cannot drift
+  apart silently again.
+- **The stalled-connection test uses a 300 ms read timeout**, not the 60 s
+  production constant. `build_http_client` takes the timeouts as arguments for
+  exactly this reason; the production call site passes the constants.
+
+### Tradeoffs
+
+- **A hand-rolled localhost HTTP stub in the test module vs. a mock-HTTP
+  dependency.** ~50 lines of `TcpListener` against a new dev-dependency
+  (wiremock/httpmock). Chose the stub: it exercises the real reqwest client over
+  a real socket, including the stall case a mock library models rather than
+  reproduces, and adds nothing to the dependency tree.
+- **`read_timeout` on the download rather than a total `timeout`.** A total cap
+  would abort a legitimately slow download of a 15 MB release; a between-bytes
+  cap fails only when data actually stops arriving. The cost is that a server
+  that dribbles one byte per 59 seconds is never cut off.
+- **Staging debris is named `.<binary>.upgrade-<pid>`, cleaned only on a failed
+  rename.** A process killed between staging and rename leaves the staged file
+  beside the binary. That is the deliberate choice: the alternative (cleaning on
+  drop) would need a guard type whose only job is to delete a file that is
+  harmless, and leaving it is what makes the interrupted-upgrade case *safe* -
+  the original binary is untouched and still executable.
+
+### Open questions
+
+- **The published release binary cannot upgrade itself on linux/x86_64, and
+  cannot until a release ships with this fix.** The asset-name defect above
+  means every installed `otto` (v1.4.0 and earlier) fails with "No asset found
+  for platform: linux". The rollout note at `2026-06-10:534` says the release
+  notes should record that `otto Upgrade` did not work before this lands; that
+  note should now also say users must re-run `install.sh` rather than
+  `otto Upgrade` to get onto the fixed version, because the broken binary cannot
+  bootstrap itself.
+- **`ports/http.rs` is still present.** `git grep -c ReleaseFetcher src/` returns
+  non-zero because Phase 9 owns the deletion. Phase 5's success criteria list
+  that grep, but the Resolved Decision of 2026-08-29 assigns the removal to
+  Phase 9; nothing was hardened in the dead module.
+- **`verify_binary` runs the downloaded binary with `--version` before
+  installing it.** That is executing an unverified-by-signature artifact, which
+  the checksum makes tamper-evident but not trusted: the checksum sibling comes
+  from the same host as the tarball, so an attacker who controls the release
+  host controls both. Signature verification (minisign/cosign) is the real
+  answer and is not in any phase of this document.
