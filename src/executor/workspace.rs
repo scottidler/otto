@@ -34,10 +34,32 @@ impl Default for ExecutionContext {
     }
 }
 
+/// The process's current directory, or an error that says which operation
+/// failed and why it plausibly failed.
+///
+/// Every production caller used to go through a bare `env::current_dir()?`.
+/// `io::Error`'s Display is just `No such file or directory (os error 2)`: no
+/// operation, no path, nothing a user can act on. Running otto from a deleted
+/// directory printed exactly that and exited 1. The one place that did say
+/// something - the `warn!` in `ExecutionContext::new` below - was unreachable,
+/// because every one of those bare calls runs first and aborts.
+///
+/// Routing them all through here makes the failure observable twice: a `warn!`
+/// naming the operation for anyone with logging on, and an error message that
+/// names it for everyone else.
+pub fn current_dir() -> Result<PathBuf> {
+    std::env::current_dir().map_err(|e| {
+        warn!("current_dir() failed ({e}); the current directory may have been deleted or become unreadable");
+        eyre!("cannot determine the current directory (it may have been deleted, or be unreadable): {e}")
+    })
+}
+
 impl ExecutionContext {
     pub fn new() -> Self {
-        let cwd = std::env::current_dir().unwrap_or_else(|e| {
-            warn!("current_dir() failed ({e}), falling back to \"/\"");
+        // Same warn, same wording, via the shared helper - this fallback is the
+        // one caller that substitutes a default instead of propagating.
+        let cwd = current_dir().unwrap_or_else(|_| {
+            warn!("falling back to \"/\" as the current directory");
             PathBuf::from("/")
         });
         let timestamp = std::time::SystemTime::now()

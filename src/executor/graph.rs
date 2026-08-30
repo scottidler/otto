@@ -818,7 +818,7 @@ impl DagVisualizer {
         let output_path = if let Some(ref path) = self.options.output_path {
             path.clone()
         } else {
-            std::env::current_dir()?.join(format!("otto_graph.{extension}"))
+            crate::executor::workspace::current_dir()?.join(format!("otto_graph.{extension}"))
         };
 
         Ok((format.to_string(), output_path))

@@ -442,7 +442,7 @@ pub async fn execute_with_terminal_output(
         return Ok(());
     }
 
-    let cwd = env::current_dir()?;
+    let cwd = crate::executor::workspace::current_dir()?;
     let root = ottofile_base_dir(ottofile_path.as_deref(), &cwd).to_path_buf();
     let workspace = Workspace::new(root).await?;
     workspace.init().await?;
@@ -509,7 +509,7 @@ pub async fn execute_with_tui(
         return Ok(());
     }
 
-    let cwd = env::current_dir()?;
+    let cwd = crate::executor::workspace::current_dir()?;
     let root = ottofile_base_dir(ottofile_path.as_deref(), &cwd).to_path_buf();
     let workspace = Workspace::new(root).await?;
     workspace.init().await?;

@@ -578,7 +578,7 @@ pub struct Parser {
 impl Parser {
     pub fn new(args: Vec<String>) -> Result<Self> {
         let prog = args.first().cloned().unwrap_or_else(|| "otto".to_string());
-        let cwd = env::current_dir()?;
+        let cwd = crate::executor::workspace::current_dir()?;
         let user = env::var("USER").unwrap_or_else(|_| "unknown".to_string());
 
         Ok(Self {

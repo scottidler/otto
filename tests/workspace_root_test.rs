@@ -169,3 +169,50 @@ tasks:
         fs::canonicalize(root).unwrap(),
     );
 }
+
+/// Running otto from a directory that no longer exists must say so.
+///
+/// It used to print a bare `No such file or directory (os error 2)` and exit
+/// 1, naming neither the operation nor a path, because every production caller
+/// went through `env::current_dir()?` directly. Phase 9 added a `warn!` for
+/// exactly this case in `ExecutionContext::new`, but nothing could ever reach
+/// it: the bare calls all run first and abort. Both halves are pinned here -
+/// the user-visible error, and the log line.
+///
+/// Spawned through `sh` because `Command::current_dir` cannot express it: the
+/// spawn itself fails with ENOENT before otto is ever exec'd. The shell has to
+/// delete its own cwd and then exec.
+#[test]
+fn a_deleted_cwd_names_the_failure_instead_of_a_bare_enoent() {
+    let temp = tempdir().unwrap();
+    let data_home = temp.path().join("data");
+    let doomed = temp.path().join("doomed");
+    fs::create_dir_all(&doomed).unwrap();
+
+    let script = format!(
+        "cd {doomed} && rmdir {doomed} && exec {otto} --help",
+        doomed = doomed.display(),
+        otto = common::OTTO_BIN,
+    );
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr was: {stderr}");
+    assert!(
+        stderr.contains("cannot determine the current directory"),
+        "the error must name the operation, not just repeat the OS message; got: {stderr}"
+    );
+
+    let log = fs::read_to_string(data_home.join("otto").join("logs").join("otto.log"))
+        .expect("otto should have written its log file");
+    assert!(
+        log.contains("WARN") && log.contains("current_dir() failed"),
+        "the warn for a failed current_dir() must actually be reachable; log was:\n{log}"
+    );
+}

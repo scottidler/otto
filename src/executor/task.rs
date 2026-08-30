@@ -3,7 +3,6 @@ use eyre::Result;
 use hex;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use crate::cfg::config::Value;
 use crate::cfg::edge::When;
@@ -106,7 +105,10 @@ impl Task {
     }
 
     pub fn from_task(task_spec: &TaskSpec) -> Result<Self> {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Was `unwrap_or_else(|_| PathBuf::from("."))`: the error was discarded
+        // and a task silently ran against a relative path instead of the
+        // directory the caller meant. The function already returns `Result`.
+        let cwd = crate::executor::workspace::current_dir()?;
 
         Self::from_task_with_cwd_and_global_envs(task_spec, &cwd, &HashMap::new())
     }
