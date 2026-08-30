@@ -2,7 +2,7 @@
 
 **Author:** Scott A. Idler
 **Date:** 2026-08-30
-**Status:** In Progress — batches 1-4 complete, 5-14 outstanding
+**Status:** In Progress — batches 1-6 complete, 7-14 outstanding
 **Subject doc:** `docs/design/2026-06-10-code-review-remediation.md` (`Status: Implemented`)
 **HEAD at handoff:** `a567af9` (batches 3-4 audited at `6b28b52`, fixed through `16c2975`)
 
@@ -36,8 +36,8 @@ verdicts than items is rejected and re-run.
 | 2 | Phase 1 — Silent-success criticals | 320-335 | 10 | **DONE** — 1 must-fix, fixed at `a567af9` |
 | 3 | Phase 2 — Conditional-deps and foreach semantics | 336-360 | 8 | **DONE** — 1 must-fix, fixed at `5558ae9` |
 | 4 | Phase 3 — Containment (injection, deletion, output) | 361-379 | 9 | **DONE** — 2 must-fix, fixed at `42704a9`, `16c2975` |
-| 5 | Phase 4 — State and DB integrity | 380-403 | 10 | TODO |
-| 6 | Phase 5 — Upgrade and HTTP safety | 404-413 | 4 | TODO |
+| 5 | Phase 4 — State and DB integrity | 380-403 | 10 | **DONE** — 2 must-fix, fixed at `a10f911`, `0254baa` |
+| 6 | Phase 5 — Upgrade and HTTP safety | 404-413 | 4 | **DONE** — 1 must-fix, fixed at `e71638e` |
 | 7 | Phase 6 — cfg correctness | 414-448 | 10 | TODO |
 | 8 | Phase 7 — Makefile converter truth | 449-464 | 7 | TODO |
 | 9 | Phase 8 — TUI and CLI surface | 465-485 | 10 | TODO |
@@ -272,6 +272,104 @@ class this whole doc exists to kill, but the fix picks a source of truth for
 key names (the JSON, or a parallel key list) and that is a design decision, not
 an audit finding to apply unilaterally. Left for the user.
 
+### Batch 5 (Phase 4) — 2 must-fix, 4 cheap-win
+
+All ten bullets landed as specified. Two live defects sat in the gaps between
+them, both found by running concurrent processes rather than by reading.
+
+**Must-fix 1, concurrent cold start lost runs silently.** Five processes racing a
+database that does not exist yet persisted as few as 1 of 5, every one exiting 0
+with empty stderr. Two defects stacked:
+
+1. `migrations.rs`'s `current_version == 0` branch was the one branch with no
+   transaction (Phase 4 wrapped the four upgrade branches and left initialize
+   bare), and `set_version` was a bare `INSERT` into a PRIMARY KEY column, so
+   losers died on `UNIQUE constraint failed: schema_version.version`.
+2. Underneath it, `db.rs` set `busy_timeout` **after** the `journal_mode=WAL`
+   pragma, so the one statement needing a brief exclusive lock ran with a zero
+   timeout: `Failed to enable WAL mode: database is locked`.
+
+**A trap worth recording for whoever fixes something like this.** The first fix
+attempt used `conn.unchecked_transaction()` and made it *worse*, 1-2 of 5,
+because that is a DEFERRED transaction: it starts read-only, must upgrade to a
+write lock on first write, and SQLite returns SQLITE_BUSY immediately for that
+upgrade rather than deadlock, so `busy_timeout` cannot cover it. `BEGIN
+IMMEDIATE` takes the lock up front, which is the case `busy_timeout` does cover.
+Only re-measuring caught this; the fix looked obviously correct. Fixed at
+`0254baa`. After: 12 trials of 5 racers and 8 of 10 racers, all persist.
+
+**Must-fix 2, same-second runs shared one directory.** Bullet 2 dropped
+`UNIQUE(runs.timestamp)` so the rows stopped colliding; the directory still
+collided, because `layout.rs` named it after the timestamp alone. N same-second
+runs became N rows pointing at ONE directory: they raced creating it (`File
+exists (os error 17)`), overwrote each other's task logs, and cleaning any one of
+them left the others with a dangling `run_dir`. The criterion "two runs started
+in the same second both persist" was true of the rows and false of their
+artifacts. Fixed at `a10f911` by reserving the directory with an exclusive
+create, `<timestamp>` then `<timestamp>-<seq>`, plus the matching parser so
+fs-mode clean does not walk past the suffixed ones and leak them.
+
+**These two interlock, which is worth knowing before splitting work like this.**
+Must-fix 1's regression test spawns 8 racers, which all start in the same second,
+so it could not pass until must-fix 2 was fixed. The `File exists` error looked
+like a third defect and was not.
+
+Cheap-wins: `manager.rs:646,804` still used `and_then(TaskStatus::parse)`,
+nulling an unknown status while bullet 9 closed that exact conflation at `:445`
+(fixed, `173407f`); `Clean` reported bytes it never freed for runs whose
+directory was already gone, because `delete_run` returns `Ok(Some(..))` either
+way (fixed, `42dce98`); the `status='completed'` criterion can never be true, the
+runs table stores `success` (doc); the preamble says nine bullets and there are
+ten (doc).
+
+**Also chased and closed: an apparent data loss that was not one.** The batch
+flagged 352 runs / 446 tasks / 136 projects missing from `~/.otto/otto.db`
+against the `pre-phase11-backup`. Of the 352, 15 are project `clyde` older than
+the 30-day retention cutoff (normal), and every one of the other 232 in-window
+rows belongs to a `.tmp*` project: integration-test runs that leaked into the
+real database before the `OTTO_HOME` isolation fix. Filtering for missing rows
+whose project is not `.tmp%` returns nothing. Nothing real was lost.
+
+### Batch 6 (Phase 5) — 1 must-fix, 2 cheap-win
+
+The upgrade path genuinely works end to end and rolls back correctly, proven by
+driving the real CLI, including a self-replacing install (the ETXTBSY case
+`fs::copy` would have failed) and 10 SIGKILL trials landing inside the copy
+window with the original intact 9 of 9. The defect is that the phase's own
+criterion for it was never tested.
+
+**Must-fix, a criterion nothing could satisfy.** "`otto Upgrade` completes an
+install end-to-end against a fixture release" had no test: `RELEASES_URL` was a
+const with no injection point and the install target was `env::current_exe()`, so
+`execute_upgrade`/`execute_rollback` structurally could not be aimed at a
+fixture, and both had zero test call sites. The test that stood in for it
+hand-composed `download_and_verify` + `install_from_archive`, skipping
+`current_version`, the already-on-target and downgrade short-circuits,
+`find_asset` and `create_backup`. Same for rollback. Fixed at `e71638e`.
+
+**Proven by mutation, which is the standard this audit should hold to.** Breaking
+`find_asset` leaves the OLD end-to-end test green and fails both new ones;
+making rollback restore onto itself leaves the OLD rollback test green and fails
+the new one.
+
+**Security note for anyone touching this again.** The injection point is two
+`#[arg(skip)]` fields written only by a `#[cfg(test)]` builder. It must never
+become a flag or an `env =`: a settable releases URL turns self-upgrade into
+"download and execute a binary from wherever this string points". Verified
+closed: `--releases-url` gives `error: unexpected argument`.
+
+Cheap-wins outstanding: a signal-killed upgrade orphans `.otto.upgrade-<pid>`
+beside the binary and nothing reaps it, while `commit_staged`'s comment claims a
+failed upgrade "leaves no debris" (true for a returned Err, false for SIGKILL);
+the `git grep -c ReleaseFetcher src/` criterion prints nothing and exits 1 rather
+than printing 0 (doc, same defect batch 2 found in Phase 1).
+
+One correction to the batch's report: it listed `clean.rs:270` as printing a
+refusal without its cause. It does print the cause, and `manager.rs:1016`
+propagates with `?`. The real residue is narrower: `clean.rs` `continue`s past a
+refusal so Clean can exit 0 having refused, and that branch is reachable only by
+a TOCTOU race since both scans already skip symlinks.
+
 ## Standing rules for whoever continues
 
 ### Verification standard
@@ -296,6 +394,20 @@ an audit finding to apply unilaterally. Left for the user.
 - Do not treat an idle notification as a completion signal. Several arrived as
   stale restatements of earlier status, and acting on one caused the
   two-writer collision. Check `git log` and the working tree instead.
+
+### New gotchas, learned in batches 5 and 6
+- **`conn.unchecked_transaction()` is DEFERRED.** It starts read-only and must
+  upgrade to a write lock on first write, and SQLite returns SQLITE_BUSY for
+  that upgrade immediately rather than deadlock, so `busy_timeout` does not
+  cover it. Use `BEGIN IMMEDIATE` for anything that will write. A fix using the
+  deferred form measured *worse* than the bug it replaced.
+- **`/tmp` is a 16 GB tmpfs and the panels fill it.** A full `cargo test` fails
+  with two log-rotation tests writing 11 MB each, which reads as a code
+  regression and is not. Check `df -h /tmp` before believing a test failure in
+  `test_rotate_log_*`. Stale panel scratch (`*-target` dirs, upgrade fixtures)
+  is the usual culprit; ~11 GB was reclaimed during batch 5-6 cleanup.
+- **Probe litter is the panel lead's to clean.** Cold-start race trials create a
+  run directory per racer per trial.
 
 ### Gotchas
 - Ottofile syntax: `after:`/`before:` take sequences (`after: [build]`);
