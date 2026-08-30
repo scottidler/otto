@@ -602,3 +602,72 @@ fn double_dollar_is_a_literal_dollar() {
         "an escaped substitution must stay text"
     );
 }
+
+/// A long chain resolves regardless of depth, and regardless of the order the
+/// map happens to hand its keys over.
+///
+/// The pass budget was a flat 100 while the seed order came straight off a
+/// HashMap, so how many passes a chain needed varied run to run: measured over
+/// 20 runs of one unchanged 200-deep ottofile, 9 resolved and 11 exited 1 with
+/// "Maximum iterations reached". The budget is now one pass per key, which is a
+/// bound no resolvable map can exceed.
+#[test]
+fn a_deep_chain_resolves_at_any_depth() {
+    for depth in [105usize, 200, 250, 400] {
+        let mut envs = HashMap::new();
+        envs.insert("V0".to_string(), "base".to_string());
+        for i in 1..=depth {
+            envs.insert(format!("V{i}"), format!("${{V{}}}-{i}", i - 1));
+        }
+
+        let evaluated =
+            evaluate_envs(&envs, None).unwrap_or_else(|e| panic!("a {depth}-deep chain must resolve, got: {e}"));
+
+        let tail = evaluated
+            .get(&format!("V{depth}"))
+            .unwrap_or_else(|| panic!("V{depth} missing at depth {depth}"));
+        assert!(
+            tail.starts_with("base-1-2-3-"),
+            "chain resolved wrong at {depth}: {tail}"
+        );
+        assert!(
+            tail.ends_with(&format!("-{depth}")),
+            "chain truncated at {depth}: {tail}"
+        );
+    }
+}
+
+/// Repeating one resolution gives the same answer every time. The failure this
+/// pins was not a wrong answer, it was two different answers for one input.
+#[test]
+fn a_deep_chain_resolves_identically_across_repeats() {
+    let mut envs = HashMap::new();
+    envs.insert("V0".to_string(), "base".to_string());
+    for i in 1..=200 {
+        envs.insert(format!("V{i}"), format!("${{V{}}}-{i}", i - 1));
+    }
+
+    let first = evaluate_envs(&envs, None).expect("first pass must resolve");
+    for run in 2..=10 {
+        let again =
+            evaluate_envs(&envs, None).unwrap_or_else(|e| panic!("run {run} of the same map must resolve, got: {e}"));
+        assert_eq!(first, again, "run {run} disagreed with run 1 on identical input");
+    }
+}
+
+/// Raising the budget must not make a real cycle resolvable: the no-progress
+/// branch still owns cycles and still names them.
+#[test]
+fn a_cycle_still_fails_closed_with_the_per_key_budget() {
+    let mut envs = HashMap::new();
+    envs.insert("X".to_string(), "${Y}-x".to_string());
+    envs.insert("Y".to_string(), "${X}-y".to_string());
+
+    let err = evaluate_envs(&envs, None)
+        .expect_err("a cycle must not resolve")
+        .to_string();
+    assert!(
+        err.contains("Circular dependency between environment variables"),
+        "a cycle must be reported as one, got: {err}"
+    );
+}
