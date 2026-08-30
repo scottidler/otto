@@ -11,23 +11,26 @@ across repos is required.
 
 | repo | offending key | fix |
 |---|---|---|
-| `tatari-tv/devs` | root `envs:` | Move the block under `otto:` (i.e. `otto.envs:`). |
-| `tatari-tv/github-setup` | root `envs:` | Move the block under `otto:` (i.e. `otto.envs:`). |
-| `tatari-tv/auth-svc` | `tasks.dev.timeout` | Delete the key. No such key exists on any task, under any name, in this or any prior schema. |
+| `work repo A` | root `envs:` | Move the block under `otto:` (i.e. `otto.envs:`). |
+| `work repo B` | root `envs:` | Move the block under `otto:` (i.e. `otto.envs:`). |
+| `work repo C` | `tasks.dev.timeout` | Delete the key. No such key exists on any task, under any name, in this or any prior schema. |
 
 `scottidler/otto-old` is dead and needs nothing.
+
+The three repos are identified generically here because this repository is
+public. Each owner knows which one is theirs from the offending key.
 
 ## Why the first two are not cosmetic
 
 Root `envs:` has never been a real key (see
-`docs/commands/ottofile-reference.md`). Both `tatari-tv/devs` and
-`tatari-tv/github-setup` wrote environment variables there under a
+`docs/commands/ottofile-reference.md`). Both `work repo A` and
+`work repo B` wrote environment variables there under a
 `# Environment variables` comment, and neither block has ever applied:
 before this change, the unknown root key was silently discarded and the
 tasks ran with those variables `[UNSET]`.
 
 Moving the block under `otto:` makes it a real, honored key for the first
-time. Concretely, `tatari-tv/devs` would gain `GOMODCACHE`, `GOCACHE`,
+time. Concretely, `work repo A` would gain `GOMODCACHE`, `GOCACHE`,
 `VERSION`, and `BUILD` in every task, values it has never actually had. **That
 is a behavior change**, not a syntax fix, and needs testing in that repo, by
 its owner, before merging.
@@ -38,7 +41,7 @@ now) and requires no testing beyond confirming the ottofile loads. Either
 fix satisfies strict parsing; only one of them changes what the tasks
 actually do.
 
-## `tatari-tv/auth-svc`
+## `work repo C`
 
 `tasks.dev.timeout` has no meaning in any otto schema version and was always
 discarded. Deleting it is the only fix; there is no key to move it to,

@@ -197,10 +197,10 @@ otto python-interactive
 
 ## The Original Use Case
 
-You mentioned starting this from a shell task in `~/repos/tatari-tv/pr`. Here's how that would work now:
+You mentioned starting this from a shell task in `~/repos/example-org/pr`. Here's how that would work now:
 
 ```yaml
-# ~/repos/tatari-tv/pr/otto.yml
+# ~/repos/example-org/pr/otto.yml
 tasks:
   shell:
     help: "Interactive development shell"
