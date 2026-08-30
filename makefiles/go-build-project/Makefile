@@ -14,11 +14,11 @@ all: unit-test type-check lint build
 .PHONY: build
 build:
 	mkdir -p dist
-	go build -o dist/devs cmd/devs/main.go
+	go build -o dist/example cmd/example/main.go
 
 .PHONY: run
 run: build
-	./dist/devs 2> err.log
+	./dist/example 2> err.log
 
 # Testing related targets
 .PHONY: unit-test

@@ -2,8 +2,8 @@ use otto::makefile::{MakefileParser, OttoConverter};
 use std::fs;
 
 #[test]
-fn test_convert_devs_makefile() {
-    let makefile_path = "makefiles/devs/Makefile";
+fn test_convert_go_build_project_makefile() {
+    let makefile_path = "makefiles/go-build-project/Makefile";
     let content = fs::read_to_string(makefile_path).unwrap_or_else(|_| panic!("Failed to read {}", makefile_path));
 
     let mut parser = MakefileParser::new(content);
@@ -22,8 +22,8 @@ fn test_convert_devs_makefile() {
 }
 
 #[test]
-fn test_convert_auth_svc_makefile() {
-    let makefile_path = "makefiles/auth-svc/Makefile";
+fn test_convert_python_poetry_service_makefile() {
+    let makefile_path = "makefiles/python-poetry-service/Makefile";
     let content = fs::read_to_string(makefile_path).unwrap_or_else(|_| panic!("Failed to read {}", makefile_path));
 
     let mut parser = MakefileParser::new(content);
@@ -64,8 +64,8 @@ fn test_convert_makefile_example() {
 }
 
 #[test]
-fn test_convert_pre_commit_hooks_makefile() {
-    let makefile_path = "makefiles/pre-commit-hooks/Makefile";
+fn test_convert_python_pre_commit_makefile() {
+    let makefile_path = "makefiles/python-pre-commit/Makefile";
     let content = fs::read_to_string(makefile_path).unwrap_or_else(|_| panic!("Failed to read {}", makefile_path));
 
     let mut parser = MakefileParser::new(content);
@@ -80,8 +80,8 @@ fn test_convert_pre_commit_hooks_makefile() {
 }
 
 #[test]
-fn test_convert_media_planning_service_makefile() {
-    let makefile_path = "makefiles/media-planning-service/Makefile";
+fn test_convert_docker_compose_service_makefile() {
+    let makefile_path = "makefiles/docker-compose-service/Makefile";
     let content = fs::read_to_string(makefile_path).unwrap_or_else(|_| panic!("Failed to read {}", makefile_path));
 
     let mut parser = MakefileParser::new(content);

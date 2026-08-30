@@ -137,39 +137,39 @@ fn test_data_passing_demo_validation() {
 // ============================================================================
 
 #[test]
-fn test_makefile_auth_svc_parses() {
+fn test_makefile_python_poetry_service_parses() {
     let mut cmd = otto_cmd();
-    cmd.current_dir("makefiles/auth-svc");
+    cmd.current_dir("makefiles/python-poetry-service");
     cmd.arg("--help");
     let output = cmd.output().expect("Failed to run otto");
-    assert!(output.status.success(), "auth-svc should parse");
+    assert!(output.status.success(), "python-poetry-service should parse");
 }
 
 #[test]
-fn test_makefile_devs_parses() {
+fn test_makefile_go_build_project_parses() {
     let mut cmd = otto_cmd();
-    cmd.current_dir("makefiles/devs");
+    cmd.current_dir("makefiles/go-build-project");
     cmd.arg("--help");
     let output = cmd.output().expect("Failed to run otto");
-    assert!(output.status.success(), "devs should parse");
+    assert!(output.status.success(), "go-build-project should parse");
 }
 
 #[test]
-fn test_makefile_pre_commit_hooks_parses() {
+fn test_makefile_python_pre_commit_parses() {
     let mut cmd = otto_cmd();
-    cmd.current_dir("makefiles/pre-commit-hooks");
+    cmd.current_dir("makefiles/python-pre-commit");
     cmd.arg("--help");
     let output = cmd.output().expect("Failed to run otto");
-    assert!(output.status.success(), "pre-commit-hooks should parse");
+    assert!(output.status.success(), "python-pre-commit should parse");
 }
 
 #[test]
-fn test_makefile_media_planning_service_parses() {
+fn test_makefile_docker_compose_service_parses() {
     let mut cmd = otto_cmd();
-    cmd.current_dir("makefiles/media-planning-service");
+    cmd.current_dir("makefiles/docker-compose-service");
     cmd.arg("--help");
     let output = cmd.output().expect("Failed to run otto");
-    assert!(output.status.success(), "media-planning-service should parse");
+    assert!(output.status.success(), "docker-compose-service should parse");
 }
 
 #[test]

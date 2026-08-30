@@ -3983,7 +3983,24 @@ tasks:
     /// builder. Pinned so a builder that stops calling `global_args()` (or a
     /// change to `global_args()` that isn't propagated) fails loudly instead
     /// of silently dropping flags from `--help` again.
-    const EXPECTED_GLOBAL_OPTIONS_HELP: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile\n          \n          [env: OTTOFILE=]\n          [default: .]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n      --tasks\n          Print the machine-readable task list and exit\n\n      --format <FORMAT>\n          Output format for --tasks (yaml or json); default: yaml on a tty, json when piped\n          \n          [possible values: yaml, json]\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: 32]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n      --no-prefix\n          Suppress the [task] prefix on task output\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
+    ///
+    /// `{JOBS}` stands in for `-j/--jobs`'s default, which is `DEFAULT_JOBS`
+    /// (`num_cpus::get()` on the machine that renders the help text, not a
+    /// fixed number). A literal `32` here pinned this test to the developing
+    /// machine's core count: green locally, red on any runner with a
+    /// different core count (`docs/design/2026-06-10-code-review-remediation.md`
+    /// Phase 0). `expected_global_options_help()` below substitutes the real
+    /// default at test time so the anti-drift check still holds everywhere
+    /// else in the string.
+    const EXPECTED_GLOBAL_OPTIONS_HELP_TEMPLATE: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile\n          \n          [env: OTTOFILE=]\n          [default: .]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n      --tasks\n          Print the machine-readable task list and exit\n\n      --format <FORMAT>\n          Output format for --tasks (yaml or json); default: yaml on a tty, json when piped\n          \n          [possible values: yaml, json]\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: {JOBS}]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n      --no-prefix\n          Suppress the [task] prefix on task output\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
+
+    /// Renders `EXPECTED_GLOBAL_OPTIONS_HELP_TEMPLATE` against this
+    /// machine's actual `-j/--jobs` default, so the comparison is exact
+    /// everywhere except the one value that is legitimately
+    /// machine-dependent.
+    fn expected_global_options_help() -> String {
+        EXPECTED_GLOBAL_OPTIONS_HELP_TEMPLATE.replace("{JOBS}", &DEFAULT_JOBS)
+    }
 
     /// Extracts the `Options:` section, from the `Options:` heading through
     /// the auto-appended `-V, --version` entry (always the last flag clap
@@ -4014,20 +4031,38 @@ tasks:
         let help_cmd_help = parser.build_help_command().render_long_help().to_string();
         let help_cmd_error_help = Parser::build_help_command_with_error().render_long_help().to_string();
 
+        let expected = expected_global_options_help();
         assert_eq!(
             options_section(&otto_cmd_help),
-            EXPECTED_GLOBAL_OPTIONS_HELP,
+            expected,
             "otto_command() global flags drifted from the pinned snapshot"
         );
         assert_eq!(
             options_section(&help_cmd_help),
-            EXPECTED_GLOBAL_OPTIONS_HELP,
+            expected,
             "build_help_command() global flags drifted from the pinned snapshot"
         );
         assert_eq!(
             options_section(&help_cmd_error_help),
-            EXPECTED_GLOBAL_OPTIONS_HELP,
+            expected,
             "build_help_command_with_error() global flags drifted from the pinned snapshot"
+        );
+    }
+
+    /// `expected_global_options_help()` must reflect this machine's actual
+    /// `-j/--jobs` default rather than a value baked in at write time - the
+    /// exact bug this fix closes. Locks the substitution itself, not just
+    /// the drift check that depends on it.
+    #[test]
+    fn test_expected_global_options_help_substitutes_actual_jobs_default() {
+        let expected = expected_global_options_help();
+        assert!(
+            expected.contains(&format!("[default: {}]", num_cpus::get())),
+            "expected help must reflect this machine's num_cpus::get(), got: {expected}"
+        );
+        assert!(
+            !expected.contains("{JOBS}"),
+            "template placeholder must be fully substituted"
         );
     }
 

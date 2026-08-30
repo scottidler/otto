@@ -1,10 +1,10 @@
 # define vars
-CERTS_DIR	?= ./certs/tatari
+CERTS_DIR	?= ./certs/example
 
 .DEFAULT_GOAL := dev
 
 .PHONY: all
- all: dev unit-test integration-test type-check lint
+all: dev unit-test integration-test type-check lint
 
 # Dev
 .PHONY: dev
@@ -14,7 +14,7 @@ dev:
 
 .PHONY: unit-test
 unit-test: dev
-	env ENV=ci poetry run pytest --junitxml=pytest.xml --cov=auth_svc tests/unit
+	env ENV=ci poetry run pytest --junitxml=pytest.xml --cov=example_service tests/unit
 
 .PHONY: integration-test
 integration-test: dev

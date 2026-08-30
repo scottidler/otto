@@ -16,7 +16,20 @@ permissions:
   packages: write
 
 jobs:
+  # Shared with `CI` (`checks.yml`). A tag push does not trigger `CI` (`CI`
+  # is `push: branches`, `Release` is `push: tags`), so there is frequently
+  # no CI run for this exact SHA to query - this re-runs the same checks
+  # for the tagged SHA rather than racing or failing open on `workflow_run`.
+  checks:
+    uses: ./.github/workflows/checks.yml
+    # Reusable-workflow permissions can only be downgraded from the
+    # caller's, never raised, so this is set explicitly rather than
+    # inherited from this workflow's `contents: write` / `packages: write`.
+    permissions:
+      contents: read
+
   build-linux:
+    needs: checks
     runs-on: ubuntu-latest
     container: debian:bookworm
     strategy:
@@ -89,6 +102,7 @@ jobs:
             otto-${{ github.ref_name }}-${{ matrix.suffix }}.tar.gz.sha256
 
   build-macos:
+    needs: checks
     runs-on: macos-14
     strategy:
       matrix:

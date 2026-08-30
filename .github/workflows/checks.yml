@@ -1,0 +1,54 @@
+name: Checks
+
+# Reusable workflow: the one definition of "did the suite pass" that both
+# `CI` (on every push/PR) and `Release` (on every tag push) call, so the
+# release gate cannot drift from what CI actually runs.
+#
+# `env` set on a *caller* workflow does not propagate into a workflow
+# invoked via `workflow_call`, so RUST_VERSION is pinned here rather than
+# inherited from CI's or Release's own `env:` block.
+on:
+  workflow_call:
+
+env:
+  RUST_VERSION: 1.96.0
+  CARGO_TERM_COLOR: always
+
+# Reusable-workflow permissions can only be *downgraded* by the caller, not
+# raised, so this is the ceiling: read-only. Release's caller job explicitly
+# sets the same read-only permissions rather than inheriting its own
+# `contents: write` / `packages: write`.
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ env.RUST_VERSION }}
+        components: rustfmt, clippy
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: "v1-rust"
+
+    - name: Install otto (dogfood - this repo's own checks run through otto)
+      run: cargo install --path . --locked
+
+    # `otto quick` runs compile + clippy + fmt-check + test as independent
+    # siblings (`.otto.yml`), so one failing check does not hide the others
+    # and the invocation can never drift from what a contributor runs
+    # locally. `otto ci` also includes `lint`, which shells out to a
+    # personal `whitespace` binary with no published release; that has no
+    # CI-portable install path, so it stays a local-only check and is not
+    # run here (unchanged from the CI behavior this replaces, which never
+    # ran it either).
+    - name: Run otto quick (compile + clippy + fmt-check + test)
+      run: otto quick

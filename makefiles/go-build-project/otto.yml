@@ -1,4 +1,4 @@
-# Otto configuration for Go devs project
+# Otto configuration for a Go project
 # Translated from Makefile
 
 otto:
@@ -29,14 +29,14 @@ tasks:
       export GOPATH="${HOME}/go"
       export GOMODCACHE="${HOME}/go/pkg/mod"
       mkdir -p dist
-      go build -o dist/devs cmd/devs/main.go
+      go build -o dist/example cmd/example/main.go
 
   # Run the built binary
   run:
     help: "Run the built binary"
     before: [build]
     bash: |
-      ./dist/devs 2> err.log
+      ./dist/example 2> err.log
 
   # Testing related tasks
   unit-test:

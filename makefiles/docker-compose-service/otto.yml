@@ -8,7 +8,7 @@ otto:
     GIT_DESCRIBE: "$(git describe --always --abbrev=7)"
     PYPI_USERNAME: "$(cat ~/.config/pip/pip.conf | grep extra-index-url | awk -F '[//|@]' '{print $3}' | awk -F '[:]' '{print $1}' 2>/dev/null || echo '')"
     PYPI_PASSWORD: "$(cat ~/.config/pip/pip.conf | grep extra-index-url | awk -F '[//|@]' '{print $3}' | awk -F '[:]' '{print $2}' 2>/dev/null || echo '')"
-    LOCAL_DUMP_FILE: "./schema/local-db/media-planning-service-pgdump.tar.gz"
+    LOCAL_DUMP_FILE: "./schema/local-db/example-service-pgdump.tar.gz"
 
 tasks:
   # Main comprehensive task
@@ -36,7 +36,7 @@ tasks:
     before: [dev]
     bash: |
       #!/bin/bash
-      poetry run pytest --junitxml=pytest.xml --cov=media_planning_service tests/unit --log-cli-level=CRITICAL
+      poetry run pytest --junitxml=pytest.xml --cov=example_service tests/unit --log-cli-level=CRITICAL
 
   integration-test:
     help: "Run integration tests (continues on failure)"
@@ -66,14 +66,14 @@ tasks:
     before: [dev]
     bash: |
       #!/bin/bash
-      poetry run uvicorn media_planning_service.rest.app:app --reload
+      poetry run uvicorn example_service.rest.app:app --reload
 
   # Database operations
   get-postgres-dump:
     help: "Download the latest PostgreSQL dump from S3"
     bash: |
       #!/bin/bash
-      LATEST_S3_DUMP_FILE=$(aws s3api list-objects-v2 --bucket "tatari-pg-dumps" --prefix 'media_planning_service' --query 'sort_by(Contents, &LastModified)[-1].Key' --output=text)
+      LATEST_S3_DUMP_FILE=$(aws s3api list-objects-v2 --bucket "example-pg-dumps" --prefix 'example_service' --query 'sort_by(Contents, &LastModified)[-1].Key' --output=text)
       DUMP_CHECK="${LOCAL_DUMP_FILE}-${LATEST_S3_DUMP_FILE}.check"
 
       echo "LATEST_S3_DUMP_FILE: $LATEST_S3_DUMP_FILE"
@@ -82,7 +82,7 @@ tasks:
       if [ -f "$DUMP_CHECK" ]; then
         echo "  dump file already exists"
       else
-        aws s3 cp "s3://tatari-pg-dumps/$LATEST_S3_DUMP_FILE" "$LOCAL_DUMP_FILE"
+        aws s3 cp "s3://example-pg-dumps/$LATEST_S3_DUMP_FILE" "$LOCAL_DUMP_FILE"
         touch "$DUMP_CHECK"
       fi
 
@@ -120,19 +120,19 @@ tasks:
       docker compose -f docker-compose.yaml -f docker-compose.farnsworth.yaml down
 
   docker-compose-clean:
-    help: "Clean Docker containers and volumes for media-planning-service"
+    help: "Clean Docker containers and volumes for example-service"
     bash: |
       #!/bin/bash
-      echo "Deleting media-planning-service volumes and containers..."
-      docker ps -a | grep 'media-planning-service' | awk -F ' ' '{print $1}' | xargs -I {} sh -c "docker rm -f {}" || true
-      docker volume list | grep 'media-planning-service' | awk -F ' ' '{print $2}' | xargs -I {} sh -c "docker volume rm -f {}" || true
+      echo "Deleting example-service volumes and containers..."
+      docker ps -a | grep 'example-service' | awk -F ' ' '{print $1}' | xargs -I {} sh -c "docker rm -f {}" || true
+      docker volume list | grep 'example-service' | awk -F ' ' '{print $2}' | xargs -I {} sh -c "docker volume rm -f {}" || true
 
   # Database access
   psql:
     help: "Connect to PostgreSQL database in Docker container"
     bash: |
       #!/bin/bash
-      docker exec -it media-planning-service-db-1 psql -U tatari media_planning_service
+      docker exec -it example-service-db-1 psql -U example example_service
 
   # Development cleanup
   dev-clean:

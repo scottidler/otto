@@ -19,7 +19,7 @@ test: dev
 
 .PHONY: unit-test
 unit-test: dev
-	poetry run pytest --junitxml=pytest.xml --cov=media_planning_service tests/unit --log-cli-level=CRITICAL
+	poetry run pytest --junitxml=pytest.xml --cov=example_service tests/unit --log-cli-level=CRITICAL
 
 .PHONY: integration-test
 integration-test: dev
@@ -32,7 +32,7 @@ lint: dev
 	poetry run pre-commit run --all-files
 
 run-rest: dev
-	poetry run uvicorn media_planning_service.rest.app:app --reload
+	poetry run uvicorn example_service.rest.app:app --reload
 
 # Clean
 clean: dev-clean
@@ -46,8 +46,8 @@ clean: dev-clean
 # -- Dev/local only
 # --
 
-LOCAL_DUMP_FILE:=./schema/local-db/media-planning-service-pgdump.tar.gz
-LATEST_S3_DUMP_FILE:=$(shell aws s3api list-objects-v2 --bucket "tatari-pg-dumps" --prefix 'media_planning_service' --query 'sort_by(Contents, &LastModified)[-1].Key' --output=text)
+LOCAL_DUMP_FILE:=./schema/local-db/example-service-pgdump.tar.gz
+LATEST_S3_DUMP_FILE:=$(shell aws s3api list-objects-v2 --bucket "example-pg-dumps" --prefix 'example_service' --query 'sort_by(Contents, &LastModified)[-1].Key' --output=text)
 DUMP_CHECK:=$(LOCAL_DUMP_FILE)-$(LATEST_S3_DUMP_FILE).check
 
 dev-clean:
@@ -57,7 +57,7 @@ get-postgres-dump:
 	@echo "LATEST_S3_DUMP_FILE: $(LATEST_S3_DUMP_FILE)"
 	@echo "Downloading the latest pgdump from S3.."
 	@[ -f "$(DUMP_CHECK)" ] && echo "  dump file already exists" \
-		|| aws s3 cp s3://tatari-pg-dumps/$(LATEST_S3_DUMP_FILE) $(LOCAL_DUMP_FILE)
+		|| aws s3 cp s3://example-pg-dumps/$(LATEST_S3_DUMP_FILE) $(LOCAL_DUMP_FILE)
 	@touch "$(DUMP_CHECK)"
 
 # -- normal Docker compose build, this is the preferred method for running this service locally
@@ -79,9 +79,9 @@ docker-compose-with-farnsworth-down:
 	docker compose -f docker-compose.yaml -f docker-compose.farnsworth.yaml down
 
 docker-compose-clean:
-	@echo "Deleting media-planning-service volumes and containers..."
-	docker ps -a | grep 'media-planning-service'  | awk -F ' ' '{print $$1}' | xargs -I {} sh -c "docker rm -f {}"
-	docker volume list | grep 'media-planning-service' | awk -F ' ' '{print $$2}' | xargs -I {} sh -c "docker volume rm -f {}"
+	@echo "Deleting example-service volumes and containers..."
+	docker ps -a | grep 'example-service'  | awk -F ' ' '{print $$1}' | xargs -I {} sh -c "docker rm -f {}"
+	docker volume list | grep 'example-service' | awk -F ' ' '{print $$2}' | xargs -I {} sh -c "docker volume rm -f {}"
 
 psql:
-	docker exec -it media-planning-service-db-1 psql -U tatari media_planning_service
+	docker exec -it example-service-db-1 psql -U example example_service

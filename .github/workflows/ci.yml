@@ -10,31 +10,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v5
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{ env.RUST_VERSION }}
-        components: rustfmt, clippy
-
-    - name: Cache Rust dependencies
-      uses: Swatinem/rust-cache@v2
-      with:
-        prefix-key: "v1-rust"
-
-    - name: Run tests
-      run: cargo test --verbose
-
-    - name: Check formatting
-      run: cargo fmt --check
-
-    - name: Run clippy
-      run: cargo clippy -- -D warnings
+  checks:
+    # Shared with `Release` (`checks.yml`), so a red suite can never be
+    # published: neither workflow defines its own idea of "passing".
+    uses: ./.github/workflows/checks.yml
 
   build:
     name: Build

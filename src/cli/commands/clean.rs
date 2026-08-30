@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use eyre::{Context, Result};
+use eyre::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,25 +64,30 @@ impl CleanCommand {
 
     /// Execute cleanup with an optional injected StateStore (for testing)
     pub async fn execute_with_store(&self, store: Option<Arc<dyn StateStore>>) -> Result<()> {
-        let otto_home = self.get_otto_home()?;
-
-        if !otto_home.exists() {
-            self.print("No ~/.otto directory found");
-            return Ok(());
-        }
-
         if !self.no_db {
             // Use injected store or create default StateManager
             let store: Option<Arc<dyn StateStore>> =
                 store.or_else(|| StateManager::try_new().map(|m| Arc::new(m) as Arc<dyn StateStore>));
 
             if let Some(store) = store {
+                // Database-backed cleanup does not require `~/.otto` to
+                // pre-exist: an injected store may be entirely in-memory
+                // (tests), and `StateManager::new` creates the directory
+                // itself on first use. The existence check only makes
+                // sense for the filesystem-scan fallback below.
                 return self.execute_with_database(store.as_ref()).await;
             }
             self.print("Database not available, falling back to filesystem scan...");
         }
 
-        // Fallback to filesystem-based cleanup
+        // Fallback to filesystem-based cleanup, which does require a real
+        // `~/.otto` directory to scan.
+        let otto_home = self.get_otto_home()?;
+        if !otto_home.exists() {
+            self.print("No ~/.otto directory found");
+            return Ok(());
+        }
+
         self.execute_with_filesystem(&otto_home).await
     }
 
@@ -395,8 +400,7 @@ impl CleanCommand {
     }
 
     fn get_otto_home(&self) -> Result<PathBuf> {
-        let home = std::env::var("HOME").context("Failed to get HOME environment variable")?;
-        Ok(PathBuf::from(home).join(".otto"))
+        crate::executor::pruning::resolve_otto_home()
     }
 }
 
@@ -1078,6 +1082,83 @@ mod tests {
 
         let deleted = store.delete_run(9999999999, false)?;
         assert!(deleted.is_none());
+        Ok(())
+    }
+
+    // ========================================
+    // Regression: db-backed cleanup must not depend on a pre-existing
+    // `~/.otto` directory (Phase 0, `2026-06-10-code-review-remediation.md`).
+    // `execute_with_store` used to check `otto_home.exists()` before ever
+    // looking at the injected store, so on a runner with no populated
+    // `~/.otto` (unlike a developer's machine), every db-backed clean test
+    // silently short-circuited to "No ~/.otto directory found" and passed
+    // or failed on stale assumptions rather than on the store's state.
+    // ========================================
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_execute_with_database_ignores_missing_otto_home() -> Result<()> {
+        // Point OTTO_HOME at a directory that does not exist. If the old
+        // `otto_home.exists()` early-return were still in place, this would
+        // print "No ~/.otto directory found" and skip the store entirely,
+        // leaving all 4 runs in place.
+        let temp_dir = TempDir::new()?;
+        let missing_otto_home = temp_dir.path().join("does-not-exist");
+        unsafe {
+            std::env::set_var("OTTO_HOME", &missing_otto_home);
+        }
+
+        let store = create_store_with_runs();
+        let cmd = CleanCommand {
+            keep_days: 30,
+            keep_last: None,
+            keep_failed: None,
+            dry_run: false,
+            project_filter: None,
+            no_db: false,
+            quiet: true,
+        };
+
+        let result = cmd.execute_with_store(Some(store.clone())).await;
+        unsafe {
+            std::env::remove_var("OTTO_HOME");
+        }
+        result?;
+
+        // The 3 old runs (40, 35, 45 days) should have been deleted via the
+        // injected store despite `OTTO_HOME` not existing on disk.
+        let final_runs = store.get_recent_runs(100, None)?;
+        assert_eq!(final_runs.len(), 1);
+        assert!(
+            !missing_otto_home.exists(),
+            "clean must not create the otto home directory"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_get_otto_home_honors_otto_home_env() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        unsafe {
+            std::env::set_var("OTTO_HOME", temp_dir.path());
+        }
+
+        let cmd = CleanCommand {
+            keep_days: 30,
+            keep_last: None,
+            keep_failed: None,
+            dry_run: true,
+            project_filter: None,
+            no_db: true,
+            quiet: true,
+        };
+        let resolved = cmd.get_otto_home();
+        unsafe {
+            std::env::remove_var("OTTO_HOME");
+        }
+
+        assert_eq!(resolved?, temp_dir.path());
         Ok(())
     }
 }

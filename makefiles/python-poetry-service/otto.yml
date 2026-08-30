@@ -5,7 +5,7 @@ otto:
   - dev
   envs:
     # Define variables similar to Makefile
-    CERTS_DIR: "./certs/tatari"
+    CERTS_DIR: "./certs/example"
 
 tasks:
   # Main comprehensive task that runs all checks
@@ -28,7 +28,7 @@ tasks:
       ENV: "ci"
     bash: |
       #!/bin/bash
-      env ENV=ci poetry run pytest --junitxml=pytest.xml --cov=auth_svc tests/unit
+      env ENV=ci poetry run pytest --junitxml=pytest.xml --cov=example_service tests/unit
 
   integration-test:
     help: "Run integration tests"
