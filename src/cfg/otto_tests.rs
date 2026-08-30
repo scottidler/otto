@@ -149,7 +149,9 @@ fn test_retention_spec_roundtrip() {
     assert_eq!(spec, deserialized);
 }
 
-#[cfg(test)]
+// No `#[cfg(test)]` here: the file already carries `#![cfg(test)]` at line 1,
+// so the attribute was dead and only served to trip Phase 9's inline-test-module
+// criterion.
 mod jobs_range_tests {
     use crate::cfg::config::ConfigSpec;
 

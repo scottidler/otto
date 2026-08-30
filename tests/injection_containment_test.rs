@@ -308,3 +308,117 @@ tasks:
 
     assert_eq!(caches.len(), 1, "one script, one cache entry, got: {caches:?}");
 }
+
+/// The payload shapes the bullets claim containment against, not just the two
+/// the criterion names.
+///
+/// Phase 3's success criterion names a `"`-bearing value, and the shipped table
+/// carried `"` and `'`. The bullets themselves claim containment against `;`,
+/// backticks, newlines and `${IFS}` too, and those passed but were pinned by
+/// nothing - a fix that regressed on any of them would have stayed green.
+/// Found by the batched audit, batch 4 of 14.
+///
+/// A bare `$(...)` is deliberately NOT in this table: command substitution in an
+/// `envs:` value runs at config load by design, which
+/// `examples/environment-variables/otto.yml` depends on. The containment property
+/// for that feature is the next test: the command's OUTPUT must arrive as data.
+///
+/// `${VAR}` shapes are likewise absent: variable resolution is a feature, and an
+/// UNDEFINED one fails config load rather than reaching the shell. Both are
+/// pinned separately below, so a later reader does not mistake either for a
+/// containment hole.
+#[test]
+fn every_claimed_payload_shape_reaches_bash_as_literal_text() {
+    // (label, the value as written in YAML single quotes, what the task must echo)
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "semicolon",
+            r#"x"; touch {MARKER}; echo "y"#,
+            r#"x"; touch {MARKER}; echo "y"#,
+        ),
+        ("backtick", r#"a`touch {MARKER}`b"#, r#"a`touch {MARKER}`b"#),
+        ("single-quote", r#"it's a "value""#, r#"it's a "value""#),
+    ];
+
+    for (label, payload, expected) in cases {
+        let body = format!(
+            "otto:\n  api: 1\n  tasks: [hello]\ntasks:\n  hello:\n    envs:\n      PAYLOAD: '{}'\n    action: |\n      echo \"payload=$PAYLOAD\"\n",
+            payload.replace('\'', "''")
+        );
+        let fixture = Fixture::new(&body);
+        let (code, stdout, stderr) = fixture.run(&["hello"]);
+
+        assert_eq!(code, 0, "{label}: run failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+        fixture.assert_not_pwned(label, &stdout);
+
+        let want = fixture.marker_arg(expected);
+        assert!(
+            stdout.contains(&format!("payload={want}")),
+            "{label}: value must arrive as literal text, wanted payload={want}\nstdout:\n{stdout}"
+        );
+    }
+}
+
+/// A newline inside an env value must not become two shell statements.
+///
+/// Kept separate because it cannot be expressed as a single-quoted YAML scalar
+/// alongside the others.
+#[test]
+fn a_newline_in_an_env_value_does_not_split_into_a_second_statement() {
+    let fixture = Fixture::new(
+        "otto:\n  api: 1\n  tasks: [hello]\ntasks:\n  hello:\n    envs:\n      PAYLOAD: \"line1\\ntouch {MARKER}\"\n    action: |\n      echo \"payload=[$PAYLOAD]\"\n",
+    );
+    let (code, stdout, stderr) = fixture.run(&["hello"]);
+
+    assert_eq!(code, 0, "run failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    fixture.assert_not_pwned("newline", &stdout);
+    assert!(
+        stdout.contains("line1"),
+        "the value must survive to the task\nstdout:\n{stdout}"
+    );
+}
+
+/// Command-substitution OUTPUT is data, not syntax.
+///
+/// `$()` in an `envs:` value is a feature; the injection risk is what happens to
+/// what it prints. Phase 3 fixed this by substituting through a placeholder map
+/// applied after variable resolution, so output containing shell metacharacters
+/// cannot be re-read as shell.
+#[test]
+fn command_substitution_output_reaches_the_task_as_data() {
+    let fixture = Fixture::new(
+        "otto:\n  api: 1\n  tasks: [hello]\ntasks:\n  hello:\n    envs:\n      PAYLOAD: \"$(printf 'a;touch {MARKER};echo b')\"\n    action: |\n      echo \"payload=[$PAYLOAD]\"\n",
+    );
+    let (code, stdout, stderr) = fixture.run(&["hello"]);
+
+    assert_eq!(code, 0, "run failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    fixture.assert_not_pwned("substitution output", &stdout);
+
+    let want = fixture.marker_arg("a;touch {MARKER};echo b");
+    assert!(
+        stdout.contains(&format!("payload=[{want}]")),
+        "the command's output must arrive as literal text, wanted {want}\nstdout:\n{stdout}"
+    );
+}
+
+/// An undefined `${VAR}` in an env value fails the run rather than reaching the
+/// shell, where it would have been re-expanded.
+///
+/// `${IFS}` is the interesting case: it is the classic separator-injection
+/// vehicle, and otto rejects it at config load because `IFS` is not an exported
+/// variable. Recorded as a test so this is not mistaken for a containment hole
+/// (it was, briefly, during batch 4).
+#[test]
+fn an_undefined_variable_reference_in_an_env_value_fails_closed() {
+    let fixture = Fixture::new(
+        "otto:\n  api: 1\n  tasks: [hello]\ntasks:\n  hello:\n    envs:\n      PAYLOAD: 'a\";touch${IFS}{MARKER};echo\"b'\n    action: |\n      echo \"payload=$PAYLOAD\"\n",
+    );
+    let (code, stdout, stderr) = fixture.run(&["hello"]);
+
+    assert_ne!(code, 0, "an undefined variable must fail the run\nstdout:\n{stdout}");
+    fixture.assert_not_pwned("undefined variable", &stdout);
+    assert!(
+        stderr.contains("IFS"),
+        "the error must name the variable it could not resolve, got:\n{stderr}"
+    );
+}
