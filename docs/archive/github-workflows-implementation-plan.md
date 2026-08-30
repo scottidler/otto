@@ -52,7 +52,7 @@ Based on analysis of sister projects under `~/repos/scottidler/`:
 
 #### 1.1 Create Directory Structure
 ```bash
-mkdir -p /home/saidler/repos/otto-rs/otto/.github/workflows
+mkdir -p ~/repos/otto-rs/otto/.github/workflows
 ```
 
 #### 1.2 Create `binary-release.yml`
@@ -98,18 +98,18 @@ mkdir -p /home/saidler/repos/otto-rs/otto/.github/workflows
 ### Phase 2: Update Existing Projects
 
 #### 2.1 Update `aka` Project
-**File**: `/home/saidler/repos/scottidler/aka/.github/workflows/binary-release.yml`
+**File**: `~/repos/scottidler/aka/.github/workflows/binary-release.yml`
 - Change `RUST_VERSION` from `1.83.0` to `1.91.0`
 
 #### 2.2 Update `git-tools` Project
-**File**: `/home/saidler/repos/scottidler/git-tools/.github/workflows/binary-release.yml`
+**File**: `~/repos/scottidler/git-tools/.github/workflows/binary-release.yml`
 - Change `RUST_VERSION` from `1.83.0` to `1.91.0`
 
 #### 2.3 Update `gx` Project
-**File**: `/home/saidler/repos/scottidler/gx/.github/workflows/binary-release.yml`
+**File**: `~/repos/scottidler/gx/.github/workflows/binary-release.yml`
 - Change `RUST_VERSION` from `1.88.0` to `1.91.0`
 
-**File**: `/home/saidler/repos/scottidler/gx/.github/workflows/ci.yml`
+**File**: `~/repos/scottidler/gx/.github/workflows/ci.yml`
 - Change `RUST_VERSION` to `1.91.0` (if applicable)
 
 ## Detailed Workflow Specifications

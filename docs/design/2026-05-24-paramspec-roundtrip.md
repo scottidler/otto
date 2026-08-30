@@ -13,7 +13,7 @@ The four derived fields (`name`/`short`/`long`/`param_type`) plus the runtime
 `value` field were promoted from `skip_deserializing` to `skip` so they never
 appear as redundant inline entries.
 
-Verified against the 94 real `.otto.yml` files under `~/repos/tatari-tv` and
+Verified against 94 real `.otto.yml` files from a private repo set and
 `~/repos/scottidler`: 20/94 → 94/94 round-trip cleanly. `tests/roundtrip.rs`
 locks in the discipline going forward.
 

@@ -26,10 +26,10 @@ Otto currently creates symlinks with absolute paths. This plan outlines the chan
 ### Current (Absolute Paths) ❌
 ```bash
 # Script symlinks
-tasks/ci/script.sh -> /home/saidler/.otto/otto-26bf0c7a/.cache/f2deb29f.sh
+tasks/ci/script.sh -> ~/.otto/otto-26bf0c7a/.cache/f2deb29f.sh
 
 # Dependency symlinks
-tasks/all/input.ci.json -> /home/saidler/.otto/otto-26bf0c7a/1762469962/tasks/ci/output.ci.json
+tasks/all/input.ci.json -> ~/.otto/otto-26bf0c7a/1762469962/tasks/ci/output.ci.json
 
 # Issues:
 # - Not portable across machines/users
@@ -70,7 +70,7 @@ fs::symlink(&cache_file, &script_path)?;
 
 **Example**:
 ```
-tasks/ci/script.sh -> /home/saidler/.otto/otto-26bf0c7a/.cache/f2deb29f.sh
+tasks/ci/script.sh -> ~/.otto/otto-26bf0c7a/.cache/f2deb29f.sh
 ```
 
 #### 2. Dependency Input Symlinks (Task → Task)
@@ -86,7 +86,7 @@ fs::symlink(&dep_output_file, &current_input_file)?;
 
 **Example**:
 ```
-tasks/all/input.ci.json -> /home/saidler/.otto/otto-26bf0c7a/1762469962/tasks/ci/output.ci.json
+tasks/all/input.ci.json -> ~/.otto/otto-26bf0c7a/1762469962/tasks/ci/output.ci.json
 ```
 
 #### 3. Upgrade Backup Symlinks

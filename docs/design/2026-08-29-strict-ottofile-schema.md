@@ -38,8 +38,8 @@ All three subtasks run concurrently. Exit 0, no warning. The user asked for seri
 
 **3. An invented key is silently discarded.** Top-level `envs:` is not a thing. Two live work repos declare it:
 
-- `tatari-tv/devs/.otto.yml` sets `GOMODCACHE`, `GOCACHE`, `VERSION`, `BUILD` at top level, under a `# Environment variables` comment. None have ever applied.
-- `tatari-tv/github-setup/.otto.yml` sets `PROJECT_NAME` the same way.
+- `work repo A/.otto.yml` sets `GOMODCACHE`, `GOCACHE`, `VERSION`, `BUILD` at top level, under a `# Environment variables` comment. None have ever applied.
+- `work repo B/.otto.yml` sets `PROJECT_NAME` the same way.
 
 Neither is a misreading of the docs: **the README never mentions `envs` at all, and no ottofile key reference exists.** The key was invented because nothing documented the real one and nothing rejected the wrong one.
 
@@ -71,7 +71,7 @@ Neither is a misreading of the docs: **the README never mentions `envs` at all, 
 
 What stays in remediation, annotated as staying: the `divine()` garbage-key hazard (`:217`), the "strings where types belong" indictment (`:28`), and the unused-`levenshtein` note (`:153`), which this doc uses but does not resolve.
 
-Cross-repo blast radius: **three work repos** (`tatari-tv/devs`, `tatari-tv/github-setup`, `tatari-tv/auth-svc`) will fail to load after this ships until each gets a one-line fix in its own repo. That is the ship order this doc forces: land here, then file the three fixes. No coordinated release; otto is the only thing that changes.
+Cross-repo blast radius: **three work repos** (`work repo A`, `work repo B`, `work repo C`) will fail to load after this ships until each gets a one-line fix in its own repo. That is the ship order this doc forces: land here, then file the three fixes. No coordinated release; otto is the only thing that changes.
 
 ## Proposed Solution
 
@@ -241,13 +241,13 @@ Three work repos need a one-line fix each, by a human, in their own repo, after 
 
 | repo | offending key | fix |
 |---|---|---|
-| `tatari-tv/devs` | root `envs:` | move under `otto:` |
-| `tatari-tv/github-setup` | root `envs:` | move under `otto:` |
-| `tatari-tv/auth-svc` | `tasks.dev.timeout` | delete (no such key) |
+| `work repo A` | root `envs:` | move under `otto:` |
+| `work repo B` | root `envs:` | move under `otto:` |
+| `work repo C` | `tasks.dev.timeout` | delete (no such key) |
 
 `scottidler/otto-old` is dead and needs nothing.
 
-**The first two are not cosmetic.** Moving those keys under `otto:` makes them start working: `tatari-tv/devs` would gain `GOMODCACHE`, `GOCACHE`, `VERSION`, and `BUILD` in every task for the first time. That is a behavior change in a work repo and needs testing there, by its owner. Deleting the block instead is the conservative option and preserves today's behavior exactly.
+**The first two are not cosmetic.** Moving those keys under `otto:` makes them start working: `work repo A` would gain `GOMODCACHE`, `GOCACHE`, `VERSION`, and `BUILD` in every task for the first time. That is a behavior change in a work repo and needs testing there, by its owner. Deleting the block instead is the conservative option and preserves today's behavior exactly.
 
 ## Acceptance Criteria
 
@@ -270,7 +270,7 @@ Every criterion below was run against `main` at `5640628` (`v1.3.0`) and its out
 
 ## Resolved Decisions
 
-- 2026-08-29: **Error, not warn.** Measured: 4 of 159 external ottofiles under `~/repos` break, and every single one is a genuine bug, two of them silent misconfigurations live today. A warning that everyone learns to scroll past does not fix `tatari-tv/devs`. House rule is fail loudly, fail closed; the measured hit rate says the cost is near zero.
+- 2026-08-29: **Error, not warn.** Measured: 4 of 159 external ottofiles under `~/repos` break, and every single one is a genuine bug, two of them silent misconfigurations live today. A warning that everyone learns to scroll past does not fix `work repo A`. House rule is fail loudly, fail closed; the measured hit rate says the cost is near zero.
 - 2026-08-29: **The api gate ships in the same doc as strict parsing, and lands first.** They are one feature. Strict rejection without a version gate makes every future field addition a break for anyone on an older otto.
 - 2026-08-29: **Copy borg** (`second-brain`) for both halves rather than inventing. Precedent found org-first, as the taste rules require.
 - 2026-08-29: **`api` stays a `String`.** Int-typing works but changes `otto convert`'s emitted form for no benefit.
@@ -286,7 +286,7 @@ Every criterion below was run against `main` at `5640628` (`v1.3.0`) and its out
 ### Warn instead of error
 - **Description:** Emit a warning naming the key, keep loading.
 - **Pros:** Cargo's model (`warning: unused manifest key`); no repo breaks on upgrade; forward-compatible by construction.
-- **Cons:** `tatari-tv/devs` has been silently broken long enough that nobody noticed; a warning is what nobody noticing looks like. Fails the house rule that unparseable input is a loud error, never a silent result.
+- **Cons:** `work repo A` has been silently broken long enough that nobody noticed; a warning is what nobody noticing looks like. Fails the house rule that unparseable input is a loud error, never a silent result.
 - **Why not chosen:** The measured hit rate (4 files out of 159) makes fail-closed cheap, and the api gate solves the forward-compat objection that motivates warning in the first place.
 
 ### Strict parsing without the api gate

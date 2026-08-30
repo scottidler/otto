@@ -13,7 +13,7 @@ The otto/otto-dev boundary review (see References) reproduced three defects, one
 
 ### Background
 
-- otto-dev (`tatari-tv/otto-dev`) composes seven Philo service repos over otto. It is otto's most demanding consumer.
+- A downstream work repo composes seven internal service repos over otto. It is otto's most demanding consumer.
 - otto's task set is fixed when the YAML parses; otto-dev's is computed per developer, per invocation. The gap is bridged today by a 245-line YAML generator emitting 408 lines of `.otto.yml`, plus a 358-line hand-rolled scheduler (`stack.sh`).
 - Every finding below was reproduced at a terminal on 2026-08-28 against installed `otto v1.2.6`, HEAD `10e9cac`. Root causes traced to source lines.
 - Spec source: the boundary review (References). Requirements below trace to it and to the handoff artifact.
@@ -375,7 +375,7 @@ Per-phase commits on main via the standard flow (`otto ci` -> commit), one commi
 
 ## References
 
-- Boundary review (spec source): https://marquee.internal.tatari.dev/p/~scott-idler/otto-and-otto-dev-a-look-along-the-boundary/ (local: /tmp/claude/otto-boundary-review/index.md)
+- Boundary review (spec source): <internal review link, not reproduced here> (local: /tmp/claude/otto-boundary-review/index.md)
 - Handoff artifact: /tmp/claude-1000/handoff-otto-fixes.md
 - `docs/design/2026-06-10-code-review-remediation.md` (In Review; Phase 0 amends)
 - `docs/design/2026-06-10-architecture-product-completion.md` (In Review; Phase 0 amends)
