@@ -31,7 +31,7 @@ otto Convert < Makefile > otto.yml
 6. Provide meaningful error messages for unsupported constructs (**shipped**: every construct the converter cannot represent faithfully becomes a `Diagnostic` printed to stderr, naming the source line; `--strict` turns a non-empty diagnostic list into a non-zero exit instead of a silent conversion. See `src/makefile/diagnostic.rs`.)
 
 ### Supported Makefile Features (Phase 1)
-- Variable definitions (`VAR := value`, `VAR = value`, `VAR ?= value`)
+- Variable definitions (`VAR := value`, `VAR = value`, `VAR ?= value`) (**`?=` shipped with a caveat, 2026-08-30:** it converts, but not conditionally. otto's `envs:` is the system environment minus every declared key, so a declared key shadows the ambient value, where make's `?=` lets the ambient value win. The conversion now warns and `--strict` fails on it, rather than silently changing what the build sees.)
 - Shell command variables (`VAR := $(shell cmd)`)
 - `.PHONY` declarations
 - `.DEFAULT_GOAL` specification
