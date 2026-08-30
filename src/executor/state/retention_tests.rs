@@ -95,3 +95,33 @@ fn test_keep_failed_days_extends_retention_for_failures() {
 fn test_empty_input_is_empty_output() {
     assert!(Retention::default().expired(&[], 0).is_empty());
 }
+
+/// Pins the strict `<` in `expired`'s cutoff comparison with an injected
+/// `now`, so the tie-break at the exact boundary is deterministic and never
+/// depends on a wall-clock read. This is the case that made
+/// `ports::db::tests::memory_and_sqlite_stores_agree_about_retention` flaky:
+/// that test used to place a fixture run exactly on a `keep_failed_days`
+/// cutoff and then call `SystemTime::now()` twice, once per backend, so any
+/// wall-clock time elapsing between the two calls could push the boundary
+/// run's real cutoff past its (fixed) timestamp for one backend and not the
+/// other. Both backends were internally consistent; they just didn't share a
+/// clock. That test's fixture now keeps a margin around every cutoff it
+/// exercises, and this test is what actually pins the exact-boundary
+/// semantics the margin was hiding.
+#[test]
+fn test_keep_failed_days_exact_boundary_is_kept_not_expired() {
+    let now = 100 * DAY;
+    let runs = [RunAge {
+        timestamp: now - 45 * DAY,
+        failed: true,
+    }];
+    let policy = Retention {
+        keep_days: 30,
+        keep_last: None,
+        keep_failed_days: Some(45),
+    };
+    assert!(
+        policy.expired(&runs, now).is_empty(),
+        "a failed run exactly `keep_failed_days` old must be kept, not expired"
+    );
+}

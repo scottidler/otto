@@ -5,7 +5,8 @@
 //! `Parser::parse()` in-process, because `--tasks` exits the process on
 //! success/failure.
 
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::process::Command as StdCommand;
@@ -47,7 +48,7 @@ fn tasks_piped_default_is_json_nonempty_object() {
     let temp = TempDir::new().unwrap();
     let ottofile = write_ottofile(temp.path(), FIXTURE);
 
-    let output = cargo_bin_cmd!("otto")
+    let output = common::otto_cmd(temp.path())
         .arg("--tasks")
         .arg("-o")
         .arg(&ottofile)
@@ -72,7 +73,7 @@ fn tasks_yaml_format_has_same_keys_as_json_default() {
     let temp = TempDir::new().unwrap();
     let ottofile = write_ottofile(temp.path(), FIXTURE);
 
-    let json_out = cargo_bin_cmd!("otto")
+    let json_out = common::otto_cmd(temp.path())
         .arg("--tasks")
         .arg("-o")
         .arg(&ottofile)
@@ -84,7 +85,7 @@ fn tasks_yaml_format_has_same_keys_as_json_default() {
     let mut json_keys: Vec<String> = json.as_object().unwrap().keys().cloned().collect();
     json_keys.sort();
 
-    let yaml_out = cargo_bin_cmd!("otto")
+    let yaml_out = common::otto_cmd(temp.path())
         .arg("--tasks")
         .arg("--format")
         .arg("yaml")
@@ -117,7 +118,7 @@ fn tasks_reports_subtask_ids_and_excludes_builtins() {
     let temp = TempDir::new().unwrap();
     let ottofile = write_ottofile(temp.path(), FIXTURE);
 
-    let output = cargo_bin_cmd!("otto")
+    let output = common::otto_cmd(temp.path())
         .arg("--tasks")
         .arg("-o")
         .arg(&ottofile)
@@ -157,7 +158,7 @@ fn tasks_executes_no_task_body() {
     let ottofile = write_ottofile(temp.path(), FIXTURE);
     let sentinel = temp.path().join("sentinel");
 
-    let output = cargo_bin_cmd!("otto")
+    let output = common::otto_cmd(temp.path())
         .arg("--tasks")
         .arg("-o")
         .arg(&ottofile)
@@ -187,7 +188,7 @@ tasks:
 "#;
     let ottofile = write_ottofile(temp.path(), fixture);
 
-    let output = cargo_bin_cmd!("otto")
+    let output = common::otto_cmd(temp.path())
         .arg("--tasks")
         .arg("-o")
         .arg(&ottofile)
@@ -217,6 +218,8 @@ fn tasks_defaults_to_yaml_on_a_real_tty() {
         .arg("-qec")
         .arg(&inner_cmd)
         .arg("/dev/null")
+        .env("OTTO_HOME", temp.path())
+        .env_remove("OTTO_DB_PATH")
         .output()
         .expect("failed to run `script` (util-linux) for the pty test");
 

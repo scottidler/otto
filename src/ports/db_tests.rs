@@ -22,10 +22,31 @@ fn memory_and_sqlite_stores_agree_about_retention() {
         .unwrap()
         .as_secs();
 
-    // Ten runs, 40 to 49 days old, alternating success and failure.
-    for i in 0..10u64 {
-        let metadata = create_test_metadata("abc12345", now - ((40 + i) * 86400));
-        let status = if i % 2 == 0 { RunStatus::Success } else { RunStatus::Failed };
+    // Ten runs, alternating success and failure, spanning both sides of the
+    // 45-day `keep_failed_days` cutoff exercised below but never landing
+    // exactly on it (or on the 30-day `keep_days` cutoff). `find_old_runs`
+    // reads `SystemTime::now()` independently on each backend, once per
+    // call below; a run placed exactly on a cutoff would flip from "kept" to
+    // "expired" the instant any wall-clock time elapsed between the sqlite
+    // call and the memory call, which is exactly what made this test flaky
+    // once (Phase 9). A multi-day margin around every cutoff makes that
+    // impossible; the exact-boundary tie-break itself is pinned
+    // deterministically, with an injected `now`, by
+    // `executor::state::retention_tests::test_keep_failed_days_exact_boundary_is_kept_not_expired`.
+    let ages_and_status: [(u64, RunStatus); 10] = [
+        (40, RunStatus::Success),
+        (41, RunStatus::Failed),
+        (42, RunStatus::Success),
+        (43, RunStatus::Failed),
+        (44, RunStatus::Success),
+        (46, RunStatus::Failed),
+        (47, RunStatus::Success),
+        (48, RunStatus::Failed),
+        (49, RunStatus::Success),
+        (50, RunStatus::Failed),
+    ];
+    for (days_ago, status) in ages_and_status {
+        let metadata = create_test_metadata("abc12345", now - (days_ago * 86400));
 
         let sqlite_id = sqlite.record_run_start(&metadata).unwrap();
         sqlite.record_run_complete(sqlite_id, status.clone(), Some(1)).unwrap();

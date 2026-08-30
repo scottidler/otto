@@ -1,4 +1,5 @@
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
 use predicates::prelude::*;
 use std::fs;
 use std::io::Write;
@@ -7,7 +8,7 @@ use tempfile::tempdir;
 #[test]
 fn test_help_epilogue_when_ottofile_missing() {
     let temp = tempdir().unwrap();
-    let mut cmd = cargo_bin_cmd!("otto");
+    let mut cmd = common::otto_cmd(temp.path());
     cmd.current_dir(&temp).arg("--help");
     cmd.assert()
         .failure()
@@ -26,7 +27,7 @@ fn test_help_epilogue_not_present_when_ottofile_exists() {
     let mut file = fs::File::create(&ottofile_path).unwrap();
     writeln!(file, "otto:\n  api: 1\ntasks:\n  test:\n    action: echo test").unwrap();
 
-    let mut cmd = cargo_bin_cmd!("otto");
+    let mut cmd = common::otto_cmd(temp.path());
     cmd.current_dir(&temp).arg("--help");
     cmd.assert()
         .success()
@@ -56,7 +57,7 @@ fn test_help_reports_parse_error_and_does_not_claim_missing_ottofile() {
     let temp = tempdir().unwrap();
     write_parse_failing_ottofile(temp.path());
 
-    let mut cmd = cargo_bin_cmd!("otto");
+    let mut cmd = common::otto_cmd(temp.path());
     cmd.current_dir(&temp).arg("--help");
     cmd.assert()
         .failure()
@@ -77,7 +78,7 @@ fn test_help_reports_parse_error_and_does_not_claim_missing_ottofile() {
 fn test_help_still_claims_missing_when_no_ottofile_anywhere() {
     let temp = tempdir().unwrap();
 
-    let mut cmd = cargo_bin_cmd!("otto");
+    let mut cmd = common::otto_cmd(temp.path());
     cmd.current_dir(&temp).arg("--help");
     cmd.assert()
         .failure()
@@ -99,7 +100,7 @@ fn test_usertask_help_still_reports_parse_error_on_stderr() {
     let temp = tempdir().unwrap();
     write_parse_failing_ottofile(temp.path());
 
-    let mut cmd = cargo_bin_cmd!("otto");
+    let mut cmd = common::otto_cmd(temp.path());
     cmd.current_dir(&temp).args(["up", "--help"]);
     cmd.assert()
         .failure()

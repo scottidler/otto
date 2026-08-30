@@ -1,4 +1,5 @@
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
 use serial_test::serial;
 use tempfile::TempDir;
 
@@ -9,12 +10,10 @@ fn test_history_table_alignment() {
     let temp_dir = TempDir::new().unwrap();
     let otto_path = temp_dir.path();
 
-    // Set HOME to temp dir for consistent testing
-    let output = cargo_bin_cmd!("otto")
-        .arg("history")
-        .env("HOME", otto_path)
-        .output()
-        .unwrap();
+    // OTTO_HOME (not just HOME) isolates the run: resolve_otto_home() checks
+    // OTTO_HOME before HOME, so a developer with OTTO_HOME exported would
+    // otherwise have this read their real history.
+    let output = common::otto_cmd(otto_path).arg("history").output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 

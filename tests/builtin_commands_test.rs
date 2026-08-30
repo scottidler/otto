@@ -108,8 +108,17 @@ tasks:
 #[test]
 #[serial]
 fn test_clean_command_exists() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let db_path = setup_test_db(temp_dir.path());
+    let otto_home = temp_dir.path().join(".otto");
+
     let mut cmd = cargo_bin_cmd!("otto");
-    let output = cmd.arg("Clean").arg("--help").output()?;
+    let output = cmd
+        .env("OTTO_DB_PATH", &db_path)
+        .env("OTTO_HOME", &otto_home)
+        .arg("Clean")
+        .arg("--help")
+        .output()?;
 
     assert!(output.status.success(), "Clean --help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -122,8 +131,17 @@ fn test_clean_command_exists() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 #[serial]
 fn test_history_command_exists() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let db_path = setup_test_db(temp_dir.path());
+    let otto_home = temp_dir.path().join(".otto");
+
     let mut cmd = cargo_bin_cmd!("otto");
-    let output = cmd.arg("History").arg("--help").output()?;
+    let output = cmd
+        .env("OTTO_DB_PATH", &db_path)
+        .env("OTTO_HOME", &otto_home)
+        .arg("History")
+        .arg("--help")
+        .output()?;
 
     assert!(output.status.success(), "History --help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -139,8 +157,17 @@ fn test_history_command_exists() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 #[serial]
 fn test_stats_command_exists() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let db_path = setup_test_db(temp_dir.path());
+    let otto_home = temp_dir.path().join(".otto");
+
     let mut cmd = cargo_bin_cmd!("otto");
-    let output = cmd.arg("Stats").arg("--help").output()?;
+    let output = cmd
+        .env("OTTO_DB_PATH", &db_path)
+        .env("OTTO_HOME", &otto_home)
+        .arg("Stats")
+        .arg("--help")
+        .output()?;
 
     assert!(output.status.success(), "Stats --help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -240,8 +267,17 @@ fn test_builtin_commands_have_help() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for (cmd_name, expected_word, expected_flag) in commands {
+        let temp_dir = TempDir::new()?;
+        let db_path = setup_test_db(temp_dir.path());
+        let otto_home = temp_dir.path().join(".otto");
+
         let mut cmd = cargo_bin_cmd!("otto");
-        let output = cmd.arg(cmd_name).arg("--help").output()?;
+        let output = cmd
+            .env("OTTO_DB_PATH", &db_path)
+            .env("OTTO_HOME", &otto_home)
+            .arg(cmd_name)
+            .arg("--help")
+            .output()?;
 
         assert!(output.status.success(), "{} --help should succeed", cmd_name);
 

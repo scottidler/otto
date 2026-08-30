@@ -6,7 +6,8 @@
 //! command*, and that is only observable from outside the process (help paths
 //! call `std::process::exit`, and the counter must count real subprocesses).
 
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::Path;
@@ -19,8 +20,12 @@ fn write_ottofile(dir: &Path, contents: &str) -> std::path::PathBuf {
     path
 }
 
+/// The ottofile's own directory doubles as the isolated `OTTO_HOME`: every
+/// fixture here already lives in its own `TempDir`, so there's no need for a
+/// second scratch dir.
 fn otto(ottofile: &Path, args: &[&str]) -> Output {
-    cargo_bin_cmd!("otto")
+    let home = ottofile.parent().expect("ottofile must live in a directory");
+    common::otto_cmd(home)
         .arg("-o")
         .arg(ottofile)
         .args(args)
@@ -219,7 +224,7 @@ fn help_surfaces_never_execute_the_command_and_render_the_marker() {
     // NOTE: the global-help path re-divines the ottofile from `.` instead of
     // honoring `-o` (a pre-existing bug, assigned to the remediation doc), so
     // this one runs from the fixture directory.
-    let output = cargo_bin_cmd!("otto")
+    let output = common::otto_cmd(temp.path())
         .current_dir(temp.path())
         .arg("--help")
         .output()
@@ -440,7 +445,7 @@ fn a_nested_otto_resolving_the_same_key_errors_loudly() {
     let temp = TempDir::new().unwrap();
     let ottofile = write_ottofile(temp.path(), FIXTURE);
 
-    let output = cargo_bin_cmd!("otto")
+    let output = common::otto_cmd(temp.path())
         .arg("-o")
         .arg(&ottofile)
         .args(["switch", "--svc", "beta"])

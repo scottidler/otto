@@ -70,7 +70,9 @@ fn write(path: &Path, content: &str) {
 fn help_reads_the_ottofile_the_flag_names() {
     let temp = fixture();
     let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path()).args(["-o", "sub/other.yml", "--help"]);
+    cmd.current_dir(temp.path())
+        .env("OTTO_HOME", temp.path().join("otto-home"))
+        .args(["-o", "sub/other.yml", "--help"]);
 
     cmd.assert()
         .success()
@@ -84,6 +86,7 @@ fn help_reads_the_ottofile_the_env_names() {
     let mut cmd = cargo_bin_cmd!("otto");
     cmd.current_dir(temp.path())
         .env("OTTOFILE", "sub/other.yml")
+        .env("OTTO_HOME", temp.path().join("otto-home"))
         .arg("--help");
 
     cmd.assert()
@@ -204,7 +207,9 @@ fn an_invalid_history_status_is_rejected() {
 fn a_missing_ottofile_names_the_path_it_looked_for() {
     let temp = fixture();
     let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path()).args(["-o", "/nope/nothere.yml", "build"]);
+    cmd.current_dir(temp.path())
+        .env("OTTO_HOME", temp.path().join("otto-home"))
+        .args(["-o", "/nope/nothere.yml", "build"]);
 
     cmd.assert()
         .failure()

@@ -13,6 +13,7 @@ use otto::makefile::{MakefileParser, OttoConverter};
 use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use tempfile::TempDir;
 
 /// Every fixture that is expected to convert, with the warnings it must
 /// produce. An empty list is the strongest claim in the file: this Makefile
@@ -286,9 +287,16 @@ clean:
 // --- the CLI surface ------------------------------------------------------
 
 fn run_convert(makefile: &str, args: &[&str]) -> (i32, String, String) {
+    // `Convert` doesn't touch the store, but it's isolated anyway so
+    // isolation can't drift file by file. `assert_cmd::Command` doesn't
+    // expose raw stdio piping, so this uses `std::process::Command`
+    // directly with the same two env calls `common::otto_cmd` makes.
+    let home = TempDir::new().expect("failed to create scratch OTTO_HOME");
     let mut child = Command::new(env!("CARGO_BIN_EXE_otto"))
         .arg("Convert")
         .args(args)
+        .env("OTTO_HOME", home.path())
+        .env_remove("OTTO_DB_PATH")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

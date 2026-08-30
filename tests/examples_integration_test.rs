@@ -1,16 +1,23 @@
 /// Integration tests for example otto.yml files
 /// These tests ensure examples stay working as the codebase evolves
-use assert_cmd::Command;
+mod common;
 
-/// Helper to get the otto binary path
-#[allow(deprecated)]
-fn otto_cmd() -> Command {
-    Command::cargo_bin("otto").expect("Failed to find otto binary")
+use assert_cmd::Command;
+use tempfile::TempDir;
+
+/// Helper to get the otto binary path, isolated to a throwaway `OTTO_HOME` so
+/// running the examples doesn't write into the developer's real
+/// `~/.otto/otto.db`. The `TempDir` lives only for the caller's synchronous
+/// `.output()`/`.assert()` call, which is fine since nothing outlives it.
+fn otto_cmd() -> (TempDir, Command) {
+    let home = TempDir::new().expect("failed to create scratch OTTO_HOME");
+    let cmd = common::otto_cmd(home.path());
+    (home, cmd)
 }
 
 /// Helper to run an example and verify it succeeds
 fn run_example(example_dir: &str, task: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = otto_cmd();
+    let (_home, mut cmd) = otto_cmd();
     cmd.current_dir(format!("examples/{}", example_dir));
     cmd.arg(task);
 
@@ -34,7 +41,7 @@ fn run_example(example_dir: &str, task: &str) -> Result<(), Box<dyn std::error::
 
 /// Helper to just validate an example parses correctly
 fn validate_example_parses(example_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = otto_cmd();
+    let (_home, mut cmd) = otto_cmd();
     cmd.current_dir(format!("examples/{}", example_dir));
     cmd.arg("--help");
 
@@ -138,7 +145,7 @@ fn test_data_passing_demo_validation() {
 
 #[test]
 fn test_makefile_python_poetry_service_parses() {
-    let mut cmd = otto_cmd();
+    let (_home, mut cmd) = otto_cmd();
     cmd.current_dir("makefiles/python-poetry-service");
     cmd.arg("--help");
     let output = cmd.output().expect("Failed to run otto");
@@ -147,7 +154,7 @@ fn test_makefile_python_poetry_service_parses() {
 
 #[test]
 fn test_makefile_go_build_project_parses() {
-    let mut cmd = otto_cmd();
+    let (_home, mut cmd) = otto_cmd();
     cmd.current_dir("makefiles/go-build-project");
     cmd.arg("--help");
     let output = cmd.output().expect("Failed to run otto");
@@ -156,7 +163,7 @@ fn test_makefile_go_build_project_parses() {
 
 #[test]
 fn test_makefile_python_pre_commit_parses() {
-    let mut cmd = otto_cmd();
+    let (_home, mut cmd) = otto_cmd();
     cmd.current_dir("makefiles/python-pre-commit");
     cmd.arg("--help");
     let output = cmd.output().expect("Failed to run otto");
@@ -165,7 +172,7 @@ fn test_makefile_python_pre_commit_parses() {
 
 #[test]
 fn test_makefile_docker_compose_service_parses() {
-    let mut cmd = otto_cmd();
+    let (_home, mut cmd) = otto_cmd();
     cmd.current_dir("makefiles/docker-compose-service");
     cmd.arg("--help");
     let output = cmd.output().expect("Failed to run otto");
@@ -174,7 +181,7 @@ fn test_makefile_docker_compose_service_parses() {
 
 #[test]
 fn test_makefile_example_parses() {
-    let mut cmd = otto_cmd();
+    let (_home, mut cmd) = otto_cmd();
     cmd.current_dir("makefiles/makefile-example");
     cmd.arg("--help");
     let output = cmd.output().expect("Failed to run otto");
