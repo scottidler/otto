@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::cfg::config::{ConfigSpec, ParamSpec, TaskSpec, Value};
 use crate::cfg::edge::When;
 use crate::cfg::env as env_eval;
-use crate::cfg::param::ParamType;
+use crate::cfg::param::{Nargs, ParamType};
 use crate::cfg::resolver::DynamicResolver;
 use crate::cfg::task::{ForeachItem, ForeachSpec, TaskSpecs};
 use crate::cli::builtins::{BUILTIN_COMMANDS, is_builtin};
@@ -161,6 +161,23 @@ fn unknown_task_error(unknown: &[String], task_names: &[String]) -> eyre::Report
     match nearest_task_name(names[0], task_names) {
         Some(suggestion) => eyre!("{head}; did you mean '{suggestion}'?"),
         None => eyre!("{head}"),
+    }
+}
+
+/// The clap `num_args` range implied by a param's `nargs:`.
+///
+/// `Nargs::Range(min, max)` stores `min` already offset by one (see
+/// `cfg/param.rs`'s `Serialize`/`Deserialize`, which round-trip `nargs:
+/// "2:5"` through `Range(1, 5)`), so the count a user actually wrote back is
+/// `min + 1`.
+fn nargs_to_num_args(nargs: &Nargs) -> clap::builder::ValueRange {
+    match nargs {
+        Nargs::One => (1..=1).into(),
+        Nargs::Zero => (0..=0).into(),
+        Nargs::OneOrZero => (0..=1).into(),
+        Nargs::OneOrMore => (1..).into(),
+        Nargs::ZeroOrMore => (0..).into(),
+        Nargs::Range(min, max) => (*min + 1..=*max).into(),
     }
 }
 
@@ -1179,16 +1196,30 @@ impl Parser {
                         ParamType::OPT | ParamType::POS => {
                             // Check if value was provided on CLI vs from clap default
                             if matches.value_source(param_spec.name.as_str())
-                                == Some(clap::parser::ValueSource::CommandLine)
-                                && let Some(value) = matches.get_one::<String>(param_spec.name.as_str())
+                                != Some(clap::parser::ValueSource::CommandLine)
                             {
-                                cli_provided.insert(param_spec.name.clone());
-                                task.values
-                                    .insert(param_spec.name.clone(), Value::Item(value.to_string()));
-                                let env_name = param_spec.name.replace('-', "_");
-                                task.envs.insert(env_name, value.to_string());
+                                // Don't apply default yet — deferred to Phase 3
+                                continue;
                             }
-                            // Don't apply default yet — deferred to Phase 3
+                            // `nargs` beyond a single value (`+`, `*`, `?`, a
+                            // range) collects every space-separated value the
+                            // user gave in one occurrence, not just the
+                            // first - `get_one` silently dropped the rest.
+                            if param_spec.nargs == Nargs::One {
+                                if let Some(value) = matches.get_one::<String>(param_spec.name.as_str()) {
+                                    cli_provided.insert(param_spec.name.clone());
+                                    task.values
+                                        .insert(param_spec.name.clone(), Value::Item(value.to_string()));
+                                    let env_name = param_spec.name.replace('-', "_");
+                                    task.envs.insert(env_name, value.to_string());
+                                }
+                            } else if let Some(values) = matches.get_many::<String>(param_spec.name.as_str()) {
+                                let values: Vec<String> = values.cloned().collect();
+                                cli_provided.insert(param_spec.name.clone());
+                                let env_name = param_spec.name.replace('-', "_");
+                                task.envs.insert(env_name, values.join(" "));
+                                task.values.insert(param_spec.name.clone(), Value::List(values));
+                            }
                         }
                     }
                 }
@@ -1256,7 +1287,7 @@ impl Parser {
     /// rejected with a clear error.
     fn propagate_params(
         &self,
-        expanded_tasks: &HashMap<String, TaskSpec>,
+        expanded_tasks: &TaskSpecs,
         task_deps: &HashMap<String, Vec<TaskEdge>>,
         task_entries: &mut [(String, Task)],
         cli_provided_params: &HashMap<String, HashSet<String>>,
@@ -1382,7 +1413,7 @@ impl Parser {
     fn build_filtered_deps(
         task_deps: &HashMap<String, Vec<TaskEdge>>,
         entry_names: &HashSet<String>,
-        expanded_tasks: &HashMap<String, TaskSpec>,
+        expanded_tasks: &TaskSpecs,
     ) -> HashMap<String, Vec<String>> {
         let mut filtered: HashMap<String, Vec<String>> = HashMap::new();
         for name in entry_names {
@@ -1481,7 +1512,7 @@ impl Parser {
     /// - The host's `on_failure` field is preserved verbatim so the serializer
     ///   can re-emit it; `is_injected_sugar` lets the serializer filter the
     ///   synthetic `after:` entry so it doesn't show up as a duplicate.
-    fn apply_on_failure_sugar(specs: &mut HashMap<String, TaskSpec>) -> Result<()> {
+    fn apply_on_failure_sugar(specs: &mut TaskSpecs) -> Result<()> {
         // Collect (host, target) pairs first, then mutate. We can't hold a &mut to
         // `specs` while iterating it. Sort for determinism: HashMap iteration order
         // is non-deterministic, so without sorting the synthetic-edge order would
@@ -1521,7 +1552,7 @@ impl Parser {
 
     /// Compute task dependencies from a given task specs map.
     /// Validates that all referenced dependencies exist in the task specs.
-    fn compute_task_deps_from_specs(task_specs: &HashMap<String, TaskSpec>) -> Result<HashMap<String, Vec<TaskEdge>>> {
+    fn compute_task_deps_from_specs(task_specs: &TaskSpecs) -> Result<HashMap<String, Vec<TaskEdge>>> {
         let mut task_deps: HashMap<String, Vec<TaskEdge>> = HashMap::new();
 
         // Initialize with direct dependencies from 'before' field
@@ -1636,10 +1667,8 @@ impl Parser {
         serial_tasks: &HashSet<String>,
         requested_tasks: &[String],
         deferred: &mut HashSet<String>,
-    ) -> Result<(HashMap<String, TaskSpec>, SerialMembership)> {
-        use crate::cfg::task::TaskSpecs;
-
-        let mut expanded: TaskSpecs = HashMap::new();
+    ) -> Result<(TaskSpecs, SerialMembership)> {
+        let mut expanded: TaskSpecs = TaskSpecs::new();
         let mut membership: SerialMembership = HashMap::new();
         let reachable = self.reachable_task_names(requested_tasks);
 
@@ -1726,7 +1755,7 @@ impl Parser {
     fn collect_transitive_deps(
         task_name: &str,
         task_deps: &HashMap<String, Vec<TaskEdge>>,
-        task_specs: &HashMap<String, TaskSpec>,
+        task_specs: &TaskSpecs,
         collected: &mut HashSet<String>,
     ) -> Result<()> {
         if collected.contains(task_name) {
@@ -1861,6 +1890,14 @@ impl Parser {
                 // Argument with value
                 arg = arg.value_parser(value_parser!(String));
 
+                // `nargs` had zero readers outside cfg/param.rs: parsed,
+                // serialized, and never consulted when building the clap
+                // `Arg`, so every param accepted exactly one value no matter
+                // what `nargs:` said. Space-separated only (`num_args`),
+                // never `value_delimiter` (comma-splitting a value is a
+                // different, unrequested feature).
+                arg = arg.num_args(nargs_to_num_args(&param_spec.nargs));
+
                 if let Some(ref default) = param_spec.default {
                     arg = arg.default_value(default.clone());
                 }
@@ -1979,7 +2016,7 @@ impl Parser {
             output: vec![],
             envs: HashMap::new(),
             params: {
-                let mut params = HashMap::new();
+                let mut params = crate::cfg::param::ParamSpecs::new();
 
                 params.insert(
                     "format".to_string(),
@@ -1988,10 +2025,8 @@ impl Parser {
                         short: Some('f'),
                         long: Some("format".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: None,
                         default: Some("ascii".to_string()),
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![
                             "ascii".to_string(),
@@ -2013,10 +2048,8 @@ impl Parser {
                         short: None,
                         long: Some("output".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: None,
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::One,
@@ -2049,7 +2082,7 @@ impl Parser {
             output: vec![],
             envs: HashMap::new(),
             params: {
-                let mut params = HashMap::new();
+                let mut params = crate::cfg::param::ParamSpecs::new();
 
                 params.insert(
                     "keep".to_string(),
@@ -2058,10 +2091,8 @@ impl Parser {
                         short: None,
                         long: Some("keep".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: Some("DAYS".to_string()),
                         default: Some("30".to_string()),
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::One,
@@ -2077,10 +2108,8 @@ impl Parser {
                         short: None,
                         long: Some("dry-run".to_string()),
                         param_type: ParamType::FLG,
-                        dest: None,
                         metavar: None,
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::Zero,
@@ -2096,10 +2125,8 @@ impl Parser {
                         short: None,
                         long: Some("project".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: Some("HASH".to_string()),
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::One,
@@ -2132,7 +2159,7 @@ impl Parser {
             output: vec![],
             envs: HashMap::new(),
             params: {
-                let mut params = HashMap::new();
+                let mut params = crate::cfg::param::ParamSpecs::new();
 
                 params.insert(
                     "task".to_string(),
@@ -2141,10 +2168,8 @@ impl Parser {
                         short: Some('t'),
                         long: Some("task".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: Some("TASK".to_string()),
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::One,
@@ -2160,10 +2185,8 @@ impl Parser {
                         short: Some('n'),
                         long: Some("limit".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: Some("N".to_string()),
                         default: Some("20".to_string()),
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::One,
@@ -2179,10 +2202,8 @@ impl Parser {
                         short: Some('s'),
                         long: Some("status".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: Some("STATUS".to_string()),
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec!["success".to_string(), "failed".to_string(), "running".to_string()],
                         nargs: Nargs::One,
@@ -2198,10 +2219,8 @@ impl Parser {
                         short: Some('p'),
                         long: Some("project".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: Some("HASH".to_string()),
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::One,
@@ -2217,10 +2236,8 @@ impl Parser {
                         short: None,
                         long: Some("json".to_string()),
                         param_type: ParamType::FLG,
-                        dest: None,
                         metavar: None,
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::Zero,
@@ -2253,7 +2270,7 @@ impl Parser {
             output: vec![],
             envs: HashMap::new(),
             params: {
-                let mut params = HashMap::new();
+                let mut params = crate::cfg::param::ParamSpecs::new();
 
                 params.insert(
                     "task".to_string(),
@@ -2262,10 +2279,8 @@ impl Parser {
                         short: Some('t'),
                         long: Some("task".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: Some("TASK".to_string()),
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::One,
@@ -2281,10 +2296,8 @@ impl Parser {
                         short: Some('n'),
                         long: Some("limit".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: Some("N".to_string()),
                         default: Some("10".to_string()),
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::One,
@@ -2300,10 +2313,8 @@ impl Parser {
                         short: None,
                         long: Some("json".to_string()),
                         param_type: ParamType::FLG,
-                        dest: None,
                         metavar: None,
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::Zero,
@@ -2336,7 +2347,7 @@ impl Parser {
             output: vec![],
             envs: HashMap::new(),
             params: {
-                let mut params = HashMap::new();
+                let mut params = crate::cfg::param::ParamSpecs::new();
 
                 params.insert(
                     "strict".to_string(),
@@ -2345,10 +2356,8 @@ impl Parser {
                         short: None,
                         long: Some("strict".to_string()),
                         param_type: ParamType::FLG,
-                        dest: None,
                         metavar: None,
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::Zero,
@@ -2364,10 +2373,8 @@ impl Parser {
                         short: Some('o'),
                         long: Some("output".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: Some("FILE".to_string()),
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::One,
@@ -2400,7 +2407,7 @@ impl Parser {
             output: vec![],
             envs: HashMap::new(),
             params: {
-                let mut params = HashMap::new();
+                let mut params = crate::cfg::param::ParamSpecs::new();
 
                 params.insert(
                     "dry-run".to_string(),
@@ -2409,10 +2416,8 @@ impl Parser {
                         short: None,
                         long: Some("dry-run".to_string()),
                         param_type: ParamType::FLG,
-                        dest: None,
                         metavar: None,
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::Zero,
@@ -2428,10 +2433,8 @@ impl Parser {
                         short: Some('v'),
                         long: Some("version".to_string()),
                         param_type: ParamType::OPT,
-                        dest: None,
                         metavar: Some("VERSION".to_string()),
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::One,
@@ -2447,10 +2450,8 @@ impl Parser {
                         short: None,
                         long: Some("list-versions".to_string()),
                         param_type: ParamType::FLG,
-                        dest: None,
                         metavar: None,
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::Zero,
@@ -2466,10 +2467,8 @@ impl Parser {
                         short: None,
                         long: Some("rollback".to_string()),
                         param_type: ParamType::FLG,
-                        dest: None,
                         metavar: None,
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::Zero,
@@ -2485,10 +2484,8 @@ impl Parser {
                         short: None,
                         long: Some("force".to_string()),
                         param_type: ParamType::FLG,
-                        dest: None,
                         metavar: None,
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::Zero,
@@ -2504,10 +2501,8 @@ impl Parser {
                         short: None,
                         long: Some("no-backup".to_string()),
                         param_type: ParamType::FLG,
-                        dest: None,
                         metavar: None,
                         default: None,
-                        constant: Value::Empty,
                         choices_command: None,
                         choices: vec![],
                         nargs: Nargs::Zero,
@@ -2893,10 +2888,8 @@ mod tests {
             short,
             long: long.map(|s| s.to_string()),
             param_type,
-            dest: None,
             metavar: None,
             default,
-            constant: Value::Empty,
             choices_command: None,
             choices: vec![],
             nargs: Nargs::default(),
@@ -2954,6 +2947,35 @@ mod tests {
         let cmd2 = Command::new("test").arg(arg);
         let matches = cmd2.try_get_matches_from(vec!["test"]).unwrap();
         assert_eq!(matches.get_one::<String>("env").unwrap(), "development");
+    }
+
+    /// `nargs` had zero readers outside `cfg/param.rs`; wiring it to
+    /// `num_args` lets a param collect more than one space-separated value
+    /// in a single occurrence, and downstream reads them all back via
+    /// `Value::List` rather than the first value alone.
+    #[test]
+    fn test_param_to_arg_nargs_one_or_more_collects_every_value() {
+        let mut param = create_test_param_spec("files", ParamType::OPT, None, Some("files"));
+        param.nargs = Nargs::OneOrMore;
+
+        let arg = test_parser().param_to_arg("test", &param, BuildMode::Bind).unwrap();
+        let cmd = Command::new("test").arg(arg);
+        let matches = cmd
+            .try_get_matches_from(vec!["test", "--files", "a.txt", "b.txt", "c.txt"])
+            .unwrap();
+
+        let values: Vec<&String> = matches.get_many::<String>("files").unwrap().collect();
+        assert_eq!(values, vec!["a.txt", "b.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn nargs_to_num_args_maps_every_variant() {
+        assert_eq!(nargs_to_num_args(&Nargs::One), (1..=1).into());
+        assert_eq!(nargs_to_num_args(&Nargs::Zero), (0..=0).into());
+        assert_eq!(nargs_to_num_args(&Nargs::OneOrZero), (0..=1).into());
+        assert_eq!(nargs_to_num_args(&Nargs::OneOrMore), (1..).into());
+        assert_eq!(nargs_to_num_args(&Nargs::ZeroOrMore), (0..).into());
+        assert_eq!(nargs_to_num_args(&Nargs::Range(1, 5)), (2..=5).into());
     }
 
     #[test]
@@ -3181,7 +3203,7 @@ mod tests {
         task_deps.insert("b".to_string(), vec![TaskEdge::success("a")]);
         task_deps.insert("c".to_string(), vec![TaskEdge::success("b")]);
 
-        let task_specs = HashMap::new();
+        let task_specs = TaskSpecs::new();
         let mut collected = HashSet::new();
 
         Parser::collect_transitive_deps("c", &task_deps, &task_specs, &mut collected).unwrap();
@@ -3199,7 +3221,7 @@ mod tests {
         task_deps.insert("cov".to_string(), vec![]);
         task_deps.insert("cov-report".to_string(), vec![TaskEdge::success("cov")]);
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
         let cov_spec = TaskSpec {
             name: "cov".to_string(),
             after: vec![crate::cfg::edge::EdgeSpec::sugar("cov-report")],
@@ -3231,7 +3253,7 @@ mod tests {
         // Test chained after: a -> after: [b] -> after: [c]
         let task_deps = HashMap::new();
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         let a_spec = TaskSpec {
             name: "a".to_string(),
@@ -3273,7 +3295,7 @@ mod tests {
         task_deps.insert("b".to_string(), vec![TaskEdge::success("dep")]);
         task_deps.insert("dep".to_string(), vec![]);
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         let a_spec = TaskSpec {
             name: "a".to_string(),
@@ -3311,7 +3333,7 @@ mod tests {
         task_deps.insert("a".to_string(), vec![]);
         task_deps.insert("b".to_string(), vec![TaskEdge::success("a")]);
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         let a_spec = TaskSpec {
             name: "a".to_string(),
@@ -3639,7 +3661,7 @@ tasks:
 
         let task_deps = HashMap::new();
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         // Virtual parent task
         let parent_spec = TaskSpec {
@@ -3688,7 +3710,7 @@ tasks:
         // When running a specific subtask "install:td", should NOT collect siblings
         let task_deps = HashMap::new();
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         // Virtual parent task
         let parent_spec = TaskSpec {
@@ -3748,7 +3770,7 @@ tasks:
         task_deps.insert("install:td".to_string(), vec![TaskEdge::success("setup")]);
         task_deps.insert("setup".to_string(), vec![]);
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         let parent_spec = TaskSpec {
             name: "install".to_string(),
@@ -3800,7 +3822,7 @@ tasks:
         // Test requesting multiple specific subtasks (e.g., install:td install:cs)
         let task_deps = HashMap::new();
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         let parent_spec = TaskSpec {
             name: "install".to_string(),
@@ -3858,7 +3880,7 @@ tasks:
         // Test task names with multiple colons (e.g., "group:subgroup:item")
         let task_deps = HashMap::new();
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         // Even with nested colons, contains(':') returns true, so no expansion
         let nested_task = TaskSpec {
@@ -3893,7 +3915,7 @@ tasks:
         // Test that subtasks can use 'after' and it still works correctly
         let task_deps = HashMap::new();
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         let parent_spec = TaskSpec {
             name: "install".to_string(),
@@ -3945,7 +3967,7 @@ tasks:
         let mut task_deps = HashMap::new();
         task_deps.insert("deploy".to_string(), vec![TaskEdge::success("install:td")]);
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         let parent_spec = TaskSpec {
             name: "install".to_string(),
@@ -4006,7 +4028,7 @@ tasks:
     /// silently at exit 0; it is now rejected where dependencies are computed.
     #[test]
     fn test_paired_success_and_failure_edges_are_rejected() {
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
         task_specs.insert(
             "src".to_string(),
             TaskSpec {
@@ -4037,7 +4059,7 @@ tasks:
     /// different sources, or a `when: always` edge alongside a conditional one.
     #[test]
     fn test_distinct_sources_with_opposite_conditions_are_accepted() {
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
         for name in ["one", "two"] {
             task_specs.insert(
                 name.to_string(),
@@ -4071,7 +4093,7 @@ tasks:
         // Regular tasks (no colons) that have no subtasks should not try to expand
         let task_deps = HashMap::new();
 
-        let mut task_specs = HashMap::new();
+        let mut task_specs = TaskSpecs::new();
 
         let build_spec = TaskSpec {
             name: "build".to_string(),
@@ -4141,6 +4163,51 @@ tasks:
             "sibling subtask should NOT be present"
         );
         assert_eq!(tasks.len(), 1);
+    }
+
+    /// End-to-end: a param with `nargs: "+"` collects every space-separated
+    /// value from one CLI occurrence into `task.values` as a `Value::List`
+    /// and into `task.envs` as a space-joined string, not just the first
+    /// value (the pre-fix behavior via `get_one`).
+    #[test]
+    fn test_nargs_one_or_more_param_collects_every_value_end_to_end() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ottofile_path = temp_dir.path().join("otto.yml");
+
+        let config = r#"
+tasks:
+  build:
+    params:
+      --files:
+        nargs: "+"
+        help: files to build
+    bash: echo "${files}"
+"#;
+        fs::write(&ottofile_path, config).unwrap();
+
+        let args = vec![
+            "otto".to_string(),
+            "--ottofile".to_string(),
+            ottofile_path.to_string_lossy().to_string(),
+            "build".to_string(),
+            "--files".to_string(),
+            "a.txt".to_string(),
+            "b.txt".to_string(),
+        ];
+
+        let mut parser = Parser::new(args).unwrap();
+        let result = parser.parse().unwrap();
+        let (tasks, _, _, _, _, _) = result.into_run().unwrap().into_parts();
+
+        let build = tasks.iter().find(|t| t.name == "build").expect("build task present");
+        assert_eq!(
+            build.values.get("files"),
+            Some(&Value::List(vec!["a.txt".to_string(), "b.txt".to_string()]))
+        );
+        assert_eq!(build.envs.get("files"), Some(&"a.txt b.txt".to_string()));
     }
 
     #[test]

@@ -66,7 +66,7 @@ impl OttoConverter {
     }
 
     fn convert_targets(&self) -> Result<TaskSpecs> {
-        let mut tasks = HashMap::new();
+        let mut tasks = TaskSpecs::new();
 
         for target in &self.ast.targets {
             let task = self.convert_target_to_task(target)?;
@@ -97,7 +97,7 @@ impl OttoConverter {
             input: Vec::new(),
             output: Vec::new(),
             envs: HashMap::new(),
-            params: HashMap::new(),
+            params: crate::cfg::param::ParamSpecs::new(),
             action,
             foreach: None,
             virtual_parent: false,

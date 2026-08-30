@@ -399,7 +399,7 @@ fn resolve_env_variables(input: &str, env_context: &HashMap<String, String>) -> 
 
 /// Walk `input` resolving `${NAME}` / `$NAME` through `lookup`, treating `$$` as
 /// an escaped literal `$`. `lookup` returning `None` is an unresolved reference.
-fn expand_var_refs<F>(input: &str, mut lookup: F) -> Result<String>
+pub(crate) fn expand_var_refs<F>(input: &str, mut lookup: F) -> Result<String>
 where
     F: FnMut(&str) -> Option<String>,
 {

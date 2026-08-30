@@ -1,7 +1,7 @@
 //#![allow(unused_imports, unused_variables, dead_code)]
 
 use eyre::{Result, eyre};
-use serde::de::{Deserializer, MapAccess, Visitor};
+use serde::de::{Deserializer, Error as DeError, MapAccess, Visitor};
 use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -9,10 +9,17 @@ use std::fmt;
 use std::path::Path;
 use std::vec::Vec;
 
+use indexmap::IndexMap;
+
 use crate::cfg::edge::EdgeSpec;
 use crate::cfg::param::{ParamMapSerializer, ParamSpecs, deserialize_param_map};
 
-pub type TaskSpecs = HashMap<String, TaskSpec>;
+// IndexMap, not HashMap: preserves author order, so serializing one config
+// twice emits tasks in the same order both times. A HashMap here made five
+// serializes of one 5-task config produce five distinct orders (reproduced),
+// which is both a noisy diff on every re-emit and a determinism gap in any
+// test asserting on serialized output.
+pub type TaskSpecs = IndexMap<String, TaskSpec>;
 
 // ============================================================================
 // ForeachSpec - Configuration for dynamic subtask generation
@@ -135,6 +142,22 @@ pub fn sanitize_identifier(raw: &str) -> String {
 /// is the evaluator's literal-dollar escape, honored by both its stages.
 fn escape_literal_env_value(value: &str) -> String {
     value.replace('$', "$$")
+}
+
+/// Interpolate a foreach item's value into a subtask's `input`/`output` paths,
+/// the same `${var_name}` / `$var_name` form the item is injected into `envs`
+/// under. Only `var_name` resolves; any other `${...}`/`$...` reference in a
+/// path is an unexpandable variable and, per the design doc's fail-closed
+/// direction, a loud config-load error naming the task rather than a warning
+/// or a silent pass-through.
+fn interpolate_foreach_paths(task_name: &str, paths: &[String], var_name: &str, value: &str) -> Result<Vec<String>> {
+    paths
+        .iter()
+        .map(|path| {
+            crate::cfg::env::expand_var_refs(path, |name| (name == var_name).then(|| value.to_string()))
+                .map_err(|e| eyre!("Task '{task_name}' foreach path '{path}': {e}"))
+        })
+        .collect()
 }
 
 impl ForeachSpec {
@@ -464,6 +487,27 @@ impl<'de> Deserialize<'de> for TaskSpec {
     {
         let helper = TaskSpecHelper::deserialize(deserializer)?;
 
+        // A task naming more than one action source silently picked
+        // `bash:` and ignored the rest (`if let Some(bash) ... else if let
+        // Some(python) ...`), so a task with both `bash:` and `python:` ran
+        // the bash script with no warning that the python one was dead.
+        // Fail-closed: name every source that was present.
+        let action_sources: Vec<&str> = [
+            helper.bash.is_some().then_some("bash"),
+            helper.python.is_some().then_some("python"),
+            helper.action.is_some().then_some("action"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if action_sources.len() > 1 {
+            return Err(DeError::custom(format!(
+                "task declares more than one action source ({}); a task takes exactly one of \
+                 `bash:`, `python:`, or `action:`",
+                action_sources.join(", ")
+            )));
+        }
+
         let action = if let Some(bash_script) = helper.bash {
             let bash_script = deserialize_script_string(&bash_script);
             if bash_script.trim_start().starts_with("#!") {
@@ -555,24 +599,25 @@ impl Serialize for TaskSpec {
             map.serialize_entry("tty", &tty)?;
         }
 
-        // Serialize action as "bash:" if it starts with #!/bin/bash
+        // Serialize action as "bash:"/"python:" only when the auto-added bare
+        // shebang (no args) is the whole first line. A prefix match here used
+        // to also match a shebang WITH ARGS (e.g. "#!/bin/bash -euo pipefail"),
+        // stripping only the "#!/bin/bash" substring and leaving the args
+        // stranded as a mangled first line ("bash: |2-" / " -euo pipefail" /
+        // "  echo hello") that reparses to a different action. A shebang line
+        // carrying anything beyond the bare interpreter is user content, not
+        // sugar this serializer added, so it stays put and falls through to
+        // the verbatim "action:" key, which round-trips byte-identically.
         if !self.action.is_empty() {
-            if self.action.trim_start().starts_with("#!/bin/bash") {
-                let bash_script = self
-                    .action
-                    .trim_start()
-                    .strip_prefix("#!/bin/bash\n")
-                    .or_else(|| self.action.trim_start().strip_prefix("#!/bin/bash"))
-                    .unwrap_or(&self.action);
+            let trimmed = self.action.trim_start();
+            if let Some(bash_script) = trimmed.strip_prefix("#!/bin/bash\n") {
                 map.serialize_entry("bash", bash_script)?;
-            } else if self.action.trim_start().starts_with("#!/usr/bin/env python3") {
-                let python_script = self
-                    .action
-                    .trim_start()
-                    .strip_prefix("#!/usr/bin/env python3\n")
-                    .or_else(|| self.action.trim_start().strip_prefix("#!/usr/bin/env python3"))
-                    .unwrap_or(&self.action);
+            } else if trimmed == "#!/bin/bash" {
+                map.serialize_entry("bash", "")?;
+            } else if let Some(python_script) = trimmed.strip_prefix("#!/usr/bin/env python3\n") {
                 map.serialize_entry("python", python_script)?;
+            } else if trimmed == "#!/usr/bin/env python3" {
+                map.serialize_entry("python", "")?;
             } else {
                 map.serialize_entry("action", &self.action)?;
             }
@@ -586,19 +631,24 @@ fn deserialize_script_string(s: &str) -> String {
     // For block scalars, preserve the exact content but trim any common indentation
     let lines: Vec<&str> = s.lines().collect();
 
-    // Find minimum indentation (ignoring empty lines)
+    // Minimum indentation in *characters*, not bytes. A byte offset derived
+    // from one line's leading whitespace is not guaranteed to be a char
+    // boundary in another line's: U+2002 (EN SPACE) alone is 3 bytes, so a
+    // byte-indent of 2 (from an ascii-space-indented sibling line) sliced
+    // into the middle of it and panicked ("byte index 2 is not a char
+    // boundary"). Counting and skipping by chars sidesteps that entirely.
     let min_indent = lines
         .iter()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| line.len() - line.trim_start().len())
+        .map(|line| line.chars().take_while(|c| c.is_whitespace()).count())
         .min()
         .unwrap_or(0);
 
     let dedented: Vec<String> = lines
         .iter()
         .map(|line| {
-            if line.len() > min_indent {
-                line[min_indent..].to_string()
+            if line.chars().count() > min_indent {
+                line.chars().skip(min_indent).collect()
             } else {
                 line.to_string()
             }
@@ -704,6 +754,19 @@ impl TaskSpec {
                 subtask.envs.insert(foreach.var_name.clone(), literal_value.clone());
                 subtask.envs.insert("OTTO_FOREACH_ITEM".to_string(), literal_value);
                 subtask.envs.insert("OTTO_FOREACH_INDEX".to_string(), index.to_string());
+
+                // `input`/`output` are cloned by `self.clone()` above and, unlike
+                // `envs`, never rewritten per item - so a pattern like
+                // `input: ["src/${item}.txt"]` reached the up-to-date check as the
+                // literal string `src/${item}.txt`, matching no file, and a static
+                // shared path made every subtask's cache entry all-or-nothing.
+                // Interpolate the same `var_name` into both lists, same as it is
+                // injected into `envs`. An unexpandable reference in a path is a
+                // config-load error (fail-closed, consistent with
+                // `deny_unknown_fields`), not a silent no-op or a warning.
+                subtask.input = interpolate_foreach_paths(&self.name, &subtask.input, &foreach.var_name, &item.value)?;
+                subtask.output =
+                    interpolate_foreach_paths(&self.name, &subtask.output, &foreach.var_name, &item.value)?;
 
                 Ok(subtask)
             })
@@ -1087,6 +1150,64 @@ mod foreach_tests {
     }
 
     #[test]
+    fn test_expand_foreach_with_items_interpolates_input_and_output_per_item() {
+        let mut task = TaskSpec::new(
+            "build".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec!["src/${item}.txt".to_string()],
+            vec!["out/${item}.o".to_string()],
+            HashMap::new(),
+            ParamSpecs::new(),
+            "echo ${item}".to_string(),
+        );
+        task.foreach = Some(command_foreach("unused: items are supplied"));
+        task.foreach.as_mut().unwrap().var_name = "item".to_string();
+
+        let items = vec![
+            ForeachItem {
+                identifier: "a".to_string(),
+                value: "a".to_string(),
+            },
+            ForeachItem {
+                identifier: "b".to_string(),
+                value: "b".to_string(),
+            },
+        ];
+        let subtasks = task.expand_foreach_with_items(&items).unwrap();
+
+        assert_eq!(subtasks[0].input, vec!["src/a.txt".to_string()]);
+        assert_eq!(subtasks[0].output, vec!["out/a.o".to_string()]);
+        assert_eq!(subtasks[1].input, vec!["src/b.txt".to_string()]);
+        assert_eq!(subtasks[1].output, vec!["out/b.o".to_string()]);
+    }
+
+    #[test]
+    fn test_expand_foreach_with_items_rejects_an_unexpandable_path_variable() {
+        let mut task = TaskSpec::new(
+            "build".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec!["src/${bogus}.txt".to_string()],
+            vec![],
+            HashMap::new(),
+            ParamSpecs::new(),
+            "echo hi".to_string(),
+        );
+        task.foreach = Some(command_foreach("unused: items are supplied"));
+
+        let items = vec![ForeachItem {
+            identifier: "a".to_string(),
+            value: "a".to_string(),
+        }];
+        let err = task.expand_foreach_with_items(&items).unwrap_err().to_string();
+        assert!(err.contains("build"), "{err}");
+        assert!(err.contains("bogus"), "{err}");
+    }
+
+    #[test]
     fn test_expand_foreach_with_items_rejects_duplicates() {
         let mut task = TaskSpec::new(
             "up".to_string(),
@@ -1406,6 +1527,28 @@ mod foreach_tests {
         assert!(serde_yaml::to_string(&spec).unwrap().contains("tty: true"));
     }
 
+    /// A task naming both `bash:` and `python:` used to silently run bash and
+    /// drop python with no warning. Now it is a loud config-load error naming
+    /// every source present.
+    #[test]
+    fn bash_and_python_together_is_a_loud_config_error() {
+        let yaml = "bash: echo FROM_BASH\npython: print('FROM_PYTHON')\n";
+        let err = serde_yaml::from_str::<TaskSpec>(yaml).unwrap_err().to_string();
+        assert!(err.contains("bash"), "{err}");
+        assert!(err.contains("python"), "{err}");
+    }
+
+    /// Dedent used to compute indentation in bytes (two ascii spaces = 2
+    /// bytes) while slicing every line at that same byte offset, including a
+    /// sibling line indented by one U+2002 (EN SPACE, 3 bytes): byte offset 2
+    /// lands mid-character there and panicked, "byte index 2 is not a char
+    /// boundary; it is inside '\u{2002}'". Char-counted indent sidesteps it.
+    #[test]
+    fn deserialize_script_string_dedents_multibyte_whitespace_without_panicking() {
+        let script = "  a\n\u{2002}b";
+        assert_eq!(deserialize_script_string(script), "a\nb");
+    }
+
     /// `tty:` on a foreach task means "give each of these the terminal", so every
     /// generated subtask carries it. The exclusivity gate then serializes them
     /// even under `parallel: true`; that is documented behavior, not an error.
@@ -1616,10 +1759,8 @@ mod foreach_tests {
             short: _,
             long: _,
             param_type: _,
-            dest: _,
             metavar: _,
             default: _,
-            constant: _,
             choices: _,
             choices_command: _,
             nargs: _,
@@ -1675,7 +1816,7 @@ mod foreach_tests {
             ),
             (
                 "ParamSpec",
-                8,
+                6,
                 expected_keys_from_deny_unknown_fields::<ParamSpec>,
                 param_path,
             ),
@@ -1708,8 +1849,8 @@ mod foreach_tests {
             total += keys.len();
         }
         assert_eq!(
-            total, 46,
-            "total on-disk key count drifted from the design doc's count of 46"
+            total, 44,
+            "total on-disk key count drifted from the design doc's count of 44"
         );
     }
 }

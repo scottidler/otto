@@ -851,3 +851,98 @@ OTTO_HOME=/tmp/ottohome-final2 otto ci -> exit 0, [ci] ✅ All CI checks passed!
   from the same host as the tarball, so an attacker who controls the release
   host controls both. Signature verification (minisign/cosign) is the real
   answer and is not in any phase of this document.
+
+## Phase 6: cfg correctness
+
+### Design decisions
+
+- **`Nargs::deserialize` now validates `"min:max"` instead of computing
+  `min - 1` unconditionally** — `cfg/param.rs`'s `Deserialize for Nargs`. Rejects
+  a missing/extra `:` (`"1:2:3"`), a non-numeric `min`/`max`, `min == 0`
+  (the subtract-with-overflow panic case, `"0:5"`), and `min > max`
+  (`"5:2"`, previously silently accepted as an inverted range). Errors bubble
+  up through serde_yaml's own path-tracking, so the message already names the
+  param (e.g. `tasks.build.params.-v|--verbose: nargs '0:5': ...`) with no
+  extra plumbing needed.
+- **`nargs` is now wired to clap's `num_args`** — `cli/parser.rs:param_to_arg`
+  (new `nargs_to_num_args` helper) and the CLI-provided-value extraction loop
+  in `bind_tasks`. A param whose `nargs` allows more than one value
+  (`+`, `*`, `?`, or a range) is read back via `get_many` into a
+  `Value::List`, with the env var space-joined (`"a.txt b.txt"`); `Nargs::One`
+  keeps the original single-value `get_one`/`Value::Item` path unchanged.
+  Verified end-to-end (`test_nargs_one_or_more_param_collects_every_value_end_to_end`)
+  through `Parser::parse`, not just `param_to_arg` in isolation.
+- **`dest` and `constant` are deleted from `ParamSpec`**, along with the
+  now-dead `deserialize_value` visitor. Both fields had zero readers outside
+  `cfg/param.rs`'s own tests (confirmed by repo-wide grep before deleting).
+  `docs/commands/ottofile-reference.md` and the `ottofile_reference_key_inventory_is_exhaustive`
+  drift test are updated together (`ParamSpec` 8 -> 6 keys, total 46 -> 44).
+- **`TaskSpecs`/`ParamSpecs` moved from `HashMap` to `IndexMap`**
+  (`cfg/task.rs`, `cfg/param.rs`), added as a new *direct* dependency
+  (`cargo add indexmap --features serde`) per the doc's dependency note.
+  Every construction site across `src/` and `tests/` that spelled the
+  concrete `HashMap`/`HashMap::new()` instead of the type alias was updated to
+  use the alias, so the map type can't drift back silently at a call site.
+- **Serialize's `bash:`/`python:` sugar-detection now requires the FULL first
+  line to be the bare shebang**, not a prefix match — `cfg/task.rs`'s
+  `Serialize for TaskSpec`. A shebang carrying anything beyond the bare
+  interpreter (`#!/bin/bash -euo pipefail`) is user content, not
+  serializer-added sugar, and now falls through to the verbatim `action:` key
+  instead of having its args stranded on a mangled continuation line.
+- **`deserialize_script_string`'s dedent now counts and skips whitespace in
+  chars, not bytes** — the old byte-offset-based slice panicked on any script
+  whose leading whitespace mixed ascii spaces with a multibyte whitespace
+  character (U+2002 EN SPACE is 3 bytes).
+- **A task naming more than one of `bash:`/`python:`/`action:` is now a
+  loud config-load error** naming every source present, checked in
+  `TaskSpec`'s hand-written `Deserialize` before any of the three is
+  consulted.
+- **`divine()` is now fallible** (`Result<(String, Option<char>, Option<String>)>`)
+  and rejects: two short flags, two long flags, a single-dash multi-char
+  token (`-verbose`, almost certainly a typo for `--verbose`), and a bare
+  name combined with a flag in the same key. `deserialize_param_map`'s
+  `visit_map` additionally rejects two params-map keys that divine to the
+  same name (previously last-wins, silently dropping the first).
+- **`expand_foreach_with_items` now interpolates the foreach variable into
+  each subtask's `input`/`output`** (`cfg/task.rs`), the same way it is
+  already injected into `envs`, using a new `interpolate_foreach_paths`
+  helper built on `cfg::env::expand_var_refs` (made `pub(crate)` for this
+  one caller). An unexpandable variable in a path is a config-load error
+  (fail-closed, matching this document's direction and `deny_unknown_fields`),
+  not a warning: `Task '<name>' foreach path '<path>': Environment variable
+  '<var>' not found`.
+
+### Deviations
+
+- **The doc's fix text for the foreach bullet says "interpolate ... using
+  the same `var_name`"; implemented via `cfg::env::expand_var_refs` rather
+  than a bespoke string-replace.** Same effect, correct seam: it reuses the
+  exact `${NAME}`/`$NAME`/`$$` scanning rules already locked in for `envs:`,
+  so the two injection paths cannot disagree about what counts as a
+  reference.
+- **`nargs` wiring stops at CLI-provided values; `default:` and param
+  propagation are unchanged for multi-value params.** `default` is a single
+  `String` with no multi-value form in the schema, and `propagate_params`
+  (`cli/parser.rs`) only matches `Value::Item`, so a `Value::List` from a
+  multi-value param does not propagate to a dependency today. Not a
+  regression (nothing propagated before this phase either, since nothing
+  populated `Value::List` at all); flagged as a gap for whoever extends
+  `propagate_params`.
+- **`test_value_roundtrip_via_paramspec_constant` was deleted, not
+  inverted.** It tested `ParamSpec.constant`'s round-trip specifically,
+  and that field no longer exists; there is no "opposite behavior" to pin.
+
+### Tradeoffs
+
+- **`divine()`'s duplicate-name check lives in the map visitor
+  (`deserialize_param_map`), not inside `divine()` itself.** `divine()` sees
+  one key at a time and has no view of the map being built; the visitor is
+  the only place two keys can be compared.
+- **`interpolate_foreach_paths` errors are eager (checked at expansion time,
+  once per subtask), not deferred to the up-to-date check.** A foreach with
+  a hundred items and a typo'd variable fails loudly on the first bad
+  subtask rather than partially running before the typo is discovered.
+
+### Open questions
+
+- None.

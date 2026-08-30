@@ -215,6 +215,80 @@ tasks:
     );
 }
 
+/// Phase 6: `tests/roundtrip.rs` had no `#!` anywhere, so this invariant was
+/// never tested for shebangs at all. A prefix match on serialize
+/// (`starts_with("#!/bin/bash")`) used to also match a shebang WITH ARGS,
+/// stripping only the "#!/bin/bash" substring and stranding the args on a
+/// mangled continuation line that reparsed to a different action.
+#[test]
+fn config_with_shebang_args_roundtrips() {
+    assert_roundtrips(
+        r#"
+tasks:
+  build:
+    bash: |
+      #!/bin/bash -euo pipefail
+      echo hello
+"#,
+    );
+}
+
+/// A bare auto-added shebang (no args) is still recognized as `bash:` sugar
+/// and stays terse on re-emit rather than falling back to `action:`.
+#[test]
+fn config_with_bash_sugar_emits_bash_key_not_action() {
+    let yaml = r#"
+tasks:
+  build:
+    bash: echo hello
+"#;
+    let config: ConfigSpec = serde_yaml::from_str(yaml).expect("parse failed");
+    let emitted = serde_yaml::to_string(&config).expect("serialize failed");
+    assert!(emitted.contains("bash:"), "{emitted}");
+    assert!(!emitted.contains("action:"), "{emitted}");
+}
+
+/// `TaskSpecs`/`ParamSpecs` were `HashMap`-backed, so serializing one config
+/// gave a different key order on (almost) every run - five serializes of one
+/// 5-task config reproduced five distinct orders. `IndexMap` preserves
+/// author order, so every serialize of the same parsed config must agree.
+#[test]
+fn five_serializes_of_one_config_produce_one_order() {
+    let yaml = r#"
+tasks:
+  echo1:
+    action: echo one
+  echo2:
+    action: echo two
+    params:
+      -a|--alpha:
+        help: a
+      -b|--beta:
+        help: b
+      -c|--gamma:
+        help: c
+  echo3:
+    action: echo three
+  echo4:
+    action: echo four
+  echo5:
+    action: echo five
+"#;
+    // Re-parse from source on every iteration - a fresh `IndexMap` per parse,
+    // not one map serialized five times - so this exercises "same insertions
+    // produce the same order", not merely "one object serializes the same as
+    // itself".
+    let first = {
+        let config: ConfigSpec = serde_yaml::from_str(yaml).expect("parse failed");
+        serde_yaml::to_string(&config).expect("serialize failed")
+    };
+    for attempt in 1..5 {
+        let config: ConfigSpec = serde_yaml::from_str(yaml).expect("parse failed");
+        let emitted = serde_yaml::to_string(&config).expect("serialize failed");
+        assert_eq!(emitted, first, "serialize #{attempt} produced a different key order");
+    }
+}
+
 /// The absent key must stay absent: `tty` is `Option<bool>`, and emitting
 /// `tty: false` for every ordinary task would both bloat the re-emitted ottofile
 /// and turn "unset" into "explicitly off".

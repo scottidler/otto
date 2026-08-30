@@ -1,14 +1,18 @@
 //#![allow(unused_imports, unused_variables, dead_code)]
 
 use eyre::Result;
-use serde::de::{Deserializer, Error, MapAccess, SeqAccess, Visitor};
+use indexmap::IndexMap;
+use serde::de::{Deserializer, Error, MapAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::vec::Vec;
 
-pub type ParamSpecs = HashMap<String, ParamSpec>;
+// IndexMap, not HashMap: same determinism rationale as TaskSpecs (see
+// cfg/task.rs) - one param map serialized twice must emit its keys in the
+// same author order both times.
+pub type ParamSpecs = IndexMap<String, ParamSpec>;
 
 /// Reconstruct the rich params-map key (e.g. "-v|--verbose") from a ParamSpec's
 /// derived fields. Inverse of `divine` for serialize-side emission.
@@ -46,9 +50,7 @@ impl Serialize for ParamMapSerializer<'_> {
 /// REJECTED input rather than silently-ignored input: writing e.g. `name:`
 /// under a param, which was always a no-op because these fields are derived
 /// from the params-map key via `divine()`, now errors. Verified: nothing in
-/// this repo or the 159 external ottofiles under `~/repos` writes them. Does
-/// not reach `constant`'s free-form map: the attribute governs `ParamSpec`'s
-/// own field names, not the contents of `Value`'s hand-written `visit_map`.
+/// this repo or the 159 external ottofiles under `~/repos` writes them.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParamSpec {
@@ -78,16 +80,10 @@ pub struct ParamSpec {
     pub param_type: ParamType,
 
     #[serde(default)]
-    pub dest: Option<String>,
-
-    #[serde(default)]
     pub metavar: Option<String>,
 
     #[serde(default)]
     pub default: Option<String>,
-
-    #[serde(default, deserialize_with = "deserialize_value")]
-    pub constant: Value,
 
     #[serde(default)]
     pub choices: Vec<String>,
@@ -230,58 +226,6 @@ impl fmt::Display for Value {
     }
 }
 
-fn deserialize_value<'de, D>(deserializer: D) -> Result<Value, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct ValueEnum;
-    impl<'de> Visitor<'de> for ValueEnum {
-        type Value = Value;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("null, string, list of strings, or map of string to string")
-        }
-        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where
-            E: Error,
-        {
-            Ok(Value::Item(value.to_owned()))
-        }
-        fn visit_seq<S>(self, mut visitor: S) -> Result<Self::Value, S::Error>
-        where
-            S: SeqAccess<'de>,
-        {
-            let mut vec: Vec<String> = vec![];
-            while let Some(item) = visitor.next_element()? {
-                vec.push(item);
-            }
-            Ok(Value::List(vec))
-        }
-        fn visit_map<M>(self, mut visitor: M) -> Result<Self::Value, M::Error>
-        where
-            M: MapAccess<'de>,
-        {
-            let mut map: HashMap<String, String> = HashMap::new();
-            while let Some((k, v)) = visitor.next_entry()? {
-                map.insert(k, v);
-            }
-            Ok(Value::Dict(map))
-        }
-        fn visit_unit<E>(self) -> Result<Self::Value, E>
-        where
-            E: Error,
-        {
-            Ok(Value::Empty)
-        }
-        fn visit_none<E>(self) -> Result<Self::Value, E>
-        where
-            E: Error,
-        {
-            Ok(Value::Empty)
-        }
-    }
-    deserializer.deserialize_any(ValueEnum)
-}
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Nargs {
     #[default]
@@ -338,11 +282,31 @@ impl<'de> Deserialize<'de> for Nargs {
             _ => {
                 if s.contains(':') {
                     let parts: Vec<&str> = s.split(':').collect();
-                    let min: usize = parts[0].parse().map_err(Error::custom)?;
-                    let max: usize = parts[1].parse().map_err(Error::custom)?;
+                    if parts.len() != 2 {
+                        return Err(Error::custom(format!(
+                            "nargs '{s}': expected 'min:max' with exactly one ':', got {} parts",
+                            parts.len()
+                        )));
+                    }
+                    let min: usize = parts[0]
+                        .parse()
+                        .map_err(|e| Error::custom(format!("nargs '{s}': invalid min '{}': {e}", parts[0])))?;
+                    let max: usize = parts[1]
+                        .parse()
+                        .map_err(|e| Error::custom(format!("nargs '{s}': invalid max '{}': {e}", parts[1])))?;
+                    if min == 0 {
+                        return Err(Error::custom(format!("nargs '{s}': min must be at least 1, got 0")));
+                    }
+                    if min > max {
+                        return Err(Error::custom(format!(
+                            "nargs '{s}': min ({min}) must not be greater than max ({max})"
+                        )));
+                    }
                     Self::Range(min - 1, max)
                 } else {
-                    let num = s.parse().map_err(Error::custom)?;
+                    let num = s
+                        .parse()
+                        .map_err(|e| Error::custom(format!("nargs '{s}': invalid count: {e}")))?;
                     Self::Range(0, num)
                 }
             }
@@ -351,33 +315,77 @@ impl<'de> Deserialize<'de> for Nargs {
     }
 }
 
-fn divine(title: &str) -> (String, Option<char>, Option<String>) {
-    let flags: Vec<String> = title.split('|').map(std::string::ToString::to_string).collect();
-    let short = flags
-        .iter()
-        .filter(|&i| i.starts_with('-') && i.len() == 2)
-        .cloned()
-        .collect::<String>()
-        .trim_matches('-')
-        .chars()
-        .next();
+/// Divine a param's name/short/long form from its params-map key (e.g.
+/// `-v|--verbose`).
+///
+/// Previously infallible and silently wrong on garbage input: `-v|-x` kept
+/// only the first short and dropped `-x`; `--foo|--bar` concatenated into a
+/// single bogus long `"foo--bar"`; `-verbose` (one dash, multiple letters -
+/// almost certainly a typo for `--verbose`) became a *positional* param
+/// literally named `-verbose`; and two keys divining to the same name (e.g.
+/// `-v|--verbose` and `--verbose` in one map) silently collapsed to one
+/// entry, the second's fields winning with no signal the first ever existed.
+/// Every one of those is now a rejected config, naming the offending key.
+fn divine(title: &str) -> Result<(String, Option<char>, Option<String>)> {
+    let flags: Vec<&str> = title.split('|').collect();
+    let mut short: Option<char> = None;
+    let mut long: Option<String> = None;
+    let mut bare: Option<&str> = None;
 
-    let long = Some(String::from(
-        flags
-            .iter()
-            .filter(|&i| i.starts_with("--") && i.len() > 2)
-            .cloned()
-            .collect::<String>()
-            .trim_matches('-'),
-    ))
-    .filter(|s| !s.is_empty());
+    for &flag in &flags {
+        if flag.is_empty() {
+            return Err(eyre::eyre!("param key '{title}': empty flag between '|'"));
+        }
+        if let Some(name) = flag.strip_prefix("--") {
+            if name.is_empty() {
+                return Err(eyre::eyre!("param key '{title}': '--' names no flag"));
+            }
+            if let Some(existing) = &long {
+                return Err(eyre::eyre!(
+                    "param key '{title}': two long flags ('--{existing}' and '{flag}'); a param \
+                     takes at most one"
+                ));
+            }
+            long = Some(name.to_string());
+        } else if let Some(rest) = flag.strip_prefix('-') {
+            let mut chars = rest.chars();
+            let (Some(c), None) = (chars.next(), chars.next()) else {
+                return Err(eyre::eyre!(
+                    "param key '{title}': '{flag}' is not a valid short flag (expected exactly \
+                     one character after '-'; did you mean '-{flag}' with a second '-'?)"
+                ));
+            };
+            if let Some(existing) = short {
+                return Err(eyre::eyre!(
+                    "param key '{title}': two short flags ('-{existing}' and '{flag}'); a param \
+                     takes at most one"
+                ));
+            }
+            short = Some(c);
+        } else {
+            if let Some(existing) = bare {
+                return Err(eyre::eyre!(
+                    "param key '{title}': multiple bare names ('{existing}' and '{flag}')"
+                ));
+            }
+            bare = Some(flag);
+        }
+    }
 
-    //calculate the name to be long if exists, or short, or default to title
+    if let Some(name) = bare {
+        if short.is_some() || long.is_some() {
+            return Err(eyre::eyre!(
+                "param key '{title}': '{name}' cannot be combined with a '-'/'--' flag in the \
+                 same key; a positional param takes no flag form"
+            ));
+        }
+        return Ok((name.to_string(), None, None));
+    }
+
     let name = long
         .clone()
-        .unwrap_or_else(|| short.map_or_else(|| title.to_string(), |c| c.to_string()));
-
-    (name, short, long)
+        .unwrap_or_else(|| short.map(|c| c.to_string()).unwrap_or_default());
+    Ok((name, short, long))
 }
 
 pub fn deserialize_param_map<'de, D>(deserializer: D) -> Result<ParamSpecs, D::Error>
@@ -399,7 +407,18 @@ where
         {
             let mut params = ParamSpecs::new();
             while let Some((title, mut param_spec)) = map.next_entry::<String, ParamSpec>()? {
-                let (name, short, long) = divine(&title);
+                let (name, short, long) = divine(&title).map_err(M::Error::custom)?;
+
+                // Two keys that divine to the same name silently collapsed
+                // into one entry (last-wins), losing the first param with no
+                // signal it ever existed.
+                if params.contains_key(&name) {
+                    return Err(M::Error::custom(format!(
+                        "param key '{title}': divines to name '{name}', which another param key \
+                         in this map already divines to; param names must be unique"
+                    )));
+                }
+
                 param_spec.name = name.clone();
                 param_spec.short = short;
                 param_spec.long = long;
@@ -638,10 +657,8 @@ mod tests {
             short: Some('v'),
             long: Some("verbose".to_string()),
             param_type: ParamType::FLG,
-            dest: None,
             metavar: None,
             default: Some("false".to_string()),
-            constant: Value::Empty,
             choices_command: None,
             choices: vec![],
             nargs: Nargs::default(),
@@ -663,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_divine_function_short_only() {
-        let (name, short, long) = divine("-v");
+        let (name, short, long) = divine("-v").unwrap();
         assert_eq!(name, "v");
         assert_eq!(short, Some('v'));
         assert_eq!(long, None);
@@ -671,7 +688,7 @@ mod tests {
 
     #[test]
     fn test_divine_function_long_only() {
-        let (name, short, long) = divine("--verbose");
+        let (name, short, long) = divine("--verbose").unwrap();
         assert_eq!(name, "verbose");
         assert_eq!(short, None);
         assert_eq!(long, Some("verbose".to_string()));
@@ -679,7 +696,7 @@ mod tests {
 
     #[test]
     fn test_divine_function_both() {
-        let (name, short, long) = divine("-v|--verbose");
+        let (name, short, long) = divine("-v|--verbose").unwrap();
         assert_eq!(name, "verbose");
         assert_eq!(short, Some('v'));
         assert_eq!(long, Some("verbose".to_string()));
@@ -687,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_divine_function_reverse_order() {
-        let (name, short, long) = divine("--verbose|-v");
+        let (name, short, long) = divine("--verbose|-v").unwrap();
         assert_eq!(name, "verbose");
         assert_eq!(short, Some('v'));
         assert_eq!(long, Some("verbose".to_string()));
@@ -695,10 +712,57 @@ mod tests {
 
     #[test]
     fn test_divine_function_no_flags() {
-        let (name, short, long) = divine("filename");
+        let (name, short, long) = divine("filename").unwrap();
         assert_eq!(name, "filename");
         assert_eq!(short, None);
         assert_eq!(long, None);
+    }
+
+    /// `-v|-x` used to silently keep only the first short and drop `-x`.
+    #[test]
+    fn divine_rejects_two_short_flags() {
+        let err = divine("-v|-x").unwrap_err().to_string();
+        assert!(err.contains("-v|-x"), "{err}");
+    }
+
+    /// `--foo|--bar` used to concatenate into a bogus single long `"foo--bar"`.
+    #[test]
+    fn divine_rejects_two_long_flags() {
+        let err = divine("--foo|--bar").unwrap_err().to_string();
+        assert!(err.contains("--foo|--bar"), "{err}");
+    }
+
+    /// `-verbose` (one dash, multiple letters) used to become a *positional*
+    /// param literally named `-verbose`, almost certainly a typo for
+    /// `--verbose`.
+    #[test]
+    fn divine_rejects_a_single_dash_multi_char_flag() {
+        let err = divine("-verbose").unwrap_err().to_string();
+        assert!(err.contains("-verbose"), "{err}");
+    }
+
+    /// A bare name cannot be mixed with a flag form in the same key.
+    #[test]
+    fn divine_rejects_a_bare_name_mixed_with_a_flag() {
+        let err = divine("filename|-x").unwrap_err().to_string();
+        assert!(err.contains("filename|-x"), "{err}");
+    }
+
+    /// `-v|--verbose` plus a separate `--verbose` key in one params map used
+    /// to silently collapse to one entry (last-wins), losing the first with
+    /// no signal it ever existed.
+    #[test]
+    fn deny_duplicate_divined_names_in_one_params_map() {
+        use crate::cfg::task::TaskSpec;
+        let yaml = r#"
+        params:
+          -v|--verbose:
+            help: first
+          --verbose:
+            help: second
+        "#;
+        let err = serde_yaml::from_str::<TaskSpec>(yaml).unwrap_err().to_string();
+        assert!(err.contains("verbose"), "{err}");
     }
 
     /// Phase 4 negative test (design doc 2026-08-29, Phase 4 table). `name:`
@@ -730,45 +794,42 @@ mod tests {
         assert_eq!(Value::Dict(dict).to_string(), "Value::Dict({key: value})");
     }
 
+    /// `nargs: "0:5"` used to panic (`attempt to subtract with overflow` at
+    /// `min - 1`); now `min` of 0 is rejected outright, naming the param via
+    /// the surrounding ConfigSpec's yaml path.
     #[test]
-    fn test_value_roundtrip_via_paramspec_constant() {
-        // Round-trip Value through ParamSpec.constant, which uses deserialize_value.
-        // This is the path that actually fires in production.
-        let mut dict = HashMap::new();
-        dict.insert("k1".to_string(), "v1".to_string());
-        dict.insert("k2".to_string(), "v2".to_string());
+    fn nargs_zero_min_is_rejected_naming_the_param() {
+        use crate::cfg::config::ConfigSpec;
+        let yaml = "tasks:\n  build:\n    params:\n      -v|--verbose:\n        nargs: \"0:5\"\n    bash: echo hi\n";
+        let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+        assert!(err.contains("-v|--verbose"), "{err}");
+        assert!(err.contains("0:5"), "{err}");
+    }
 
-        let cases = vec![
-            Value::Empty,
-            Value::Item("hello".to_string()),
-            Value::List(vec!["a".to_string(), "b".to_string()]),
-            Value::Dict(dict),
-        ];
+    /// `"5:2"` used to silently accept an inverted range (`Range(4, 2)`).
+    #[test]
+    fn nargs_inverted_range_is_rejected_naming_the_param() {
+        use crate::cfg::config::ConfigSpec;
+        let yaml = "tasks:\n  build:\n    params:\n      --files:\n        nargs: \"5:2\"\n    bash: echo hi\n";
+        let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+        assert!(err.contains("files"), "{err}");
+        assert!(err.contains("5:2"), "{err}");
+    }
 
-        for value in cases {
-            let spec = ParamSpec {
-                name: String::new(),
-                short: None,
-                long: None,
-                param_type: ParamType::default(),
-                dest: None,
-                metavar: None,
-                default: None,
-                constant: value.clone(),
-                choices_command: None,
-                choices: vec![],
-                nargs: Nargs::default(),
-                help: None,
-                value: Value::Empty,
-            };
-            let yaml = serde_yaml::to_string(&spec).unwrap();
-            let parsed: ParamSpec =
-                serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("failed to parse {yaml:?}: {e}"));
-            assert_eq!(
-                spec.constant, parsed.constant,
-                "constant round-trip failed for {value} (yaml: {yaml:?})"
-            );
-        }
+    /// `"1:2:3"` used to silently drop the third part (`Range(0, 2)`).
+    #[test]
+    fn nargs_extra_colon_is_rejected_naming_the_param() {
+        use crate::cfg::config::ConfigSpec;
+        let yaml = "tasks:\n  build:\n    params:\n      --files:\n        nargs: \"1:2:3\"\n    bash: echo hi\n";
+        let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+        assert!(err.contains("files"), "{err}");
+        assert!(err.contains("1:2:3"), "{err}");
+    }
+
+    #[test]
+    fn nargs_valid_range_still_parses() {
+        let nargs: Nargs = serde_yaml::from_str("\"2:5\"").unwrap();
+        assert_eq!(nargs, Nargs::Range(1, 5));
     }
 
     #[test]

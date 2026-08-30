@@ -117,7 +117,7 @@ here too.
 | `tasks.<name>.foreach.parallel` | boolean | `true` | Whether subtasks run concurrently or serially. This is the key that must live HERE, not one level up on the task — the motivating bug for this whole design doc was `parallel:` written beside `foreach:` instead of inside it. |
 | `tasks.<name>.foreach.max_items` | integer | `1000` | Maximum item count before erroring. |
 
-## `tasks.<name>.params.<title>:` (`ParamSpec`) — 8 keys
+## `tasks.<name>.params.<title>:` (`ParamSpec`) — 6 keys
 
 The `params:` map's keys are **rich titles**, e.g. `-v|--verbose`, `-s`,
 `--service`, or a bare word for a positional param — free-form, parsed by
@@ -135,19 +135,21 @@ ignored, key.
 
 | key | type | default | notes |
 |---|---|---|---|
-| `...params.<title>.dest` | string | none | Override the variable name this param binds to. |
 | `...params.<title>.metavar` | string | none | Placeholder name shown in help/usage output. |
 | `...params.<title>.default` | string | none | Default value when the param is unset. |
-| `...params.<title>.constant` | null, string, list of strings, or map: string -> string | `null` | Free-form key site when it's a map: any keys are accepted, via a hand-written `visit_map`, not `deny_unknown_fields`. |
 | `...params.<title>.choices` | list of strings | `[]` | Static allowed-value set. |
 | `...params.<title>.choices-command` | string | none | **Kebab key.** Shell command whose stdout lines become the allowed value set (dynamic choices), resolved lazily and at most once per invocation. |
-| `...params.<title>.nargs` | string | `"1"` | One of `"0"`, `"1"`, `"?"` (zero-or-one), `"+"` (one-or-more), `"*"` (zero-or-more), a bare integer `"N"` (max count, min 0), or `"N:M"` (min:max, 1-indexed on disk). |
+| `...params.<title>.nargs` | string | `"1"` | One of `"0"`, `"1"`, `"?"` (zero-or-one), `"+"` (one-or-more), `"*"` (zero-or-more), a bare integer `"N"` (max count, min 0), or `"N:M"` (min:max, 1-indexed on disk). Wired to clap's `num_args`: a value of more than one collects every space-separated value from one occurrence. |
 | `...params.<title>.help` | string | none | Help text shown for this param. |
+
+`dest` and `constant` were removed (design doc `2026-06-10-code-review-remediation.md`,
+Phase 6): both parsed and serialized but had zero readers outside
+`cfg/param.rs` itself.
 
 ## Free-form key sites (do NOT expect `deny_unknown_fields` here)
 
 `deny_unknown_fields` governs a struct's own declared field names; it never
-reaches the contents of a map-typed field. Exactly four sites in the schema
+reaches the contents of a map-typed field. Exactly three sites in the schema
 accept arbitrary keys:
 
 1. **`tasks:` (root)** — keys are task names, values are `tasks.<name>:`.
@@ -155,13 +157,11 @@ accept arbitrary keys:
    environment variable names, values are strings.
 3. **`params:` (`tasks.<name>.params`)** — keys are rich param titles parsed
    by `divine()`, values are `tasks.<name>.params.<title>:`.
-4. **`constant:` (`tasks.<name>.params.<title>.constant`)**, only when given
-   as a YAML map — keys and values are both arbitrary strings.
 
-## Total: 46 fixed keys across the seven structs
+## Total: 44 fixed keys across the seven structs
 
 `ConfigSpec` 2 + `OttoSpec` 9 + `RetentionSpec` 5 + `ForeachSpec` 7 +
-`TaskSpecHelper` 13 + `ParamSpec` 8 + `EdgeSpec` 2 = **46**. This count, and
+`TaskSpecHelper` 13 + `ParamSpec` 6 + `EdgeSpec` 2 = **44**. This count, and
 every key name above, is pinned by an automated drift test
 (`ottofile_reference_key_inventory_is_exhaustive`, in
 `src/cfg/task.rs`'s `#[cfg(test)]` module): it destructures a live instance of
@@ -170,6 +170,6 @@ gains or loses a field, before any test even runs) and separately recovers
 each struct's real on-disk key list from its "unknown field" error message
 (fed a deliberately bogus key — `deny_unknown_fields`'s derive-generated
 error for the six Architecture-table structs, `EdgeSpec`'s hand-written
-`visit_map` error for the seventh), then asserts every one of those 46
+`visit_map` error for the seventh), then asserts every one of those 44
 recovered keys is mentioned, verbatim, on this page. If this page and the
 schema ever drift, `cargo test` fails — it does not merely go stale quietly.
