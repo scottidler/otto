@@ -222,7 +222,7 @@ impl Parser {
             // Virtual parent tasks are kept as real (executable) aggregator tasks.
             // Their action is empty; the scheduler short-circuits execution and aggregates
             // their subtasks' statuses to derive the parent's final status.
-            let mut task = Task::from_task_with_cwd_and_global_envs(task_spec, &self.cwd, &global_envs);
+            let mut task = Task::from_task_with_cwd_and_global_envs(task_spec, &self.cwd, &global_envs)?;
             let mut cli_provided = HashSet::new();
 
             // Find the partition for this task's arguments

@@ -105,24 +105,25 @@ impl Task {
         }
     }
 
-    #[must_use]
-    pub fn from_task(task_spec: &TaskSpec) -> Self {
+    pub fn from_task(task_spec: &TaskSpec) -> Result<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         Self::from_task_with_cwd_and_global_envs(task_spec, &cwd, &HashMap::new())
     }
 
-    #[must_use]
-    pub fn from_task_with_cwd(task_spec: &TaskSpec, cwd: &std::path::Path) -> Self {
+    pub fn from_task_with_cwd(task_spec: &TaskSpec, cwd: &std::path::Path) -> Result<Self> {
         Self::from_task_with_cwd_and_global_envs(task_spec, cwd, &HashMap::new())
     }
 
-    #[must_use]
+    /// Fails closed on an unresolvable task environment, matching
+    /// `cli::parser::Task::from_task_with_cwd_and_global_envs`. Dropping the map
+    /// and running anyway let one cyclic key take every other key with it and
+    /// still exit 0.
     pub fn from_task_with_cwd_and_global_envs(
         task_spec: &TaskSpec,
         cwd: &std::path::Path,
         global_envs: &HashMap<String, String>,
-    ) -> Self {
+    ) -> Result<Self> {
         let name = task_spec.name.clone();
         let task_deps: Vec<TaskEdge> = task_spec
             .before
@@ -138,10 +139,8 @@ impl Task {
         // Resolve output globs to canonical paths using explicit cwd
         let output_deps = Self::resolve_file_globs(&task_spec.output, cwd);
 
-        let evaluated_envs = Self::evaluate_merged_envs(global_envs, &task_spec.envs, cwd).unwrap_or_else(|e| {
-            eprintln!("Warning: Failed to evaluate environment variables for task '{name}': {e}");
-            HashMap::new()
-        });
+        let evaluated_envs = Self::evaluate_merged_envs(global_envs, &task_spec.envs, cwd)
+            .map_err(|e| eyre::eyre!("Failed to evaluate environment variables for task '{name}': {e}"))?;
 
         // Note: We do NOT add after tasks here since they depend on us, not vice versa
         // The after dependencies will be handled during DAG construction
@@ -159,7 +158,7 @@ impl Task {
         );
         task.is_virtual_parent = task_spec.virtual_parent;
         task.tty = task_spec.tty.unwrap_or(false);
-        task
+        Ok(task)
     }
 
     /// Evaluate and merge environment variables from global and task-level sources

@@ -84,6 +84,7 @@ impl TestFixture {
             },
             &self.temp_path,
         )
+        .expect("test fixture envs resolve")
     }
 
     fn create_task_with_deps(
@@ -115,6 +116,7 @@ impl TestFixture {
             },
             &self.temp_path,
         )
+        .expect("test fixture envs resolve")
     }
 
     fn sleep_ms(ms: u64) {
@@ -226,7 +228,7 @@ tasks:
     // Convert tasks to TaskSpecs
     let mut task_specs = Vec::new();
     for task_spec in config_spec.tasks.values() {
-        let spec = Task::from_task_with_cwd(task_spec, temp_path);
+        let spec = Task::from_task_with_cwd(task_spec, temp_path).expect("test fixture envs resolve");
         task_specs.push(spec);
     }
 
@@ -345,7 +347,8 @@ async fn test_file_dependencies_error_handling() -> Result<()> {
             on_failure: vec![],
         },
         temp_path,
-    );
+    )
+    .expect("test fixture envs resolve");
 
     let workspace = Workspace::new(temp_path.to_path_buf()).await?;
     workspace.init().await?;
@@ -393,7 +396,8 @@ async fn test_file_dependencies_error_handling() -> Result<()> {
             on_failure: vec![],
         },
         temp_path,
-    );
+    )
+    .expect("test fixture envs resolve");
 
     // Should handle permission issues gracefully
     let needs_rebuild_readonly = scheduler.needs_rebuild(&task_readonly).await?;
@@ -499,7 +503,8 @@ async fn test_mixed_task_and_file_dependencies() -> Result<()> {
             on_failure: vec![],
         },
         temp_path,
-    );
+    )
+    .expect("test fixture envs resolve");
 
     let analyze_task = Task::from_task_with_cwd(
         &TaskSpec {
@@ -525,7 +530,8 @@ async fn test_mixed_task_and_file_dependencies() -> Result<()> {
             on_failure: vec![],
         },
         temp_path,
-    );
+    )
+    .expect("test fixture envs resolve");
 
     let workspace = Workspace::new(temp_path.to_path_buf()).await?;
     workspace.init().await?;
@@ -607,7 +613,8 @@ async fn test_file_dependencies_incremental_detection() -> Result<()> {
             on_failure: vec![],
         },
         temp_path,
-    );
+    )
+    .expect("test fixture envs resolve");
 
     let workspace = Workspace::new(temp_path.to_path_buf()).await?;
     workspace.init().await?;
@@ -755,7 +762,8 @@ async fn test_file_dependencies_multiple_files() -> Result<()> {
             on_failure: vec![],
         },
         temp_path,
-    );
+    )
+    .expect("test fixture envs resolve");
 
     let workspace = Workspace::new(temp_path.to_path_buf()).await?;
     workspace.init().await?;
@@ -928,7 +936,8 @@ async fn test_file_dependencies_task_skipping() -> Result<()> {
             on_failure: vec![],
         },
         temp_path,
-    );
+    )
+    .expect("test fixture envs resolve");
 
     let workspace = Workspace::new(temp_path.to_path_buf()).await?;
     workspace.init().await?;
@@ -997,7 +1006,8 @@ async fn test_file_dependencies_modification_detection() -> Result<()> {
             on_failure: vec![],
         },
         &fixture.temp_path,
-    );
+    )
+    .expect("test fixture envs resolve");
 
     let scheduler = fixture.create_scheduler(vec![task.clone()]).await?;
 

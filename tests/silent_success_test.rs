@@ -281,3 +281,52 @@ fn skipped_task_records_why_it_was_skipped() {
         "the reason must name the blocking dep: {reason}"
     );
 }
+
+/// A task-level `envs:` that cannot resolve must fail the run, not drop the
+/// whole map and run anyway.
+///
+/// The global env path already failed closed (`cfg::resolver::global_envs`
+/// returns Err); the task path warned and substituted an empty map, so one
+/// cyclic key silently took every *other* key with it and the task ran with no
+/// environment at all, at exit 0. Found by the batched audit, batch 4 of 14.
+#[test]
+fn a_cyclic_task_env_fails_the_run_instead_of_dropping_every_key() {
+    let (dir, home) = project(
+        "otto:\n  api: 1\n  tasks: [t]\ntasks:\n  t:\n    envs:\n      GOOD: \"iamfine\"\n      A: \"${B}-a\"\n      B: \"${A}-b\"\n    action: |\n      echo \"GOOD=[${GOOD:-MISSING}]\"\n",
+    );
+    let (code, stdout, stderr) = run_otto(dir.path(), &home, &["t"]);
+
+    assert_ne!(code, 0, "a cyclic task env must not exit 0; stdout: {stdout}");
+    assert!(
+        stderr.contains("Circular dependency between environment variables"),
+        "the error must name the cycle, got: {stderr}"
+    );
+    assert!(
+        stderr.contains('t'),
+        "the error must name the task whose envs failed, got: {stderr}"
+    );
+    assert!(
+        !stdout.contains("finished successfully"),
+        "the task must not run with a dropped environment: {stdout}"
+    );
+    assert!(
+        !stdout.contains("GOOD=[MISSING]"),
+        "the unrelated healthy key must not be silently dropped: {stdout}"
+    );
+}
+
+/// The same fail-closed rule for an unresolvable (not cyclic) task env, so the
+/// fix is not narrowly pinned to cycle detection.
+#[test]
+fn an_unresolvable_task_env_fails_the_run() {
+    let (dir, home) = project(
+        "otto:\n  api: 1\n  tasks: [t]\ntasks:\n  t:\n    envs:\n      GOOD: \"iamfine\"\n      BAD: \"$(exit 3)\"\n    action: |\n      echo \"GOOD=[${GOOD:-MISSING}]\"\n",
+    );
+    let (code, stdout, _stderr) = run_otto(dir.path(), &home, &["t"]);
+
+    assert_ne!(code, 0, "an unresolvable task env must not exit 0; stdout: {stdout}");
+    assert!(
+        !stdout.contains("GOOD=[MISSING]"),
+        "the healthy key must not be dropped alongside the failing one: {stdout}"
+    );
+}

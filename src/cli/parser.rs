@@ -434,12 +434,18 @@ impl Task {
         }
     }
 
-    #[must_use]
+    /// Fails closed on an unresolvable task environment.
+    ///
+    /// Dropping the map and running anyway was the silent-success this whole
+    /// remediation exists to kill: one cyclic key took every *other* key with it,
+    /// the task ran with an empty environment, and the run exited 0. The global
+    /// env path next door (`cfg::resolver::global_envs`) already returns Err for
+    /// the same failure; this is the same rule on the task path.
     pub fn from_task_with_cwd_and_global_envs(
         task_spec: &TaskSpec,
         cwd: &std::path::Path,
         global_envs: &HashMap<String, String>,
-    ) -> Self {
+    ) -> Result<Self> {
         let name = task_spec.name.clone();
         let task_deps: Vec<TaskEdge> = task_spec
             .before
@@ -453,10 +459,8 @@ impl Task {
         // Resolve output globs to canonical paths using explicit cwd
         let output_deps = Self::resolve_file_globs(&task_spec.output, cwd);
 
-        let evaluated_envs = Self::evaluate_merged_envs(global_envs, &task_spec.envs, cwd).unwrap_or_else(|e| {
-            eprintln!("Warning: Failed to evaluate environment variables for task '{name}': {e}");
-            HashMap::new()
-        });
+        let evaluated_envs = Self::evaluate_merged_envs(global_envs, &task_spec.envs, cwd)
+            .map_err(|e| eyre!("Failed to evaluate environment variables for task '{name}': {e}"))?;
 
         // Note: We do NOT add after tasks here since they depend on us, not vice versa
         // The after dependencies will be handled during DAG construction
@@ -465,7 +469,7 @@ impl Task {
         let mut t = Self::new(name, task_deps, file_deps, output_deps, evaluated_envs, values, action);
         t.is_virtual_parent = task_spec.virtual_parent;
         t.tty = task_spec.tty.unwrap_or(false);
-        t
+        Ok(t)
     }
 
     /// Evaluate and merge environment variables from global and task-level sources

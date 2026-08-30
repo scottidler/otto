@@ -249,7 +249,7 @@ fn test_evaluate_merged_envs_self_reference_reads_inherited_value() {
 fn test_from_task_spec() {
     let task_spec = make_task_spec("test", vec!["build".to_string()], "echo test");
 
-    let task = Task::from_task(&task_spec);
+    let task = Task::from_task(&task_spec).expect("test fixture envs resolve");
 
     assert_eq!(task.name, "test");
     assert_eq!(task.task_deps.len(), 1);
@@ -265,7 +265,7 @@ fn test_from_task_with_cwd() {
     task_spec.input = vec!["input.txt".to_string()];
     task_spec.output = vec!["output.txt".to_string()];
 
-    let task = Task::from_task_with_cwd(&task_spec, temp_dir.path());
+    let task = Task::from_task_with_cwd(&task_spec, temp_dir.path()).expect("test fixture envs resolve");
 
     // File paths should be resolved relative to cwd
     assert!(task.file_deps[0].contains("input.txt"));
@@ -281,7 +281,8 @@ fn test_from_task_with_global_envs() {
 
     let task_spec = make_task_spec("test", vec![], "echo $GLOBAL_VAR");
 
-    let task = Task::from_task_with_cwd_and_global_envs(&task_spec, temp_dir.path(), &global_envs);
+    let task = Task::from_task_with_cwd_and_global_envs(&task_spec, temp_dir.path(), &global_envs)
+        .expect("test fixture envs resolve");
 
     assert_eq!(task.envs.get("GLOBAL_VAR"), Some(&"global_value".to_string()));
 }
@@ -290,7 +291,7 @@ fn test_from_task_with_global_envs() {
 fn test_task_action_trimmed() {
     let task_spec = make_task_spec("test", vec![], "  \n  echo test  \n  ");
 
-    let task = Task::from_task(&task_spec);
+    let task = Task::from_task(&task_spec).expect("test fixture envs resolve");
 
     // Action should be trimmed
     assert_eq!(task.action, "echo test");
@@ -300,7 +301,7 @@ fn test_task_action_trimmed() {
 fn test_subtask_has_parent_field() {
     // Test that subtasks (names with colons) get parent field set
     let task_spec = make_task_spec("install:td", vec![], "echo test");
-    let task = Task::from_task(&task_spec);
+    let task = Task::from_task(&task_spec).expect("test fixture envs resolve");
 
     assert_eq!(task.parent, Some("install".to_string()));
 }
@@ -309,7 +310,7 @@ fn test_subtask_has_parent_field() {
 fn test_regular_task_has_no_parent() {
     // Test that regular tasks (no colons) have parent = None
     let task_spec = make_task_spec("build", vec![], "echo build");
-    let task = Task::from_task(&task_spec);
+    let task = Task::from_task(&task_spec).expect("test fixture envs resolve");
 
     assert_eq!(task.parent, None);
 }
@@ -318,7 +319,7 @@ fn test_regular_task_has_no_parent() {
 fn test_nested_colon_parent() {
     // Test that nested colon names extract first segment as parent
     let task_spec = make_task_spec("group:sub:item", vec![], "echo nested");
-    let task = Task::from_task(&task_spec);
+    let task = Task::from_task(&task_spec).expect("test fixture envs resolve");
 
     assert_eq!(task.parent, Some("group".to_string()));
 }
@@ -348,8 +349,11 @@ fn test_from_parser_task_carries_tty() {
 fn test_from_task_spec_carries_tty() {
     let mut spec = make_task_spec("login", vec![], "echo hi");
     spec.tty = Some(true);
-    assert!(Task::from_task(&spec).tty);
+    assert!(Task::from_task(&spec).expect("test fixture envs resolve").tty);
 
     let off = make_task_spec("plain", vec![], "echo hi");
-    assert!(!Task::from_task(&off).tty, "an absent tty: must mean false");
+    assert!(
+        !Task::from_task(&off).expect("test fixture envs resolve").tty,
+        "an absent tty: must mean false"
+    );
 }
