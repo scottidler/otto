@@ -337,14 +337,25 @@ fn test_expand_foreach_with_items_interpolates_input_and_output_per_item() {
     assert_eq!(subtasks[1].output, vec!["out/b.o".to_string()]);
 }
 
+/// A non-loop variable in a foreach path is PRESERVED, not rejected.
+///
+/// **This test is deliberately inverted from the form Phase 6 shipped**, which
+/// asserted `expand_foreach_with_items` errors on `${bogus}`. That behavior made
+/// a foreach task reject exactly what a plain task accepts:
+/// `examples/environment-variables/otto.yml` ships
+/// `output: ["${BUILD_DIR}/${PROJECT_NAME}"]`, so global variables in paths are a
+/// documented feature. Foreach expansion now resolves only its loop variable and
+/// hands the rest to the environment pass in `Task::from_task_*`, which is where
+/// the task's own `envs:` are finally merged and where a genuinely undefined
+/// variable becomes an error. Found by the batched audit, batch 7 of 14.
 #[test]
-fn test_expand_foreach_with_items_rejects_an_unexpandable_path_variable() {
+fn test_expand_foreach_with_items_preserves_a_non_loop_path_variable() {
     let mut task = TaskSpec::new(
         "build".to_string(),
         None,
         vec![],
         vec![],
-        vec!["src/${bogus}.txt".to_string()],
+        vec!["${SRCDIR}/${svc}.txt".to_string()],
         vec![],
         HashMap::new(),
         ParamSpecs::new(),
@@ -356,9 +367,14 @@ fn test_expand_foreach_with_items_rejects_an_unexpandable_path_variable() {
         identifier: "a".to_string(),
         value: "a".to_string(),
     }];
-    let err = task.expand_foreach_with_items(&items).unwrap_err().to_string();
-    assert!(err.contains("build"), "{err}");
-    assert!(err.contains("bogus"), "{err}");
+    let subtasks = task
+        .expand_foreach_with_items(&items)
+        .expect("a non-loop variable must survive");
+    assert_eq!(
+        subtasks[0].input,
+        vec!["${SRCDIR}/a.txt".to_string()],
+        "the loop variable resolves and the other reference is left for the env pass"
+    );
 }
 
 #[test]

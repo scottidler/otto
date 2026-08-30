@@ -453,14 +453,16 @@ impl Task {
             .map(|e| TaskEdge::new(e.task.clone(), e.when))
             .collect();
 
-        // Resolve file globs from input to canonical paths using explicit cwd
-        let file_deps = Self::resolve_file_globs(&task_spec.input, cwd);
-
-        // Resolve output globs to canonical paths using explicit cwd
-        let output_deps = Self::resolve_file_globs(&task_spec.output, cwd);
-
         let evaluated_envs = Self::evaluate_merged_envs(global_envs, &task_spec.envs, cwd)
             .map_err(|e| eyre!("Failed to evaluate environment variables for task '{name}': {e}"))?;
+
+        // Paths expand the task's evaluated environment before globbing: a
+        // reference in an input/output path used to expand to nothing, so the
+        // glob matched no file and the task silently never went up to date.
+        let input_paths = crate::cfg::task::expand_env_in_paths(&name, "input", &task_spec.input, &evaluated_envs)?;
+        let output_paths = crate::cfg::task::expand_env_in_paths(&name, "output", &task_spec.output, &evaluated_envs)?;
+        let file_deps = Self::resolve_file_globs(&input_paths, cwd);
+        let output_deps = Self::resolve_file_globs(&output_paths, cwd);
 
         // Note: We do NOT add after tasks here since they depend on us, not vice versa
         // The after dependencies will be handled during DAG construction

@@ -146,16 +146,62 @@ fn escape_literal_env_value(value: &str) -> String {
 
 /// Interpolate a foreach item's value into a subtask's `input`/`output` paths,
 /// the same `${var_name}` / `$var_name` form the item is injected into `envs`
-/// under. Only `var_name` resolves; any other `${...}`/`$...` reference in a
-/// path is an unexpandable variable and, per the design doc's fail-closed
-/// direction, a loud config-load error naming the task rather than a warning
-/// or a silent pass-through.
+/// under.
+///
+/// Only `var_name` resolves here. Every other reference is left standing, in
+/// `${NAME}` form, for the environment pass in `Task::from_task_*` to resolve
+/// against the task's evaluated envs - `examples/environment-variables/otto.yml`
+/// ships `output: ["${BUILD_DIR}/${PROJECT_NAME}"]`, so global variables in
+/// paths are a documented feature and this function must not consume them.
+/// Erroring on them here made a foreach task reject what a plain task accepted.
 fn interpolate_foreach_paths(task_name: &str, paths: &[String], var_name: &str, value: &str) -> Result<Vec<String>> {
     paths
         .iter()
         .map(|path| {
-            crate::cfg::env::expand_var_refs(path, |name| (name == var_name).then(|| value.to_string()))
-                .map_err(|e| eyre!("Task '{task_name}' foreach path '{path}': {e}"))
+            crate::cfg::env::expand_var_refs(path, |name| {
+                if name == var_name {
+                    Some(value.to_string())
+                } else {
+                    // Re-emitted braced so the next pass sees the same reference,
+                    // whichever form it was written in.
+                    Some(format!("${{{name}}}"))
+                }
+            })
+            .map_err(|e| eyre!("Task '{task_name}' foreach path '{path}': {e}"))
+        })
+        .collect()
+}
+
+/// Expand a task's evaluated environment into its `input`/`output` paths.
+///
+/// Paths used to expand nothing, so `input: ["${SRCDIR}/a.txt"]` matched no file,
+/// the task tracked no inputs and re-ran on every invocation while reporting
+/// success - a silent failure of the up-to-date check, in a form the shipped
+/// environment-variables example demonstrates as a feature. An unresolvable
+/// reference is an error here, per Phase 6 bullet 10's recorded decision to
+/// prefer the error over a warning.
+///
+/// It happens at task construction, not config load, and that is deliberate: a
+/// path may legitimately reference a variable from the task's OWN `envs:`, which
+/// are not merged with the globals until this point. Validating earlier would
+/// have to guess and would reject valid ottofiles. The cost is that `otto --help`
+/// and `otto --list-subtasks` do not build tasks and so do not report it.
+pub(crate) fn expand_env_in_paths(
+    task_name: &str,
+    field: &str,
+    paths: &[String],
+    envs: &HashMap<String, String>,
+) -> Result<Vec<String>> {
+    paths
+        .iter()
+        .map(|path| {
+            crate::cfg::env::expand_var_refs(path, |name| envs.get(name).cloned()).map_err(|e| {
+                eyre!(
+                    "Task '{task_name}' {field} path '{path}': {e}\n\
+                     Hint: input/output paths expand otto.envs and task envs. \
+                     Define the variable, or use a literal path."
+                )
+            })
         })
         .collect()
 }
