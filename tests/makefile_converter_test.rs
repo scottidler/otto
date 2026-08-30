@@ -40,6 +40,10 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
         &[
             "Makefile:2: warning: `PYPI_USERNAME ?=` is conditional in make; otto always uses this value, ignoring any `PYPI_USERNAME` already in the environment",
             "Makefile:3: warning: `PYPI_PASSWORD ?=` is conditional in make; otto always uses this value, ignoring any `PYPI_PASSWORD` already in the environment",
+            "Makefile:28: warning: `type-check` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:31: warning: `lint` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:34: warning: `run-rest` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:38: warning: `clean` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
         ],
     ),
     (
@@ -47,6 +51,7 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
         &[
             "Makefile:12: warning: `GIT_COMMIT ?=` is conditional in make; otto always uses this value, ignoring any `GIT_COMMIT` already in the environment",
             "Makefile:17: warning: `MAKEFILE_LIST` is a make-internal variable; it will be empty in otto",
+            "Makefile:42: warning: `package` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
             "Makefile:42: warning: `PROJECT_NAME` is not defined in the Makefile; it will come from the environment",
             "Makefile:42: warning: dependency `build` of `package` has no rule in this Makefile; otto will reject the edge",
         ],
@@ -68,11 +73,13 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
             "Makefile:13: warning: `include` is not supported; the line is ignored",
             "Makefile:15: warning: conditional block skipped; its body is not converted",
             "Makefile:19: warning: multi-line variable (define) is not supported; skipped",
+            "Makefile:24: warning: `build` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
             "Makefile:24: warning: `UNSET_BY_MAKEFILE` is not defined in the Makefile; it will come from the environment",
             "Makefile:24: warning: `GIT_SHA` is not defined in the Makefile; it will come from the environment",
             "Makefile:30: warning: target-specific variable on `build` is not supported; the line is ignored",
             "Makefile:32: warning: `fmt check` declares 2 targets in one rule; each becomes its own task with the same recipe",
             "Makefile:35: warning: `install` is a double-colon rule; converted as an ordinary rule",
+            "Makefile:35: warning: `install` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
             "Makefile:38: warning: duplicate target `fmt` overrides the rule at line 32, discarding its dependencies and recipe",
         ],
     ),
@@ -289,6 +296,27 @@ fn test_every_converted_dependency_names_a_real_task() {
     }
 }
 
+/// `NON_CONVERTING_FIXTURES` is the one remaining way to remove a fixture from
+/// every loop in this file, and it is one line long.
+///
+/// That is the same silent opt-out this suite has now closed twice: first the
+/// `continue` on a missing golden, then the hand-maintained fixture list. Left
+/// unguarded it is the third turn of the same screw - a new directory plus one
+/// entry here gives `0 failed` with zero coverage. Pinning the list by value
+/// makes adding to it a deliberate, reviewable diff rather than a line nobody
+/// notices.
+#[test]
+fn the_non_converting_opt_out_holds_exactly_one_known_name() {
+    assert_eq!(
+        NON_CONVERTING_FIXTURES,
+        ["space-indented-recipe"],
+        "a fixture may only be excluded from the directory-driven loops with a deliberate \
+         change here AND a dedicated test proving what it does instead - \
+         `space-indented-recipe` has two (`test_space_indented_recipe_is_rejected_by_name` \
+         and `test_space_indented_recipe_fails_the_command_with_the_line_number`)"
+    );
+}
+
 /// The other direction: a name in `CONVERTING_FIXTURES` with no directory
 /// behind it. `expected_warnings` catches the missing entry; nothing else
 /// catches the entry whose fixture was renamed or deleted, and a stale row
@@ -447,48 +475,89 @@ fn test_a_banner_is_still_the_fallback_when_a_rule_has_no_doc_string() {
     assert_eq!(conversion.config.tasks["build"].help.as_deref(), Some("Banner"));
 }
 
-/// `is_phony` was set from `.PHONY` and read by nobody, so a make *file rule*
+/// `is_phony` was set from `.PHONY` and read by nobody, so a make file rule
 /// converted into a task that always runs with nothing said about it. make
-/// skips a file target's recipe when the file is newer than its prerequisites;
-/// otto has no equivalent check.
+/// skips a non-phony target's recipe when the target is newer than its
+/// prerequisites; otto has no equivalent check.
 ///
-/// The signal is the path shape, not "everything outside `.PHONY`": most
-/// authors never list every ordinary target, so warning on all of them would be
-/// noise. `dist/app` and `app.tar.gz` are file rules; `build` and `check-fmt`
-/// are not.
+/// The signal is PREREQUISITES, not the target's name. A first attempt guessed
+/// from the name (a `/` or a dot-extension) and was wrong in both directions:
+/// `myapp: main.o`, the canonical Unix file rule, got no warning at all, while
+/// a bare `deploy.prod` got a false one. These four cases are exactly that pair
+/// plus the two negatives.
 #[test]
-fn test_a_file_shaped_target_outside_phony_warns() {
-    let conversion = convert("app.tar.gz: build\n\ttar -cz .\n\nbuild:\n\techo hi\n".to_string());
+fn test_a_non_phony_target_with_prerequisites_warns() {
+    let conversion = convert("myapp: main.o\n\tcc -o myapp main.o\n".to_string());
 
     assert!(
         conversion
             .warnings
             .iter()
-            .any(|w| w.contains("`app.tar.gz` is a file target, not `.PHONY`")),
-        "a file-shaped target outside .PHONY must say make and otto disagree: {:?}",
-        conversion.warnings
-    );
-    assert!(
-        !conversion
-            .warnings
-            .iter()
-            .any(|w| w.contains("`build` is a file target")),
-        "a plain-word target is not a file rule: {:?}",
+            .any(|w| w.contains("`myapp` is not `.PHONY` and has prerequisites")),
+        "the canonical Unix file rule must warn: {:?}",
         conversion.warnings
     );
 }
 
-/// And declaring it phony silences it, which is what makes the field read
-/// rather than merely present.
 #[test]
-fn test_a_file_shaped_target_declared_phony_does_not_warn() {
-    let conversion = convert(".PHONY: app.tar.gz\napp.tar.gz:\n\ttar -cz .\n".to_string());
+fn test_a_dotted_name_without_prerequisites_does_not_warn() {
+    let conversion = convert("deploy.prod:\n\techo deploying\n".to_string());
 
     assert!(
-        !conversion.warnings.iter().any(|w| w.contains("is a file target")),
+        !conversion.warnings.iter().any(|w| w.contains("has prerequisites")),
+        "a dotted name is namespacing, not a file rule; guessing from the name is what \
+         this replaced: {:?}",
+        conversion.warnings
+    );
+}
+
+#[test]
+fn test_declaring_it_phony_silences_the_warning() {
+    let conversion = convert(".PHONY: myapp\nmyapp: main.o\n\tcc -o myapp main.o\n".to_string());
+
+    assert!(
+        !conversion.warnings.iter().any(|w| w.contains("has prerequisites")),
         "`.PHONY` is exactly the author saying this is not a file: {:?}",
         conversion.warnings
     );
+}
+
+#[test]
+fn test_prerequisites_without_a_recipe_do_not_warn() {
+    let conversion = convert("all: myapp\n\nmyapp:\n\techo hi\n".to_string());
+
+    assert!(
+        !conversion.warnings.iter().any(|w| w.contains("has prerequisites")),
+        "a target with prerequisites and no recipe is a dependency declaration; there is \
+         nothing for otto to run differently: {:?}",
+        conversion.warnings
+    );
+}
+
+/// A conversion that produced no tasks did nothing, and said so only by
+/// printing `tasks: {}` at exit 0 - including under `--strict`, whose whole job
+/// is to refuse a lossy conversion.
+#[test]
+fn test_a_conversion_with_no_tasks_says_so() {
+    let conversion = convert(String::new());
+
+    assert!(
+        conversion
+            .warnings
+            .iter()
+            .any(|w| w.contains("no targets were converted")),
+        "an empty conversion must be audible: {:?}",
+        conversion.warnings
+    );
+}
+
+#[test]
+fn test_strict_fails_a_conversion_that_produced_no_tasks() {
+    let (code, stdout, stderr) = run_convert("", &["--strict"]);
+
+    assert_eq!(code, 1, "--strict must refuse an empty conversion. stderr: {stderr}");
+    assert!(stdout.is_empty(), "--strict must not emit a conversion: {stdout}");
+    assert!(stderr.contains("no targets were converted"), "{stderr}");
 }
 
 /// `?=` converted as a plain `=`, with no warning at all.

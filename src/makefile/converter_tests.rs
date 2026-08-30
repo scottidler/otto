@@ -34,6 +34,19 @@ fn messages(diagnostics: &[Diagnostic]) -> String {
     diagnostics.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n")
 }
 
+/// Diagnostics other than the "no targets were converted" notice.
+///
+/// The variables-only tests below build an AST with no targets on purpose -
+/// they are about variable conversion - and a conversion with no tasks is
+/// legitimately reported. Filtering it keeps those assertions about the thing
+/// they test, without weakening them to "some diagnostics are fine".
+fn diagnostics_about_variables(diagnostics: &[Diagnostic]) -> Vec<&Diagnostic> {
+    diagnostics
+        .iter()
+        .filter(|d| !d.to_string().contains("no targets were converted"))
+        .collect()
+}
+
 #[test]
 fn test_convert_simple_variable() {
     let mut ast = MakefileAst::new();
@@ -42,7 +55,8 @@ fn test_convert_simple_variable() {
     let (config, diagnostics) = convert(ast);
 
     assert_eq!(config.otto.envs.get("VAR"), Some(&"value".to_string()));
-    assert!(diagnostics.is_empty(), "{}", messages(&diagnostics));
+    let others = diagnostics_about_variables(&diagnostics);
+    assert!(others.is_empty(), "{}", messages(&diagnostics));
 }
 
 #[test]
@@ -72,7 +86,8 @@ fn test_variable_reference_becomes_a_shell_reference() {
     let (config, diagnostics) = convert(ast);
 
     assert_eq!(config.otto.envs.get("IMAGE"), Some(&"${NAME}:latest".to_string()));
-    assert!(diagnostics.is_empty(), "{}", messages(&diagnostics));
+    let others = diagnostics_about_variables(&diagnostics);
+    assert!(others.is_empty(), "{}", messages(&diagnostics));
 }
 
 #[test]

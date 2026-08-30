@@ -63,6 +63,18 @@ impl OttoConverter {
             }
         }
 
+        // A conversion that produced no tasks is a conversion that did
+        // nothing, and it used to say so only by printing `tasks: {}` at exit
+        // 0 - including under `--strict`, whose whole job is to refuse a lossy
+        // conversion. Empty input, a Makefile of nothing but variables, or one
+        // whose every rule was skipped all land here, and none of them is what
+        // the operator asked for.
+        if tasks.is_empty() {
+            self.diagnostics.push(Diagnostic::detached(
+                "no targets were converted; the output has no tasks".to_string(),
+            ));
+        }
+
         Ok(ConfigSpec { otto: otto_spec, tasks })
     }
 
@@ -157,22 +169,31 @@ impl OttoConverter {
                     ),
                 );
             }
-            // `is_phony` is set from `.PHONY` and, until now, read by nobody:
+            // `is_phony` is set from `.PHONY` and was read by nobody:
             // `TaskSpec` has no phony field, so the converter dropped it. It
-            // does carry information, though, and losing it is the same silent
-            // class as `?=`. A target that is NOT phony and whose name looks
-            // like a path is a make *file rule*: make skips its recipe when the
-            // file is newer than its prerequisites, and otto has no equivalent
-            // check on a converted task, so it runs every time. A phony target,
-            // or one whose name is a plain word, has no such divergence -
-            // hence the path shape, not "everything outside `.PHONY`", which
-            // would warn on every ordinary target an author simply never
-            // listed.
-            if !target.is_phony && looks_like_a_file_path(&target.name) {
+            // carries real information, and losing it is the same silent class
+            // as `?=`. make skips a non-phony target's recipe when the target
+            // is newer than its prerequisites; otto has no such check and runs
+            // the converted task every time.
+            //
+            // The signal is prerequisites, not the target's NAME. A first
+            // attempt guessed from the name - `/` or a dot-extension - and was
+            // wrong in both directions: `myapp: main.o`, the canonical Unix
+            // file rule, got no warning, while a bare `deploy.prod` got a false
+            // one. Prerequisites are what make's up-to-date comparison actually
+            // needs, so that is what is tested. A recipe is required too: a
+            // target with prerequisites and no recipe is a dependency
+            // declaration, and there is nothing for otto to run differently.
+            //
+            // Deliberate miss: a file target with NO prerequisites (`app.tar.gz:`
+            // alone). make still checks existence there, but nothing in the rule
+            // distinguishes it from a plain task name, and guessing from the
+            // name is what this replaced.
+            if !target.is_phony && !target.dependencies.is_empty() && !target.commands.is_empty() {
                 self.warn(
                     target.line,
                     format!(
-                        "`{}` is a file target, not `.PHONY`; make skips its recipe when the file is up to date and otto always runs it",
+                        "`{}` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
                         target.name
                     ),
                 );
@@ -439,21 +460,3 @@ fn is_shell_identifier(name: &str) -> bool {
 
 #[path = "converter_tests.rs"]
 mod tests;
-
-/// Whether a target name is shaped like a filesystem path rather than a plain
-/// word. A `/` anywhere, or a dot with a non-empty extension after it, is what
-/// separates `dist/app` and `app.tar.gz` from `build` and `check-fmt`. Leading
-/// dots are special targets (`.PHONY`, `.SUFFIXES`), handled elsewhere, and are
-/// deliberately not counted here.
-fn looks_like_a_file_path(name: &str) -> bool {
-    if name.starts_with('.') {
-        return false;
-    }
-    if name.contains('/') {
-        return true;
-    }
-    match name.rsplit_once('.') {
-        Some((stem, ext)) => !stem.is_empty() && !ext.is_empty(),
-        None => false,
-    }
-}
