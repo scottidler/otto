@@ -493,11 +493,19 @@ OTTO_HOME=/tmp/ottohome-final2 otto ci -> exit 0, [ci] ✅ All CI checks passed!
   hangs. Worth confirming that a `when: always` cleanup attached to a task that
   was never scheduled at all (not in the run set) should stay skipped rather
   than run.
-- **The bash `otto_get_input` key is `<task>.<key>` lowercased, while
-  `otto_set_output` takes the key verbatim.** So a producer writing `MULTI` is
-  read back as `producer.multi`. That asymmetry is pre-existing and undocumented
-  in `docs/`; it cost a probe to discover. Not in this phase's scope, but it is
-  a documentation gap on the flagship data-passing feature.
+- ~~**The bash `otto_get_input` key is `<task>.<key>` lowercased, while
+  `otto_set_output` takes the key verbatim.**~~ **CLOSED 2026-08-30 as a bug,
+  not a documentation gap.** It was worse than an asymmetry: the correct key
+  returned nothing. `otto_set_output "MIXED_Case"` then
+  `otto_get_input producer.MIXED_Case` gave `[]` at exit 0, while
+  `producer.mixed_case` - a key nobody wrote - gave the value. The Python
+  generator reads the JSON directly and never had this, so the two generators
+  disagreed about the same data. otto now writes each key's original spelling
+  beside its value (`OTTO_INPUTKEY_<TASK>_<KEY>`) and the bash reader uses it,
+  making the JSON key the contract on both sides. **Behavior change:** a lookup
+  must now spell the key the way the producer wrote it; an input `.env` from an
+  older otto still works, falling back to the old lowercase guess when no
+  companion variable is present.
 - **A cancelled run returns `Err`, so `otto` exits non-zero when the user quits
   the TUI.** That reads right (the run did not complete), but it means quitting
   a dashboard on a healthy run yields a non-zero exit. Confirm that is wanted
