@@ -29,8 +29,41 @@ use crate::cli::builtins::{BUILTIN_COMMANDS, is_builtin};
 
 pub type DAG<T> = Dag<T, (), u32>;
 
-/// The `-o/--ottofile` default: divine one by walking up from the cwd.
-const DEFAULT_OTTOFILE: &str = ".";
+/// Where otto should look for an ottofile.
+///
+/// This used to be a `String` carrying `"."` as a sentinel meaning "divine one".
+/// It worked only because `"."` also happens to be a real relative path naming
+/// the cwd, so every consumer that treated the sentinel as a literal path got
+/// the right answer by coincidence. Any consumer that compared it, joined it to
+/// another path, or displayed it saw a directory the user never asked for. The
+/// two states are different, so they are different variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OttofileSource {
+    /// No `-o/--ottofile` and no `$OTTOFILE`: search upward from the cwd.
+    Divine,
+    /// A path the user named, on the flag or in the environment. A directory is
+    /// searched; a file is used as given.
+    Explicit(String),
+}
+
+impl OttofileSource {
+    /// The path to start from, which is the cwd when nothing was named.
+    fn as_start_path(&self) -> &str {
+        match self {
+            Self::Divine => ".",
+            Self::Explicit(value) => value,
+        }
+    }
+}
+
+impl std::fmt::Display for OttofileSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Divine => write!(f, "<divined from the current directory>"),
+            Self::Explicit(value) => write!(f, "{value}"),
+        }
+    }
+}
 
 /// The values `--log-level` accepts, in increasing verbosity.
 ///
@@ -139,7 +172,7 @@ impl ParseOutcome {
 /// `[env: OTTOFILE=.../sub/other.yml]` in the same breath.
 ///
 /// Precedence matches clap's: explicit flag, then env, then the default.
-fn ottofile_value_from_args(args: &[String], env_value: Option<String>) -> String {
+fn ottofile_value_from_args(args: &[String], env_value: Option<String>) -> OttofileSource {
     let mut i = 0;
     let mut found: Option<String> = None;
     while i < args.len() {
@@ -163,7 +196,7 @@ fn ottofile_value_from_args(args: &[String], env_value: Option<String>) -> Strin
     found
         .or(env_value)
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_OTTOFILE.to_string())
+        .map_or(OttofileSource::Divine, OttofileSource::Explicit)
 }
 
 /// The task name requested more than once on one command line, if any.
@@ -746,11 +779,12 @@ impl Parser {
             }
         };
 
-        // Extract ottofile and load config
+        // Extract ottofile and load config. Absent means Divine; see
+        // `OttofileSource`.
         let ottofile_value = matches
             .get_one::<String>("ottofile")
             .cloned()
-            .expect("ottofile should have a value from flag, env var, or default");
+            .map_or(OttofileSource::Divine, OttofileSource::Explicit);
 
         // Extract jobs parameter. The value parser rejects 0 and non-numbers at
         // parse time (clap exits 2 with a usage error), so anything that reaches
@@ -922,10 +956,13 @@ impl Parser {
             };
 
             // Extract ottofile path from parsed arguments (Clap handles env var automatically)
+            // No clap default: absent means Divine, which is a state and not a
+            // path. `expect`ing a value here is what the `"."` sentinel existed
+            // to satisfy.
             let ottofile_value = matches
                 .get_one::<String>("ottofile")
                 .cloned()
-                .expect("ottofile should have a value from flag, env var, or default");
+                .map_or(OttofileSource::Divine, OttofileSource::Explicit);
 
             let ottofile_path = Self::divine_ottofile(ottofile_value)?;
             let (config_spec, hash, ottofile) = Self::load_config_from_path(ottofile_path)?;

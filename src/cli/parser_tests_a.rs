@@ -307,32 +307,38 @@ fn the_ottofile_flag_wins_over_the_env_and_the_default() {
     let args = names(&["otto", "-o", "sub/other.yml", "--help"]);
     assert_eq!(
         ottofile_value_from_args(&args, Some("env.yml".to_string())),
-        "sub/other.yml"
+        OttofileSource::Explicit("sub/other.yml".to_string())
     );
 }
 
 #[test]
 fn the_attached_ottofile_form_is_read_too() {
     let args = names(&["otto", "--ottofile=sub/other.yml", "--help"]);
-    assert_eq!(ottofile_value_from_args(&args, None), "sub/other.yml");
+    assert_eq!(
+        ottofile_value_from_args(&args, None),
+        OttofileSource::Explicit("sub/other.yml".to_string())
+    );
 }
 
 #[test]
 fn the_ottofile_env_is_used_when_no_flag_is_given() {
     let args = names(&["otto", "--help"]);
-    assert_eq!(ottofile_value_from_args(&args, Some("env.yml".to_string())), "env.yml");
+    assert_eq!(
+        ottofile_value_from_args(&args, Some("env.yml".to_string())),
+        OttofileSource::Explicit("env.yml".to_string())
+    );
 }
 
 #[test]
-fn the_ottofile_default_is_the_divining_dot() {
+fn the_ottofile_default_is_the_divine_variant_not_a_path() {
     let args = names(&["otto", "--help"]);
-    assert_eq!(ottofile_value_from_args(&args, None), DEFAULT_OTTOFILE);
+    assert_eq!(ottofile_value_from_args(&args, None), OttofileSource::Divine);
 }
 
 #[test]
 fn an_ottofile_after_a_double_dash_is_not_ours() {
     let args = names(&["otto", "build", "--", "-o", "other.yml"]);
-    assert_eq!(ottofile_value_from_args(&args, None), DEFAULT_OTTOFILE);
+    assert_eq!(ottofile_value_from_args(&args, None), OttofileSource::Divine);
 }
 
 // =========================================================================

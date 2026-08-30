@@ -888,7 +888,7 @@ tasks:
 /// Phase 0). `expected_global_options_help()` below substitutes the real
 /// default at test time so the anti-drift check still holds everywhere
 /// else in the string.
-const EXPECTED_GLOBAL_OPTIONS_HELP_TEMPLATE: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile\n          \n          [env: OTTOFILE=]\n          [default: .]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n      --tasks\n          Print the machine-readable task list and exit\n\n      --format <FORMAT>\n          Output format for --tasks (yaml or json); default: yaml on a tty, json when piped\n          \n          [possible values: yaml, json]\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: {JOBS}]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n      --no-prefix\n          Suppress the [task] prefix on task output\n\n      --log-level <LEVEL>\n          Verbosity of otto's own log file, under $XDG_DATA_HOME/otto/logs\n          \n          [possible values: off, error, warn, info, debug, trace]\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
+const EXPECTED_GLOBAL_OPTIONS_HELP_TEMPLATE: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile (default: search upward from the current directory)\n          \n          [env: OTTOFILE=]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n      --tasks\n          Print the machine-readable task list and exit\n\n      --format <FORMAT>\n          Output format for --tasks (yaml or json); default: yaml on a tty, json when piped\n          \n          [possible values: yaml, json]\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: {JOBS}]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n      --no-prefix\n          Suppress the [task] prefix on task output\n\n      --log-level <LEVEL>\n          Verbosity of otto's own log file, under $XDG_DATA_HOME/otto/logs\n          \n          [possible values: off, error, warn, info, debug, trace]\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
 
 /// Renders `EXPECTED_GLOBAL_OPTIONS_HELP_TEMPLATE` against this
 /// machine's actual `-j/--jobs` default, so the comparison is exact
@@ -1077,7 +1077,7 @@ fn divine_ottofile_rejection_table() {
     ];
 
     for (input, expected_substring) in cases {
-        let err = Parser::divine_ottofile(input.to_string())
+        let err = Parser::divine_ottofile(OttofileSource::Explicit(input.to_string()))
             .expect_err(&format!("'{input}' must be rejected, not silently accepted"))
             .to_string();
         assert!(
@@ -1126,6 +1126,6 @@ fn divine_ottofile_walks_to_the_root_and_returns_none_rather_than_erroring() {
     // A fresh TempDir has no otto.yml/.otto.yml in it or any of its (equally
     // fresh) ancestors up to the real filesystem root.
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let result = Parser::divine_ottofile(temp_dir.path().to_string_lossy().to_string());
+    let result = Parser::divine_ottofile(OttofileSource::Explicit(temp_dir.path().to_string_lossy().to_string()));
     assert!(matches!(result, Ok(None)), "{result:?}");
 }

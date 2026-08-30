@@ -19,8 +19,7 @@ impl Parser {
                 .short('o')
                 .long("ottofile")
                 .value_name("PATH")
-                .help("path to the ottofile")
-                .default_value(DEFAULT_OTTOFILE)
+                .help("path to the ottofile (default: search upward from the current directory)")
                 .env("OTTOFILE")
                 .value_parser(value_parser!(String)),
             Arg::new("list-subtasks")
@@ -197,7 +196,7 @@ impl Parser {
 
                 println!("{task_name} ({} items):", items.len());
                 for item in &items {
-                    println!("  {task_name}:{}", item.identifier);
+                    println!("  {}", crate::naming::subtask_name(task_name, &item.identifier));
                 }
                 println!();
             }

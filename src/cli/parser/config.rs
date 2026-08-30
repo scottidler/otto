@@ -18,11 +18,12 @@ impl Parser {
         }
     }
 
-    fn divine_ottofile(value: String) -> Result<Option<PathBuf>> {
+    fn divine_ottofile(source: crate::cli::parser::OttofileSource) -> Result<Option<PathBuf>> {
+        let value = source.as_start_path();
         // Both failures name the path. `otto -o /nope/nothere.yml` used to fail
         // with a bare "No such file or directory (os error 2)", which says
         // nothing about which file otto was looking for.
-        let expanded = expanduser(&value).wrap_err_with(|| format!("could not expand ottofile path '{value}'"))?;
+        let expanded = expanduser(value).wrap_err_with(|| format!("could not expand ottofile path '{source}'"))?;
         let path = fs::canonicalize(&expanded)
             .wrap_err_with(|| format!("ottofile path '{}' does not exist", expanded.display()))?;
         if path.is_dir() {
