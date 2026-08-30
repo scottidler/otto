@@ -2,9 +2,9 @@
 
 **Author:** Scott A. Idler
 **Date:** 2026-08-30
-**Status:** In Progress — batches 1-2 complete, 3-14 outstanding
+**Status:** In Progress — batches 1-4 complete, 5-14 outstanding
 **Subject doc:** `docs/design/2026-06-10-code-review-remediation.md` (`Status: Implemented`)
-**HEAD at handoff:** `a567af9`
+**HEAD at handoff:** `a567af9` (batches 3-4 audited at `6b28b52`, fixed through `16c2975`)
 
 ## What this is
 
@@ -34,8 +34,8 @@ verdicts than items is rejected and re-run.
 |---|---|---|---|---|
 | 1 | Phase 0 — Green gates and exposure removal | 296-319 | 7 | **DONE** — 1 must-fix, fixed at `a5cd889` |
 | 2 | Phase 1 — Silent-success criticals | 320-335 | 10 | **DONE** — 1 must-fix, fixed at `a567af9` |
-| 3 | Phase 2 — Conditional-deps and foreach semantics | 336-360 | 8 | TODO |
-| 4 | Phase 3 — Containment (injection, deletion, output) | 361-379 | 9 | TODO |
+| 3 | Phase 2 — Conditional-deps and foreach semantics | 336-360 | 8 | **DONE** — 1 must-fix, fixed at `5558ae9` |
+| 4 | Phase 3 — Containment (injection, deletion, output) | 361-379 | 9 | **DONE** — 2 must-fix, fixed at `42704a9`, `16c2975` |
 | 5 | Phase 4 — State and DB integrity | 380-403 | 10 | TODO |
 | 6 | Phase 5 — Upgrade and HTTP safety | 404-413 | 4 | TODO |
 | 7 | Phase 6 — cfg correctness | 414-448 | 10 | TODO |
@@ -115,8 +115,22 @@ across three rounds:
   binary, and `gh` was proxy-blocked; it correctly returned UNVERIFIABLE
   rather than guessing. In batch 2 it executed everything with real output.
 
+**Batches 3 and 4 made this worse, not better.** In batch 3 the architect
+declared on line 1 that it could not execute and still returned 10/10
+CONFIRMED, one of them provably false and another the exact inverse of the
+measured result; the staff engineer had a read-only filesystem (`cargo test`
+died on `.cargo-build-lock`, `mktemp -d` gave "Read-only file system (os error
+30)") and honestly marked 5 of 10 UNVERIFIABLE. In batch 4 the architect was in
+plan mode and the staff engineer hit the same read-only sandbox. **Across both
+batches, neither seat ran a single binary probe.** Every behavioral result in
+both synthesis files came from the panel lead.
+
 **Consequence:** the panel lead must re-run every behavioral claim itself.
-Both useful batches worked because the lead did exactly that. Budget for it.
+All four useful batches worked because the lead did exactly that. Budget for
+it. If cross-model runtime independence actually matters for a later batch, the
+seats need a writable scratch directory and a non-plan mode first - otherwise
+the panel is a second pair of eyes on source text, which is worth something but
+is not verification.
 
 A concrete illustration of why: in batch 1 the architect asserted the
 `needs:` graph "logically prevents artifact and GHCR uploads" having executed
@@ -172,6 +186,91 @@ src/cli/parser.rs` **returns 0** could never pass — `git grep -c` prints
 nothing and exits 1 on no matches — and it scoped only the parent file, which
 Phase 9's `include!` split would have let a migrated call site evade. Amended
 to cover parent and all seven fragments; verified zero matches.
+
+### Batch 3 (Phase 2) — 1 must-fix, 4 cheap-win
+
+**Must-fix, DIVERGENT.** The success criterion claims the nine `SkipKind` x
+`when` cells are "asserted against the worker's dependency double-check, not
+only `classify_edge`, so the two gates cannot drift", and the doc uses that
+guarantee as the argument for the whole five-site design. It was not
+delivered. The test's Gate 2 block was a hand-transcribed copy of the
+production match arms, and the production gate was an inline `match` inside a
+`tokio::spawn` closure inside `execute_task`, so no symbol existed to call.
+Proven by mutation, twice: flipping the `when: success` skip arm to `=> true`
+(the exact pre-Phase-2 bug) and the `when: always` skip arm to `=> false` (the
+spawn-time-rejection mode the doc names verbatim) both left the matrix test
+green. Fixed at `5558ae9` by extracting `edge_satisfied_by_status`, which both
+the worker and the test now call; the same two mutations are red against it.
+
+**Generalise this: a test that re-transcribes the thing it claims to pin
+asserts its own copy.** The tell is a criterion naming a code site the test
+never references. It is the same shape as batch 1's — criterion narrower than
+intent — but the gap is between the assertion and its subject, not between the
+criterion and the purpose.
+
+**This is also known-issue #3 being worse than stated.** "Revert the fix,
+confirm the test goes red" was spot-checked, and the one criterion whose whole
+value is a red-on-revert guarantee is precisely the one that stayed green.
+
+Cheap-wins, all doc-side, fixed in the doc commit: the "Explicitly unchanged"
+line was false in letter (`c72f911` edited `foreach_aggregation_test.rs` and
+two other test files; the `:204`/`:260` anchors moved to `:206`/`:262`), though
+its semantic claim — exactly one deliberate inversion — is true; the doc names
+a fix site `skip_reason_for` that ships as `skip_record_for`; and
+`process_group(0)` carries an undisclosed `if !tty` carve-out while the bullet
+promises it unconditionally.
+
+**Cross-batch catch.** Phase 1's still-open sub-bullet said `get_skip_reasons()`
+has zero callers so skip provenance is "built and dropped rather than
+persisted". Phase 2 renamed it and wired `persist_skip_records()`. Verified
+against the database, not the call sites: a failed `a` with dependent `b` gives
+`b|skipped|unreachable|dep a failed; this task required when: success`. That
+annotation had expired exactly as `otto.jobs: 0`'s did.
+
+### Batch 4 (Phase 3) — 2 must-fix, 3 cheap-win
+
+**Must-fix 1, task envs failed open.** Task-level `envs:` warned and
+substituted an empty map, so one bad key took every *other* key with it and the
+task ran anyway at exit 0. With three keys where only `A` and `B` cycle:
+`[t] GOOD=[MISSING] A=[MISSING] B=[MISSING]` / `finished successfully` /
+`EXIT=0`. The healthy `GOOD: iamfine` is gone too. Phase 1 had already made the
+*global* path fail closed, and `cfg/resolver.rs`'s own doc comment names the
+defect left standing next door. Fixed at `42704a9`, both constructor copies,
+two regression tests, red on revert.
+
+**Generalise this: when a phase fixes a failure mode on one path, ask which
+sibling paths have the same mode.** Fail-open was fixed on globals and left on
+tasks, in the same release, by the same author.
+
+**Must-fix 2, fail-closed but nondeterministic.** Phase 3's deep-chain fix
+moved the failure from "silently drops your globals" to "refuses to run" —
+right direction, still a coin flip. Twenty runs of one unchanged 200-deep
+ottofile: `1 0 0 0 0 1 0 1 0 1 1 1 1 0 1 1 1 1 0 0`, nine resolving correctly
+and eleven exiting 1. `pending` was seeded off `envs.iter()` and the budget was
+a flat 100 outer passes. Fixed at `16c2975`: sorted seed, budget `envs.len() +
+1`, which no resolvable map can exceed. Depths 105/200/250/400 now pass 10/10.
+
+**Generalise this: "it fails closed now" is not the end of the question. Ask
+whether it fails closed *deterministically*.** A reviewer measuring once would
+have called this CONFIRMED; five reps caught it, twenty reps sized it.
+
+Cheap-wins outstanding, not yet fixed: the shipped injection test table pins
+only `"` and `'` payloads while `;`, backtick, newline and `${IFS}` pass but
+are unpinned; `Clean` `continue`s past a refusal so it can report one on stderr
+and still exit 0 (reachable only by a TOCTOU race, since both scans already
+skip symlinks).
+
+**Defect found outside the doc's claims, NOT fixed, needs a decision.**
+`otto_get_input` silently returns empty for any output key containing
+uppercase. `otto_set_output "MIXED_Case"` preserves case;
+`otto_deserialize_input` lowercases when populating `OTTO_INPUT`
+(`executor/action.rs:459`), because the round-trip goes through an uppercased
+`OTTO_INPUT_<TASK>_<KEY>` shell variable and the original case is not
+recoverable from it. So `otto_get_input producer.MIXED_Case` returns `[]` at
+exit 0 while `producer.mixed_case` returns the value. It is the silent-success
+class this whole doc exists to kill, but the fix picks a source of truth for
+key names (the JSON, or a parallel key list) and that is a design decision, not
+an audit finding to apply unilaterally. Left for the user.
 
 ## Standing rules for whoever continues
 
