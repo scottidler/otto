@@ -6,6 +6,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, Paragraph},
 };
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
 use tokio::sync::broadcast;
@@ -42,6 +43,101 @@ impl PaneStatus {
     }
 }
 
+/// Split `line` into pieces no wider than `max_width` characters.
+///
+/// `max_width` is clamped to at least 1: a pane narrow enough to report an
+/// inner width of 0 (any pane in a 1-2 column terminal, and every pane while
+/// the terminal is being resized) used to loop forever here, because a chunk
+/// of width 0 never shortens the remainder.
+pub fn wrap_line(line: &str, max_width: usize) -> Vec<&str> {
+    let width = max_width.max(1);
+    if line.is_empty() {
+        return vec![""];
+    }
+
+    let mut pieces = Vec::new();
+    let mut remaining = line;
+    while !remaining.is_empty() {
+        let end = remaining
+            .char_indices()
+            .nth(width)
+            .map(|(idx, _)| idx)
+            .unwrap_or(remaining.len());
+        pieces.push(&remaining[..end]);
+        remaining = &remaining[end..];
+    }
+    pieces
+}
+
+/// Where a pane's viewport sits in its output buffer.
+///
+/// Pulled out of `TaskPane` as plain data so the scroll behaviour is testable
+/// without a terminal. `follow` (auto-scroll) and `offset` used to disagree:
+/// the pane rendered the bottom while `offset` still said 0, so the first Up
+/// keypress jumped to the top of the buffer instead of up one line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollState {
+    offset: usize,
+    follow: bool,
+}
+
+impl Default for ScrollState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScrollState {
+    pub fn new() -> Self {
+        Self {
+            offset: 0,
+            follow: true,
+        }
+    }
+
+    /// The highest first-line that still fills the viewport.
+    fn max_offset(total: usize, visible: usize) -> usize {
+        total.saturating_sub(visible)
+    }
+
+    /// The first buffer line to render.
+    pub fn start_line(&self, total: usize, visible: usize) -> usize {
+        let max = Self::max_offset(total, visible);
+        if self.follow { max } else { self.offset.min(max) }
+    }
+
+    /// True while the pane sticks to the newest output.
+    pub fn is_following(&self) -> bool {
+        self.follow
+    }
+
+    /// Scroll up one line, starting from what the user is actually looking at.
+    pub fn up(&mut self, total: usize, visible: usize) {
+        let current = self.start_line(total, visible);
+        self.follow = false;
+        self.offset = current.saturating_sub(1);
+    }
+
+    /// Scroll down one line; reaching the bottom re-enables follow.
+    pub fn down(&mut self, total: usize, visible: usize) {
+        let max = Self::max_offset(total, visible);
+        let current = self.start_line(total, visible);
+        if current >= max {
+            self.follow = true;
+            self.offset = max;
+            return;
+        }
+        self.offset = current + 1;
+        self.follow = self.offset >= max;
+    }
+
+    /// Jump to the top and stay there.
+    pub fn top(&mut self) {
+        self.offset = 0;
+        self.follow = false;
+    }
+}
+
 /// Trait for renderable panes
 pub trait Pane {
     fn render(&self, frame: &mut Frame, area: Rect, focused: bool);
@@ -54,11 +150,16 @@ pub trait Pane {
     /// Get current status
     fn status(&self) -> PaneStatus;
 
-    /// Scroll up
+    /// Scroll up one line.
     fn scroll_up(&mut self);
 
-    /// Scroll down
-    fn scroll_down(&mut self, visible_height: u16);
+    /// Scroll down one line.
+    ///
+    /// No height argument: the pane remembers the viewport height it last
+    /// rendered at, which is the only number that is actually right. The
+    /// hardcoded 20 this replaces scrolled by a screenful that matched no pane
+    /// on any terminal except by accident.
+    fn scroll_down(&mut self);
 
     fn reset_scroll(&mut self);
 }
@@ -70,11 +171,13 @@ pub struct TaskPane {
     output_rx: broadcast::Receiver<TaskOutput>,
     message_rx: Option<broadcast::Receiver<TaskMessage>>,
     output_buffer: VecDeque<String>,
-    scroll_offset: u16,
+    scroll: ScrollState,
+    /// Viewport height from the last render, so scrolling moves by what the
+    /// user can see. `Cell` because `render` takes `&self`.
+    visible_height: Cell<u16>,
     max_buffer_lines: usize,
     start_time: Option<SystemTime>,
     duration: Option<Duration>,
-    auto_scroll: bool,
 }
 
 impl TaskPane {
@@ -85,20 +188,16 @@ impl TaskPane {
             output_rx: output_tx.subscribe(),
             message_rx: None,
             output_buffer: VecDeque::new(),
-            scroll_offset: 0,
+            scroll: ScrollState::new(),
+            visible_height: Cell::new(0),
             max_buffer_lines: 1000, // Ring buffer
             start_time: None,
             duration: None,
-            auto_scroll: true, // Auto-scroll enabled by default
         }
     }
 
     pub fn set_message_channel(&mut self, message_tx: broadcast::Sender<TaskMessage>) {
         self.message_rx = Some(message_tx.subscribe());
-    }
-
-    pub fn set_status(&mut self, status: PaneStatus) {
-        self.status = status;
     }
 
     fn tui_status_to_pane_status(status: &TuiTaskStatus) -> PaneStatus {
@@ -109,6 +208,74 @@ impl TaskPane {
             TuiTaskStatus::Failed => PaneStatus::Failed,
             TuiTaskStatus::Skipped => PaneStatus::Skipped,
         }
+    }
+
+    /// Append one line, honoring the ring buffer.
+    fn push_line(&mut self, line: String) {
+        self.output_buffer.push_back(line);
+        if self.output_buffer.len() > self.max_buffer_lines {
+            self.output_buffer.pop_front();
+        }
+    }
+
+    /// Drain one task message into the buffer.
+    fn apply_message(&mut self, message: TaskMessage) {
+        match message {
+            TaskMessage::Output(output) => {
+                if output.task_name == self.task_name {
+                    for line in output.content.lines() {
+                        self.push_line(line.to_string());
+                    }
+                }
+            }
+            TaskMessage::StatusChange { task_name, status, .. } => {
+                if task_name == self.task_name {
+                    self.status = Self::tui_status_to_pane_status(&status);
+                    let status_msg = match status {
+                        TuiTaskStatus::Skipped => "○ Task skipped (up to date)",
+                        TuiTaskStatus::Running => "● Task running",
+                        TuiTaskStatus::Completed => "✓ Task completed",
+                        TuiTaskStatus::Failed => "✗ Task failed",
+                        TuiTaskStatus::Pending => "◌ Task pending",
+                    };
+                    self.push_line(status_msg.to_string());
+                }
+            }
+            TaskMessage::Started { task_name, timestamp } => {
+                if task_name == self.task_name {
+                    self.status = PaneStatus::Running;
+                    self.start_time = Some(timestamp);
+                    self.push_line("● Task started".to_string());
+                }
+            }
+            TaskMessage::Finished {
+                task_name,
+                status,
+                duration_ms,
+                ..
+            } => {
+                if task_name == self.task_name {
+                    self.status = Self::tui_status_to_pane_status(&status);
+                    self.duration = Some(Duration::from_millis(duration_ms));
+                    let status_msg = match status {
+                        TuiTaskStatus::Completed => "✓ Task completed successfully",
+                        TuiTaskStatus::Failed => "✗ Task failed",
+                        TuiTaskStatus::Skipped => "○ Task skipped",
+                        _ => "Task finished",
+                    };
+                    self.push_line(status_msg.to_string());
+                }
+            }
+        }
+    }
+
+    /// The marker a pane shows when the broadcast channel outran it.
+    ///
+    /// A lagged receiver is not an empty one: `while let Ok(..)` treated the
+    /// two the same and stopped draining for the rest of the run, so a pane
+    /// that fell behind once went silent permanently.
+    fn lagged_marker(dropped: u64) -> String {
+        format!("… {dropped} line(s) dropped: output arrived faster than the dashboard could read it")
     }
 }
 
@@ -124,6 +291,12 @@ impl Pane for TaskPane {
             title.push_str(&format!(" ({:.1}s) ", elapsed.as_secs_f64()));
         }
 
+        // A pane the user scrolled off the bottom stops showing new output; say
+        // so in the title rather than looking like a task that stopped talking.
+        if !self.scroll.is_following() {
+            title.push_str("[scroll paused] ");
+        }
+
         let border_color = if focused { Color::Yellow } else { self.status.color() };
 
         let block = Block::default()
@@ -134,39 +307,23 @@ impl Pane for TaskPane {
         let inner_area = block.inner(area);
         frame.render_widget(block, area);
 
-        // Render output lines with scrolling
+        // Remember the viewport height so key handling scrolls by a real screenful.
+        self.visible_height.set(inner_area.height);
+
         let visible_height = inner_area.height as usize;
         let total_lines = self.output_buffer.len();
-
-        // Auto-scroll to bottom if enabled
-        let start_line = if self.auto_scroll && total_lines > visible_height {
-            total_lines - visible_height
-        } else {
-            (self.scroll_offset as usize).min(total_lines.saturating_sub(visible_height))
-        };
+        let start_line = self.scroll.start_line(total_lines, visible_height);
         let end_line = (start_line + visible_height).min(total_lines);
 
-        // Wrap long lines to fit terminal width
         let max_width = inner_area.width as usize;
         let mut wrapped_lines: Vec<Line> = Vec::new();
-
-        for line in self.output_buffer.iter().skip(start_line).take(end_line - start_line) {
-            if line.len() <= max_width {
-                wrapped_lines.push(Line::from(line.as_str()));
-            } else {
-                // Line is too long, wrap it
-                let mut remaining = line.as_str();
-                while !remaining.is_empty() {
-                    let end_idx = remaining
-                        .char_indices()
-                        .nth(max_width)
-                        .map(|(idx, _)| idx)
-                        .unwrap_or(remaining.len());
-
-                    wrapped_lines.push(Line::from(&remaining[..end_idx]));
-                    remaining = &remaining[end_idx..];
-                }
-            }
+        for line in self
+            .output_buffer
+            .iter()
+            .skip(start_line)
+            .take(end_line.saturating_sub(start_line))
+        {
+            wrapped_lines.extend(wrap_line(line, max_width).into_iter().map(Line::from));
         }
 
         let paragraph = Paragraph::new(wrapped_lines);
@@ -178,83 +335,44 @@ impl Pane for TaskPane {
     }
 
     fn update(&mut self) {
+        // Drain the status-message channel. Lagged is a skip, not a stop.
+        let mut messages: Vec<TaskMessage> = Vec::new();
+        let mut dropped: u64 = 0;
         if let Some(rx) = &mut self.message_rx {
-            while let Ok(message) = rx.try_recv() {
-                match message {
-                    TaskMessage::Output(output) => {
-                        // Handle output through this channel too
-                        if output.task_name == self.task_name {
-                            for line in output.content.lines() {
-                                self.output_buffer.push_back(line.to_string());
-                                if self.output_buffer.len() > self.max_buffer_lines {
-                                    self.output_buffer.pop_front();
-                                }
-                            }
-                        }
-                    }
-                    TaskMessage::StatusChange { task_name, status, .. } => {
-                        if task_name == self.task_name {
-                            self.status = Self::tui_status_to_pane_status(&status);
-                            let status_msg = match status {
-                                TuiTaskStatus::Skipped => "○ Task skipped (up to date)",
-                                TuiTaskStatus::Running => "● Task running",
-                                TuiTaskStatus::Completed => "✓ Task completed",
-                                TuiTaskStatus::Failed => "✗ Task failed",
-                                TuiTaskStatus::Pending => "◌ Task pending",
-                            };
-                            self.output_buffer.push_back(status_msg.to_string());
-                            if self.output_buffer.len() > self.max_buffer_lines {
-                                self.output_buffer.pop_front();
-                            }
-                        }
-                    }
-                    TaskMessage::Started { task_name, timestamp } => {
-                        if task_name == self.task_name {
-                            self.status = PaneStatus::Running;
-                            self.start_time = Some(timestamp);
-                            self.output_buffer.push_back("● Task started".to_string());
-                            if self.output_buffer.len() > self.max_buffer_lines {
-                                self.output_buffer.pop_front();
-                            }
-                        }
-                    }
-                    TaskMessage::Finished {
-                        task_name,
-                        status,
-                        duration_ms,
-                        ..
-                    } => {
-                        if task_name == self.task_name {
-                            self.status = Self::tui_status_to_pane_status(&status);
-                            self.duration = Some(Duration::from_millis(duration_ms));
-                            let status_msg = match status {
-                                TuiTaskStatus::Completed => "✓ Task completed successfully",
-                                TuiTaskStatus::Failed => "✗ Task failed",
-                                TuiTaskStatus::Skipped => "○ Task skipped",
-                                _ => "Task finished",
-                            };
-                            self.output_buffer.push_back(status_msg.to_string());
-                            if self.output_buffer.len() > self.max_buffer_lines {
-                                self.output_buffer.pop_front();
-                            }
-                        }
-                    }
+            loop {
+                match rx.try_recv() {
+                    Ok(message) => messages.push(message),
+                    Err(broadcast::error::TryRecvError::Lagged(n)) => dropped += n,
+                    Err(_) => break,
                 }
             }
         }
+        if dropped > 0 {
+            self.push_line(Self::lagged_marker(dropped));
+        }
+        for message in messages {
+            self.apply_message(message);
+        }
 
-        // Non-blocking receive from output broadcast channel
-        while let Ok(output) = self.output_rx.try_recv() {
-            // Only process output for this task
-            if output.task_name == self.task_name {
-                for line in output.content.lines() {
-                    self.output_buffer.push_back(line.to_string());
-
-                    // Maintain ring buffer
-                    if self.output_buffer.len() > self.max_buffer_lines {
-                        self.output_buffer.pop_front();
-                    }
-                }
+        // Drain the per-task output channel, same rule.
+        let mut outputs: Vec<TaskOutput> = Vec::new();
+        let mut dropped: u64 = 0;
+        loop {
+            match self.output_rx.try_recv() {
+                Ok(output) => outputs.push(output),
+                Err(broadcast::error::TryRecvError::Lagged(n)) => dropped += n,
+                Err(_) => break,
+            }
+        }
+        if dropped > 0 {
+            self.push_line(Self::lagged_marker(dropped));
+        }
+        for output in outputs {
+            if output.task_name != self.task_name {
+                continue;
+            }
+            for line in output.content.lines() {
+                self.push_line(line.to_string());
             }
         }
     }
@@ -264,25 +382,170 @@ impl Pane for TaskPane {
     }
 
     fn scroll_up(&mut self) {
-        self.auto_scroll = false; // Disable auto-scroll when user manually scrolls
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        let visible = self.visible_height.get() as usize;
+        self.scroll.up(self.output_buffer.len(), visible);
     }
 
-    fn scroll_down(&mut self, visible_height: u16) {
-        let total_lines = self.output_buffer.len() as u16;
-        if total_lines > visible_height {
-            let max_scroll = total_lines - visible_height;
-            if self.scroll_offset < max_scroll {
-                self.scroll_offset += 1;
-            } else {
-                // Re-enable auto-scroll when scrolled to bottom
-                self.auto_scroll = true;
-            }
-        }
+    fn scroll_down(&mut self) {
+        let visible = self.visible_height.get() as usize;
+        self.scroll.down(self.output_buffer.len(), visible);
     }
 
     fn reset_scroll(&mut self) {
-        self.scroll_offset = 0;
-        self.auto_scroll = false; // Manual reset disables auto-scroll
+        self.scroll.top();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =====================================================================
+    // wrap_line
+    // =====================================================================
+
+    #[test]
+    fn wrap_line_leaves_a_short_line_alone() {
+        assert_eq!(wrap_line("abc", 10), vec!["abc"]);
+    }
+
+    #[test]
+    fn wrap_line_splits_at_the_width() {
+        assert_eq!(wrap_line("abcdef", 2), vec!["ab", "cd", "ef"]);
+    }
+
+    #[test]
+    fn wrap_line_terminates_at_width_zero() {
+        // The hang this closes: width 0 chunks never shortened the remainder.
+        assert_eq!(wrap_line("abc", 0), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn wrap_line_splits_on_characters_not_bytes() {
+        assert_eq!(wrap_line("héllo", 2), vec!["hé", "ll", "o"]);
+    }
+
+    #[test]
+    fn wrap_line_keeps_a_blank_line() {
+        assert_eq!(wrap_line("", 10), vec![""]);
+    }
+
+    // =====================================================================
+    // ScrollState
+    // =====================================================================
+
+    #[test]
+    fn a_following_pane_renders_the_bottom() {
+        let scroll = ScrollState::new();
+        assert!(scroll.is_following());
+        assert_eq!(scroll.start_line(100, 20), 80);
+    }
+
+    #[test]
+    fn the_first_up_moves_one_line_not_to_the_top() {
+        let mut scroll = ScrollState::new();
+        scroll.up(100, 20);
+        assert_eq!(
+            scroll.start_line(100, 20),
+            79,
+            "Up from the bottom is one line, not a jump"
+        );
+        assert!(!scroll.is_following());
+    }
+
+    #[test]
+    fn up_stops_at_the_top() {
+        let mut scroll = ScrollState::new();
+        scroll.top();
+        scroll.up(100, 20);
+        assert_eq!(scroll.start_line(100, 20), 0);
+    }
+
+    #[test]
+    fn down_returns_to_following_at_the_bottom() {
+        let mut scroll = ScrollState::new();
+        scroll.up(100, 20);
+        scroll.down(100, 20);
+        assert_eq!(scroll.start_line(100, 20), 80);
+        assert!(scroll.is_following(), "reaching the bottom re-enables auto-scroll");
+    }
+
+    #[test]
+    fn down_from_the_top_advances_one_line() {
+        let mut scroll = ScrollState::new();
+        scroll.top();
+        scroll.down(100, 20);
+        assert_eq!(scroll.start_line(100, 20), 1);
+        assert!(!scroll.is_following());
+    }
+
+    #[test]
+    fn a_buffer_shorter_than_the_viewport_always_starts_at_zero() {
+        let mut scroll = ScrollState::new();
+        assert_eq!(scroll.start_line(3, 20), 0);
+        scroll.up(3, 20);
+        assert_eq!(scroll.start_line(3, 20), 0);
+        scroll.down(3, 20);
+        assert_eq!(scroll.start_line(3, 20), 0);
+    }
+
+    #[test]
+    fn a_zero_height_viewport_does_not_panic() {
+        let mut scroll = ScrollState::new();
+        scroll.up(10, 0);
+        scroll.down(10, 0);
+        assert_eq!(scroll.start_line(10, 0), 10);
+    }
+
+    // =====================================================================
+    // TaskPane drain
+    // =====================================================================
+
+    fn pane_with_channel(capacity: usize) -> (TaskPane, broadcast::Sender<TaskOutput>) {
+        let (tx, _) = broadcast::channel::<TaskOutput>(capacity);
+        (TaskPane::new("build".to_string(), tx.clone()), tx)
+    }
+
+    #[test]
+    fn a_lagged_pane_keeps_draining() {
+        let (mut pane, tx) = pane_with_channel(2);
+        // Overrun the channel: the receiver is now behind by one.
+        for i in 0..3 {
+            tx.send(TaskOutput {
+                task_name: "build".to_string(),
+                content: format!("line {i}\n"),
+                stream_type: crate::executor::output::OutputType::Stdout,
+                timestamp: SystemTime::now(),
+            })
+            .expect("the pane's receiver keeps the channel open");
+        }
+
+        pane.update();
+
+        let lines: Vec<&String> = pane.output_buffer.iter().collect();
+        assert!(
+            lines.iter().any(|l| l.contains("dropped")),
+            "the drop is reported, not silent: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.as_str() == "line 2"),
+            "draining continues past the lag: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn output_for_another_task_is_ignored() {
+        let (mut pane, tx) = pane_with_channel(8);
+        tx.send(TaskOutput {
+            task_name: "test".to_string(),
+            content: "not mine\n".to_string(),
+            stream_type: crate::executor::output::OutputType::Stdout,
+            timestamp: SystemTime::now(),
+        })
+        .expect("send succeeds");
+
+        pane.update();
+
+        assert!(pane.output_buffer.is_empty());
     }
 }

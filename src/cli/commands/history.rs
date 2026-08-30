@@ -44,6 +44,37 @@ fn pad_center(s: &str, width: usize) -> String {
     }
 }
 
+/// The run statuses `--status` can filter on.
+///
+/// A `ValueEnum`, not a free string: `--status FAILED` and `--status bogus`
+/// both used to fall through a `_ => None` arm and print the full unfiltered
+/// list, so a typo looked exactly like a filter that matched everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum StatusFilter {
+    Success,
+    Failed,
+    Running,
+}
+
+impl From<StatusFilter> for RunStatus {
+    fn from(filter: StatusFilter) -> Self {
+        match filter {
+            StatusFilter::Success => RunStatus::Success,
+            StatusFilter::Failed => RunStatus::Failed,
+            StatusFilter::Running => RunStatus::Running,
+        }
+    }
+}
+
+impl StatusFilter {
+    /// Parse a status name, ignoring case, naming the accepted values on failure.
+    pub fn parse(value: &str) -> Result<Self> {
+        <Self as clap::ValueEnum>::from_str(value, true)
+            .map_err(|_| eyre::eyre!("invalid status '{value}'; expected one of: success, failed, running"))
+    }
+}
+
 /// Show execution history
 #[derive(Debug, clap::Parser)]
 #[command(name = "history")]
@@ -57,8 +88,8 @@ pub struct HistoryCommand {
     pub limit: usize,
 
     /// Filter by status (success, failed, running)
-    #[arg(short, long)]
-    pub status: Option<String>,
+    #[arg(short, long, value_enum, ignore_case = true)]
+    pub status: Option<StatusFilter>,
 
     /// Filter by project hash
     #[arg(short, long)]
@@ -96,12 +127,7 @@ impl HistoryCommand {
     }
 
     fn show_run_history(&self, store: &dyn StateStore) -> Result<()> {
-        let status_filter = self.status.as_ref().and_then(|s| match s.as_str() {
-            "success" => Some(RunStatus::Success),
-            "failed" => Some(RunStatus::Failed),
-            "running" => Some(RunStatus::Running),
-            _ => None,
-        });
+        let status_filter = self.status.map(RunStatus::from);
 
         let runs = store.get_runs_with_filters(status_filter, self.project.as_deref(), self.limit)?;
 
@@ -515,7 +541,7 @@ mod tests {
         let cmd = HistoryCommand {
             task_name: None,
             limit: 20,
-            status: Some("success".to_string()),
+            status: Some(StatusFilter::Success),
             project: None,
             json: false,
         };
@@ -530,7 +556,7 @@ mod tests {
         let cmd = HistoryCommand {
             task_name: None,
             limit: 20,
-            status: Some("failed".to_string()),
+            status: Some(StatusFilter::Failed),
             project: None,
             json: false,
         };
@@ -545,7 +571,7 @@ mod tests {
         let cmd = HistoryCommand {
             task_name: None,
             limit: 20,
-            status: Some("running".to_string()),
+            status: Some(StatusFilter::Running),
             project: None,
             json: false,
         };
@@ -554,19 +580,34 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Was `test_execute_with_invalid_status_filter`, which asserted that
+    /// `--status invalid` was accepted and quietly ignored. That is the defect;
+    /// the assertion is inverted rather than deleted.
     #[test]
-    fn test_execute_with_invalid_status_filter() {
-        let store = create_test_store_with_runs();
-        let cmd = HistoryCommand {
-            task_name: None,
-            limit: 20,
-            status: Some("invalid".to_string()),
-            project: None,
-            json: false,
-        };
+    fn an_invalid_status_is_rejected_at_parse_time() {
+        use clap::Parser as _;
 
-        let result = cmd.execute_with_store(Some(store));
-        assert!(result.is_ok());
+        let err = HistoryCommand::try_parse_from(["history", "--status", "invalid"])
+            .expect_err("'invalid' is not a status")
+            .to_string();
+        assert!(err.contains("invalid value 'invalid'"), "{err}");
+    }
+
+    #[test]
+    fn a_status_is_accepted_in_any_case() {
+        use clap::Parser as _;
+
+        let cmd = HistoryCommand::try_parse_from(["history", "--status", "FAILED"]).expect("case does not matter");
+        assert_eq!(cmd.status, Some(StatusFilter::Failed));
+    }
+
+    #[test]
+    fn status_filter_parse_names_the_accepted_values() {
+        assert_eq!(StatusFilter::parse("Running").unwrap(), StatusFilter::Running);
+        let err = StatusFilter::parse("bogus")
+            .expect_err("bogus is not a status")
+            .to_string();
+        assert!(err.contains("success, failed, running"), "{err}");
     }
 
     #[test]

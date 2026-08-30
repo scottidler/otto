@@ -29,11 +29,71 @@ fn rotate_log_if_needed(log_file_path: &std::path::Path) {
     }
 }
 
-fn setup_logging() -> Result<(), Report> {
-    let log_dir = dirs::data_local_dir()
-        .ok_or_else(|| eyre::eyre!("Could not determine local data directory"))?
-        .join("otto")
-        .join("logs");
+/// The log levels `--log-level` accepts, in the order `--help` lists them.
+const LOG_LEVELS: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
+
+/// Default log filter when neither `--log-level` nor `$RUST_LOG` says otherwise.
+const DEFAULT_LOG_LEVEL: &str = "info";
+
+/// Pre-parse `--log-level` from raw args and return it with the flag stripped.
+///
+/// Pre-parsed rather than left to clap because logging is set up before the
+/// parser exists, and because `otto --log-level debug build` has to reach the
+/// task parser without the flag in the arg list.
+///
+/// Case-insensitive per the CLI rule: users type back the `WARN`/`INFO` they
+/// saw in the log file.
+fn apply_log_level_flag(args: Vec<String>) -> Result<(Vec<String>, Option<String>), Report> {
+    let mut level: Option<String> = None;
+    let mut kept: Vec<String> = Vec::with_capacity(args.len());
+    let mut i = 0;
+
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            kept.extend_from_slice(&args[i..]);
+            break;
+        }
+        if arg == "--log-level" {
+            let Some(value) = args.get(i + 1) else {
+                eyre::bail!("'--log-level' requires a value; one of: {}", LOG_LEVELS.join(", "));
+            };
+            level = Some(value.clone());
+            i += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--log-level=") {
+            level = Some(value.to_string());
+            i += 1;
+            continue;
+        }
+        kept.push(arg.clone());
+        i += 1;
+    }
+
+    let level = match level {
+        None => None,
+        Some(value) => {
+            let lowered = value.to_ascii_lowercase();
+            if !LOG_LEVELS.contains(&lowered.as_str()) {
+                eyre::bail!(
+                    "invalid --log-level '{value}'; expected one of: {}",
+                    LOG_LEVELS.join(", ")
+                );
+            }
+            Some(lowered)
+        }
+    };
+
+    Ok((kept, level))
+}
+
+fn setup_logging(level: Option<&str>) -> Result<(), Report> {
+    // XDG on every platform (see executor::layout): `dirs::data_local_dir()`
+    // ignores $XDG_DATA_HOME off Linux, so otto's logs used to land somewhere
+    // its own help text never mentioned.
+    let log_dir = otto::executor::layout::log_dir()
+        .ok_or_else(|| eyre::eyre!("Could not determine the XDG data directory for otto's logs"))?;
 
     std::fs::create_dir_all(&log_dir)?;
     let log_file_path = log_dir.join("otto.log");
@@ -43,7 +103,15 @@ fn setup_logging() -> Result<(), Report> {
 
     let log_file = OpenOptions::new().create(true).append(true).open(&log_file_path)?;
 
-    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info"))
+    // `--log-level` wins over $RUST_LOG: an explicit flag is a decision, an
+    // inherited env var is an accident.
+    let filter = match level {
+        Some(level) => level.to_string(),
+        None => env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_LOG_LEVEL.to_string()),
+    };
+
+    env_logger::Builder::new()
+        .parse_filters(&filter)
         .target(Target::Pipe(Box::new(log_file)))
         .init();
 
@@ -104,17 +172,25 @@ fn apply_cwd_flag(args: Vec<String>) -> Result<Vec<String>, Report> {
 
 #[tokio::main]
 async fn main() {
-    if let Err(e) = setup_logging() {
-        eprintln!("Failed to setup logging: {e}");
+    let args: Vec<String> = env::args().collect();
+    let (args, log_level) = match apply_log_level_flag(args) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("{e:#}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = setup_logging(log_level.as_deref()) {
+        eprintln!("Failed to setup logging: {e:#}");
         std::process::exit(1);
     }
     info!("Starting otto");
 
-    let args: Vec<String> = env::args().collect();
     let args = match apply_cwd_flag(args) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{e:#}");
             std::process::exit(1);
         }
     };
@@ -129,7 +205,7 @@ async fn main() {
         && let Some(result) = handle_subcommand(&args).await
     {
         if let Err(e) = result {
-            eprintln!("{e}");
+            eprintln!("{e:#}");
             std::process::exit(1);
         }
         return;
@@ -139,7 +215,7 @@ async fn main() {
     let mut parser = match Parser::new(args) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{e:#}");
             std::process::exit(1);
         }
     };
@@ -150,13 +226,13 @@ async fn main() {
         Ok(Startup::Run(c)) => *c,
         Ok(Startup::Exit(code)) => std::process::exit(code),
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{e:#}");
             std::process::exit(1);
         }
     };
 
     if let Err(e) = otto::run(config).await {
-        eprintln!("{e}");
+        eprintln!("{e:#}");
         std::process::exit(1);
     }
 }
@@ -189,14 +265,58 @@ fn handle_is_valid_ottofile(args: &[String]) -> Option<i32> {
     None
 }
 
+/// Otto's global flags that consume the following token as their value.
+///
+/// `-C`/`--cwd` is already stripped by `apply_cwd_flag` and `--log-level` by
+/// `apply_log_level_flag`, but both stay listed: this table's job is to say
+/// which tokens are values, and a table that is only right because of call
+/// ordering is a trap for the next edit.
+const GLOBAL_VALUE_FLAGS: &[&str] = &[
+    "-C",
+    "--cwd",
+    "-o",
+    "--ottofile",
+    "-j",
+    "--jobs",
+    "--format",
+    "--log-level",
+];
+
+/// Index of the first argument that names a command rather than a global flag.
+///
+/// `handle_subcommand` only ever looked at `args[1]`, so any leading global
+/// flag defeated builtin routing outright: `otto -j 2 Convert` fell through to
+/// the task parser and printed "No tasks to execute".
+fn first_command_index(args: &[String]) -> Option<usize> {
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            return None;
+        }
+        if GLOBAL_VALUE_FLAGS.contains(&arg.as_str()) {
+            i += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        return Some(i);
+    }
+    None
+}
+
 /// Handle subcommands that use their own clap parsers. Returns Some(result) if handled.
 async fn handle_subcommand(args: &[String]) -> Option<Result<(), Report>> {
-    match args[1].as_str() {
-        "Clean" => Some(otto::app::execute_clean_command(&args[1..]).await),
-        "Convert" => Some(otto::app::execute_convert_command(&args[1..])),
-        "History" => Some(otto::app::execute_history_command(&args[1..])),
-        "Stats" => Some(otto::app::execute_stats_command(&args[1..])),
-        "Upgrade" => Some(otto::app::execute_upgrade_command(&args[1..]).await),
+    let index = first_command_index(args)?;
+    let rest = &args[index..];
+    match rest[0].as_str() {
+        "Clean" => Some(otto::app::execute_clean_command(rest).await),
+        "Convert" => Some(otto::app::execute_convert_command(rest)),
+        "History" => Some(otto::app::execute_history_command(rest)),
+        "Stats" => Some(otto::app::execute_stats_command(rest)),
+        "Upgrade" => Some(otto::app::execute_upgrade_command(rest).await),
         _ => None,
     }
 }
@@ -353,6 +473,101 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("requires a directory argument"));
+    }
+
+    // =====================================================================
+    // --log-level
+    // =====================================================================
+
+    #[test]
+    fn log_level_absent_leaves_the_args_alone() {
+        let args = vec!["otto".to_string(), "ci".to_string()];
+        let (kept, level) = apply_log_level_flag(args.clone()).unwrap();
+        assert_eq!(kept, args);
+        assert_eq!(level, None);
+    }
+
+    #[test]
+    fn log_level_is_stripped_in_both_forms() {
+        let (kept, level) =
+            apply_log_level_flag(vec!["otto".into(), "--log-level".into(), "debug".into(), "ci".into()]).unwrap();
+        assert_eq!(kept, vec!["otto", "ci"]);
+        assert_eq!(level.as_deref(), Some("debug"));
+
+        let (kept, level) = apply_log_level_flag(vec!["otto".into(), "--log-level=trace".into(), "ci".into()]).unwrap();
+        assert_eq!(kept, vec!["otto", "ci"]);
+        assert_eq!(level.as_deref(), Some("trace"));
+    }
+
+    #[test]
+    fn log_level_is_case_insensitive() {
+        let (_, level) = apply_log_level_flag(vec!["otto".into(), "--log-level=DEBUG".into()]).unwrap();
+        assert_eq!(level.as_deref(), Some("debug"));
+    }
+
+    #[test]
+    fn an_unknown_log_level_is_an_error() {
+        let err = apply_log_level_flag(vec!["otto".into(), "--log-level=bogus".into()])
+            .expect_err("bogus is not a level")
+            .to_string();
+        assert!(err.contains("invalid --log-level 'bogus'"), "{err}");
+        assert!(err.contains("debug"), "the error lists the accepted values: {err}");
+    }
+
+    #[test]
+    fn a_valueless_log_level_is_an_error() {
+        let err = apply_log_level_flag(vec!["otto".into(), "--log-level".into()])
+            .expect_err("the flag needs a value")
+            .to_string();
+        assert!(err.contains("requires a value"), "{err}");
+    }
+
+    #[test]
+    fn log_level_after_a_double_dash_belongs_to_the_task() {
+        let args = vec!["otto".into(), "build".into(), "--".into(), "--log-level=debug".into()];
+        let (kept, level) = apply_log_level_flag(args.clone()).unwrap();
+        assert_eq!(kept, args);
+        assert_eq!(level, None);
+    }
+
+    // =====================================================================
+    // builtin routing past global flags
+    // =====================================================================
+
+    #[test]
+    fn the_first_command_is_found_behind_global_flags() {
+        let args: Vec<String> = ["otto", "-j", "2", "--tui", "Convert"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(first_command_index(&args), Some(4));
+    }
+
+    #[test]
+    fn a_bare_command_is_still_found() {
+        let args: Vec<String> = ["otto", "Clean"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(first_command_index(&args), Some(1));
+    }
+
+    #[test]
+    fn an_attached_value_flag_consumes_only_itself() {
+        let args: Vec<String> = ["otto", "--ottofile=x.yml", "Stats"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(first_command_index(&args), Some(2));
+    }
+
+    #[test]
+    fn a_double_dash_ends_the_search() {
+        let args: Vec<String> = ["otto", "--", "Clean"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(first_command_index(&args), None);
+    }
+
+    #[test]
+    fn flags_alone_name_no_command() {
+        let args: Vec<String> = ["otto", "-j", "2"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(first_command_index(&args), None);
     }
 
     #[test]

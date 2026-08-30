@@ -12,7 +12,7 @@ use crate::executor::task::TaskEdge;
 use clap::{Arg, ArgMatches, Command, value_parser};
 use daggy::Dag;
 use expanduser::expanduser;
-use eyre::{Result, eyre};
+use eyre::{Context, Result, eyre};
 use glob;
 use hex;
 use once_cell::sync::Lazy;
@@ -27,6 +27,16 @@ use crate::cfg::task::{ForeachItem, ForeachSpec, TaskSpecs};
 use crate::cli::builtins::{BUILTIN_COMMANDS, is_builtin};
 
 pub type DAG<T> = Dag<T, (), u32>;
+
+/// The `-o/--ottofile` default: divine one by walking up from the cwd.
+const DEFAULT_OTTOFILE: &str = ".";
+
+/// The values `--log-level` accepts, in increasing verbosity.
+///
+/// Declared here because `global_args()` renders them in `--help`; `main`
+/// pre-parses the flag (logging is configured before a parser exists) and
+/// reads the same list, so the two can't drift.
+pub const LOG_LEVELS: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
 
 const OTTOFILES: &[&str] = &[
     "otto.yml",
@@ -119,6 +129,141 @@ impl ParseOutcome {
     }
 }
 
+/// The `-o/--ottofile` value this invocation asked for, without clap.
+///
+/// The help path cannot use clap's parsed value: clap errored out *with*
+/// `DisplayHelp` before producing matches. It used to hardcode `"."` there, so
+/// `otto -o sub/other.yml --help` and `OTTOFILE=sub/other.yml otto --help`
+/// both listed the *divined* file's tasks while rendering
+/// `[env: OTTOFILE=.../sub/other.yml]` in the same breath.
+///
+/// Precedence matches clap's: explicit flag, then env, then the default.
+fn ottofile_value_from_args(args: &[String], env_value: Option<String>) -> String {
+    let mut i = 0;
+    let mut found: Option<String> = None;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            break;
+        }
+        if arg == "-o" || arg == "--ottofile" {
+            if let Some(value) = args.get(i + 1) {
+                found = Some(value.clone());
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--ottofile=").or_else(|| arg.strip_prefix("-o=")) {
+            found = Some(value.to_string());
+        }
+        i += 1;
+    }
+
+    found
+        .or(env_value)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_OTTOFILE.to_string())
+}
+
+/// The task name requested more than once on one command line, if any.
+fn duplicate_task_name(partitions: &[Vec<String>]) -> Option<&str> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for partition in partitions {
+        let Some(name) = partition.first() else {
+            continue;
+        };
+        if !seen.insert(name.as_str()) {
+            return Some(name.as_str());
+        }
+    }
+    None
+}
+
+/// The error `otto build --msg=a build --msg=b` fails with.
+///
+/// It used to run `build` once and drop the second argument set on the floor -
+/// a silent success with arguments the user watched themselves type.
+fn duplicate_task_error(name: &str) -> eyre::Report {
+    eyre!(
+        "task '{name}' was requested more than once; otto runs each task once per invocation, \
+         so the later arguments would be silently discarded"
+    )
+}
+
+/// The declared choice matching `value`, ignoring case.
+///
+/// Choices are matched case-insensitively but stored canonically: the task's
+/// `$param` env var must read `ascii` whether the user typed `ascii` or `ASCII`.
+fn canonical_choice<'a>(value: &str, choices: &'a [String]) -> Option<&'a str> {
+    choices
+        .iter()
+        .find(|choice| choice.eq_ignore_ascii_case(value))
+        .map(String::as_str)
+}
+
+/// Strip a `--tui` that landed in a task's arguments, reporting whether it was there.
+///
+/// `--tui` is `.global(true)`, which clap does not propagate into external
+/// subcommands - and every otto task is an external subcommand - so
+/// `otto build --tui` failed with `unexpected argument '--tui'`. Anything after
+/// a `--` belongs to the task verbatim and is left alone.
+fn take_tui_flag(args: Vec<String>) -> (Vec<String>, bool) {
+    let mut found = false;
+    let mut kept = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    for arg in iter.by_ref() {
+        if arg == "--" {
+            kept.push(arg);
+            break;
+        }
+        if arg == "--tui" {
+            found = true;
+            continue;
+        }
+        kept.push(arg);
+    }
+    kept.extend(iter);
+    (kept, found)
+}
+
+/// True when `flag` appears in `args` as a flag, not as some option's value.
+///
+/// A raw `args.contains("--Serial")` matched `--msg --Serial` too, quietly
+/// serializing a foreach group because a *value* spelled the flag.
+fn contains_flag(args: &[String], flag: &str, value_options: Option<&HashSet<String>>) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            return false;
+        }
+        if arg == flag {
+            return true;
+        }
+        if value_options.is_some_and(|options| options.contains(arg.as_str())) {
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// A task's clap failure, with the `=` escape hatch named when it applies.
+///
+/// A partition that is followed by another one lost its tail to a task
+/// boundary; if clap then rejects the value, the boundary is the likeliest
+/// cause and the user needs to be told the way out.
+fn task_arg_error(rendered: String, kind: clap::error::ErrorKind, next_task: Option<&str>) -> eyre::Report {
+    match (kind, next_task) {
+        (clap::error::ErrorKind::InvalidValue, Some(next)) => eyre!(
+            "{rendered}\nhint: '{next}' was read as the next task to run; if it is meant as a value, \
+             attach it to its flag with '=' (--flag={next})"
+        ),
+        _ => eyre!("{rendered}"),
+    }
+}
+
 /// The leading args that `partitions()` would drop on the floor.
 ///
 /// `partitions()` splits at the first arg that names a task, so everything
@@ -181,7 +326,7 @@ fn nargs_to_num_args(nargs: &Nargs) -> clap::builder::ValueRange {
     }
 }
 
-fn calculate_hash(action: &String) -> String {
+fn calculate_hash(action: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(action);
     let result = hasher.finalize();
@@ -528,7 +673,13 @@ impl Parser {
                     }
                     ErrorKind::DisplayHelp => {
                         if help_requested {
-                            let ottofile_value = ".".to_string();
+                            // Read the flag and the env var ourselves: clap
+                            // bailed with DisplayHelp before producing matches,
+                            // and hardcoding "." here is what made
+                            // `otto -o other.yml --help` list the wrong file's
+                            // tasks while printing other.yml's path in the same
+                            // output.
+                            let ottofile_value = ottofile_value_from_args(&self.args, env::var("OTTOFILE").ok());
                             let ottofile_path = Self::divine_ottofile(ottofile_value);
 
                             match ottofile_path {
@@ -601,7 +752,7 @@ impl Parser {
             .map_err(|_| eyre!("-j/--jobs value is too large for this platform"))?;
 
         // Extract tui flag
-        let tui_mode = matches.get_flag("tui");
+        let mut tui_mode = matches.get_flag("tui");
 
         // Extract no-prefix flag (see docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md Phase 8)
         let no_prefix = matches.get_flag("no-prefix");
@@ -637,7 +788,10 @@ impl Parser {
                 self.resolve_foreach(name, foreach)
             }) {
                 Ok(view) => {
-                    let explicit_format = matches.get_one::<String>("format").map(String::as_str);
+                    // `ignore_case(true)` hands back what the user typed, so
+                    // canonicalize before the format table looks it up.
+                    let explicit_format = matches.get_one::<String>("format").map(|f| f.to_ascii_lowercase());
+                    let explicit_format = explicit_format.as_deref();
                     let stdout_is_tty = atty::is(atty::Stream::Stdout);
                     let format = crate::cli::commands::tasks::choose_format(explicit_format, stdout_is_tty);
                     match crate::cli::commands::tasks::render_tasks_view(&view, format) {
@@ -661,6 +815,11 @@ impl Parser {
         // Extract remaining arguments after global options
         let remaining_args = self.extract_remaining_args(&matches);
 
+        // `--tui` is global but clap does not push global flags into external
+        // subcommands, so `otto build --tui` arrives here as a task argument.
+        let (remaining_args, tui_in_task_args) = take_tui_flag(remaining_args);
+        tui_mode = tui_mode || tui_in_task_args;
+
         // Handle help commands
         if self.should_show_help(&remaining_args) {
             self.show_help(&remaining_args)?;
@@ -681,7 +840,11 @@ impl Parser {
             if let Some(unknown) = unconsumed_args(&remaining_args, &task_names) {
                 return Err(unknown_task_error(unknown, &task_names));
             }
-            let partitions = partitions(&remaining_args, &task_names);
+            let value_options = self.value_taking_options(&task_names);
+            let partitions = partitions(&remaining_args, &task_names, &value_options);
+            if let Some(duplicate) = duplicate_task_name(&partitions) {
+                return Err(duplicate_task_error(duplicate));
+            }
             self.pargs = partitions;
 
             // Extract task names from partitions
@@ -711,8 +874,9 @@ impl Parser {
             let matches = match otto_cmd.try_get_matches_from(&self.args) {
                 Ok(m) => m,
                 Err(_) => {
-                    // If parsing fails, fall back to default value
-                    let ottofile_value = "./".to_owned();
+                    // Parsing failed, so read the flag and env directly rather
+                    // than divining from the cwd and ignoring what was asked for.
+                    let ottofile_value = ottofile_value_from_args(&self.args, env::var("OTTOFILE").ok());
                     let ottofile_path = Self::divine_ottofile(ottofile_value)?;
                     let (config_spec, hash, ottofile) = Self::load_config_from_path(ottofile_path)?;
 
@@ -784,7 +948,7 @@ impl Parser {
                 .long("ottofile")
                 .value_name("PATH")
                 .help("path to the ottofile")
-                .default_value(".")
+                .default_value(DEFAULT_OTTOFILE)
                 .env("OTTOFILE")
                 .value_parser(value_parser!(String)),
             Arg::new("list-subtasks")
@@ -799,7 +963,8 @@ impl Parser {
                 .long("format")
                 .value_name("FORMAT")
                 .help("Output format for --tasks (yaml or json); default: yaml on a tty, json when piped")
-                .value_parser(["yaml", "json"]),
+                .value_parser(["yaml", "json"])
+                .ignore_case(true),
             Arg::new("jobs")
                 .short('j')
                 .long("jobs")
@@ -817,6 +982,15 @@ impl Parser {
                 .long("no-prefix")
                 .help("Suppress the [task] prefix on task output")
                 .action(clap::ArgAction::SetTrue),
+            // Declared here so `--help` lists it; `main` strips it from the
+            // args before this command ever parses them, because logging is
+            // configured before the parser exists. Same arrangement as -C/--cwd.
+            Arg::new("log-level")
+                .long("log-level")
+                .value_name("LEVEL")
+                .help("Verbosity of otto's own log file, under $XDG_DATA_HOME/otto/logs")
+                .value_parser(clap::builder::PossibleValuesParser::new(LOG_LEVELS))
+                .ignore_case(true),
         ]
     }
 
@@ -1039,6 +1213,35 @@ impl Parser {
         Ok(task_names)
     }
 
+    /// Which option tokens take a value, per task name.
+    ///
+    /// Built from the declared params (`OPT` only: a flag consumes nothing and
+    /// a positional has no token), for every task and, so subtask arguments
+    /// partition the same way, every subtask id in `task_names`.
+    fn value_taking_options(&self, task_names: &[String]) -> ValueTakingOptions {
+        let mut options: ValueTakingOptions = HashMap::new();
+        for name in task_names {
+            let spec_name = Self::parent_task_name(name);
+            let Some(spec) = self.config_spec.tasks.get(spec_name) else {
+                continue;
+            };
+            let mut tokens: HashSet<String> = HashSet::new();
+            for param in spec.params.values() {
+                if param.param_type != ParamType::OPT {
+                    continue;
+                }
+                if let Some(long) = &param.long {
+                    tokens.insert(format!("--{long}"));
+                }
+                if let Some(short) = param.short {
+                    tokens.insert(format!("-{short}"));
+                }
+            }
+            options.insert(name.clone(), tokens);
+        }
+        options
+    }
+
     /// The set of ottofile task names this run can reach from `roots`.
     ///
     /// Mirrors `collect_transitive_deps` on the *unexpanded* specs, so it is a
@@ -1162,7 +1365,11 @@ impl Parser {
             let mut cli_provided = HashSet::new();
 
             // Find the partition for this task's arguments
-            let task_args = self.pargs.iter().find(|args| !args.is_empty() && args[0] == *task_name);
+            let partition_index = self
+                .pargs
+                .iter()
+                .position(|args| !args.is_empty() && args[0] == *task_name);
+            let task_args = partition_index.map(|i| &self.pargs[i]);
 
             if let Some(args) = task_args
                 && args.len() > 1
@@ -1175,9 +1382,13 @@ impl Parser {
                 // `try_`, not `get_matches_from`: the latter prints clap's usage
                 // and exits 2 from library code, so `otto build --bogus` could
                 // never be handled by a caller.
+                let next_task = partition_index
+                    .and_then(|i| self.pargs.get(i + 1))
+                    .and_then(|next| next.first())
+                    .map(String::as_str);
                 let matches = task_command
                     .try_get_matches_from(args)
-                    .map_err(|e| eyre!("{}", e.render().ansi()))?;
+                    .map_err(|e| task_arg_error(e.render().ansi().to_string(), e.kind(), next_task))?;
 
                 for param_spec in task_spec.params.values() {
                     match param_spec.param_type {
@@ -1205,16 +1416,22 @@ impl Parser {
                             // range) collects every space-separated value the
                             // user gave in one occurrence, not just the
                             // first - `get_one` silently dropped the rest.
+                            // `ignore_case(true)` returns the spelling the
+                            // user typed; the task sees the declared one.
+                            let choices = self.param_choices(task_name, param_spec, BuildMode::Bind)?;
+                            let canonicalize = |value: &str| -> String {
+                                canonical_choice(value, &choices).unwrap_or(value).to_string()
+                            };
                             if param_spec.nargs == Nargs::One {
                                 if let Some(value) = matches.get_one::<String>(param_spec.name.as_str()) {
+                                    let value = canonicalize(value);
                                     cli_provided.insert(param_spec.name.clone());
-                                    task.values
-                                        .insert(param_spec.name.clone(), Value::Item(value.to_string()));
+                                    task.values.insert(param_spec.name.clone(), Value::Item(value.clone()));
                                     let env_name = param_spec.name.replace('-', "_");
-                                    task.envs.insert(env_name, value.to_string());
+                                    task.envs.insert(env_name, value);
                                 }
                             } else if let Some(values) = matches.get_many::<String>(param_spec.name.as_str()) {
-                                let values: Vec<String> = values.cloned().collect();
+                                let values: Vec<String> = values.map(|v| canonicalize(v)).collect();
                                 cli_provided.insert(param_spec.name.clone());
                                 let env_name = param_spec.name.replace('-', "_");
                                 task.envs.insert(env_name, values.join(" "));
@@ -1487,7 +1704,10 @@ impl Parser {
                 // Collect and sort for deterministic ordering
                 let mut next: Vec<&str> = Vec::new();
                 for dep in deps {
-                    let count = in_degree.get_mut(dep.as_str()).unwrap();
+                    // Every dep got an in_degree entry in the counting loop above.
+                    let count = in_degree
+                        .get_mut(dep.as_str())
+                        .expect("in_degree has an entry for every dependency it counted");
                     *count -= 1;
                     if *count == 0 {
                         next.push(dep);
@@ -1631,12 +1851,13 @@ impl Parser {
     /// Detect which requested tasks have --Serial flag in their arguments
     fn detect_serial_tasks(&self, requested_tasks: &[String]) -> HashSet<String> {
         let mut serial_tasks = HashSet::new();
+        let value_options = self.value_taking_options(requested_tasks);
 
         for task_name in requested_tasks {
             // Find partition for this task
             if let Some(args) = self.pargs.iter().find(|args| !args.is_empty() && args[0] == *task_name) {
-                // Check if --Serial is present
-                if args.contains(&"--Serial".to_string()) {
+                // Check if --Serial is present as a flag, not as a value
+                if contains_flag(args, "--Serial", value_options.get(task_name)) {
                     serial_tasks.insert(task_name.clone());
                 }
             }
@@ -1904,7 +2125,13 @@ impl Parser {
 
                 let choices = self.param_choices(task_name, param_spec, mode)?;
                 if !choices.is_empty() {
-                    arg = arg.value_parser(clap::builder::PossibleValuesParser::new(choices));
+                    // Case-insensitive per the CLI rule: a tool that prints
+                    // `ASCII` and then rejects `ASCII` is friction with no
+                    // benefit. The bound value is canonicalized back to the
+                    // declared spelling at bind time.
+                    arg = arg
+                        .value_parser(clap::builder::PossibleValuesParser::new(choices))
+                        .ignore_case(true);
                 }
             }
         }
@@ -2552,8 +2779,12 @@ impl Parser {
     }
 
     fn divine_ottofile(value: String) -> Result<Option<PathBuf>> {
-        let mut path = expanduser(value)?;
-        path = fs::canonicalize(path)?;
+        // Both failures name the path. `otto -o /nope/nothere.yml` used to fail
+        // with a bare "No such file or directory (os error 2)", which says
+        // nothing about which file otto was looking for.
+        let expanded = expanduser(&value).wrap_err_with(|| format!("could not expand ottofile path '{value}'"))?;
+        let path = fs::canonicalize(&expanded)
+            .wrap_err_with(|| format!("ottofile path '{}' does not exist", expanded.display()))?;
         if path.is_dir() {
             return Self::find_ottofile(&path);
         }
@@ -2617,28 +2848,83 @@ impl Parser {
     }
 }
 
-fn indices(args: &[String], task_names: &[String]) -> Vec<usize> {
+/// Which option tokens consume the next argument as a value, per task.
+///
+/// `task name -> {"--msg", "-m", ...}`. Built from the task specs so
+/// partitioning can tell a task name from a value that happens to spell one.
+pub type ValueTakingOptions = HashMap<String, HashSet<String>>;
+
+/// The argument indices that start a new task's partition.
+///
+/// Two things stop an argument from being a boundary:
+///
+/// - it is the value of the preceding option (`otto build --msg test` split at
+///   `test` and left `--msg` with nothing, so clap reported "a value is
+///   required for '--msg <msg>'" for an argument the user did supply);
+/// - it follows a `--`, which hands the rest of the line to the current task
+///   verbatim.
+///
+/// Only the single token after an option is protected. A multi-value option
+/// (`nargs: "2:"`) whose *second* value spells a task name still splits; use
+/// `--flag=value` there.
+fn indices(args: &[String], task_names: &[String], value_options: &ValueTakingOptions) -> Vec<usize> {
     let mut indices = vec![];
-    for (i, arg) in args.iter().enumerate() {
-        if task_names.contains(arg) {
-            indices.push(i);
+    let mut current: Option<&str> = None;
+    let mut verbatim = false;
+    let mut i = 0;
+
+    while i < args.len() {
+        let arg = &args[i];
+
+        if arg == "--" && current.is_some() {
+            verbatim = true;
+            i += 1;
+            continue;
         }
+
+        if !verbatim && task_names.contains(arg) {
+            indices.push(i);
+            current = Some(arg.as_str());
+            i += 1;
+            continue;
+        }
+
+        if !verbatim
+            && let Some(task) = current
+            && let Some(options) = value_options.get(task)
+            && options.contains(arg.as_str())
+        {
+            // The next token is this option's value, whatever it spells.
+            i += 2;
+            continue;
+        }
+
+        i += 1;
     }
+
     indices
 }
 
-fn partitions(args: &[String], task_names: &[String]) -> Vec<Vec<String>> {
-    let task_indices = indices(args, task_names);
+fn partitions(args: &[String], task_names: &[String], value_options: &ValueTakingOptions) -> Vec<Vec<String>> {
+    let task_indices = indices(args, task_names, value_options);
     if task_indices.is_empty() {
         return vec![];
     }
 
-    let mut partitions = vec![];
+    let mut partitions: Vec<Vec<String>> = vec![];
     let mut end = args.len();
 
     for &index in task_indices.iter().rev() {
         partitions.insert(0, args[index..end].to_vec());
         end = index;
+    }
+
+    // The otto-level `--` has done its job (it stopped the split); the task's
+    // own clap must not see it, or everything after it becomes a positional.
+    for partition in &mut partitions {
+        if let Some(pos) = partition.iter().position(|a| a == "--") {
+            partition.remove(pos);
+        }
     }
 
     partitions
@@ -2804,6 +3090,21 @@ mod tests {
         assert_eq!(ottofile_base_dir(Some(&ottofile), &cwd), Path::new("/some/cwd"));
     }
 
+    /// No task declares a value-taking option: the old partitioning behaviour.
+    fn no_value_options() -> ValueTakingOptions {
+        ValueTakingOptions::new()
+    }
+
+    /// `task` takes a value for each token in `options`.
+    fn value_options(task: &str, options: &[&str]) -> ValueTakingOptions {
+        let mut map = ValueTakingOptions::new();
+        map.insert(
+            task.to_string(),
+            options.iter().map(|o| o.to_string()).collect::<HashSet<String>>(),
+        );
+        map
+    }
+
     #[test]
     fn test_indices() {
         let args = vec![
@@ -2814,7 +3115,7 @@ mod tests {
         ];
         let task_names = vec!["task1".to_string(), "task2".to_string()];
         let expected = vec![0, 2];
-        assert_eq!(indices(&args, &task_names), expected);
+        assert_eq!(indices(&args, &task_names, &no_value_options()), expected);
     }
 
     #[test]
@@ -2830,7 +3131,7 @@ mod tests {
             vec!["task1".to_string(), "arg2".to_string()],
             vec!["task2".to_string(), "arg3".to_string()],
         ];
-        assert_eq!(partitions(&args, &task_names), expected);
+        assert_eq!(partitions(&args, &task_names, &no_value_options()), expected);
     }
 
     #[test]
@@ -2838,7 +3139,7 @@ mod tests {
         let args = vec!["arg1".to_string(), "arg2".to_string()];
         let task_names = vec!["task1".to_string(), "task2".to_string()];
         let expected: Vec<Vec<String>> = vec![];
-        assert_eq!(partitions(&args, &task_names), expected);
+        assert_eq!(partitions(&args, &task_names, &no_value_options()), expected);
     }
 
     #[test]
@@ -2869,7 +3170,171 @@ mod tests {
             vec!["deploy".to_string(), "--environment=staging".to_string()],
         ];
 
-        assert_eq!(partitions(&args, &task_names), expected);
+        assert_eq!(partitions(&args, &task_names, &no_value_options()), expected);
+    }
+
+    #[test]
+    fn a_flag_value_that_spells_a_task_is_not_a_boundary() {
+        // `otto build --msg test` used to split at `test`, leaving `--msg`
+        // with no value and clap reporting a missing value the user supplied.
+        let args = names(&["build", "--msg", "test"]);
+        let task_names = names(&["build", "test"]);
+        let expected = vec![names(&["build", "--msg", "test"])];
+        assert_eq!(
+            partitions(&args, &task_names, &value_options("build", &["--msg"])),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_flag_value_does_not_hide_a_later_task() {
+        let args = names(&["build", "--msg", "test", "lint"]);
+        let task_names = names(&["build", "test", "lint"]);
+        let expected = vec![names(&["build", "--msg", "test"]), names(&["lint"])];
+        assert_eq!(
+            partitions(&args, &task_names, &value_options("build", &["--msg"])),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_boolean_flag_does_not_swallow_the_next_task() {
+        let args = names(&["build", "--verbose", "test"]);
+        let task_names = names(&["build", "test"]);
+        let expected = vec![names(&["build", "--verbose"]), names(&["test"])];
+        assert_eq!(
+            partitions(&args, &task_names, &value_options("build", &["--msg"])),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_double_dash_hands_the_rest_to_the_current_task() {
+        // `otto build -- --msg=x` used to die with "unexpected argument".
+        let args = names(&["build", "--", "--msg=x", "test"]);
+        let task_names = names(&["build", "test"]);
+        let expected = vec![names(&["build", "--msg=x", "test"])];
+        assert_eq!(partitions(&args, &task_names, &no_value_options()), expected);
+    }
+
+    #[test]
+    fn duplicate_task_name_finds_the_repeat() {
+        let parts = vec![names(&["build", "--msg=a"]), names(&["build", "--msg=b"])];
+        assert_eq!(duplicate_task_name(&parts), Some("build"));
+        assert!(duplicate_task_error("build").to_string().contains("more than once"));
+    }
+
+    #[test]
+    fn duplicate_task_name_accepts_distinct_tasks() {
+        let parts = vec![names(&["build"]), names(&["test"])];
+        assert_eq!(duplicate_task_name(&parts), None);
+    }
+
+    // =========================================================================
+    // ottofile value on the help path
+    // =========================================================================
+
+    #[test]
+    fn the_ottofile_flag_wins_over_the_env_and_the_default() {
+        let args = names(&["otto", "-o", "sub/other.yml", "--help"]);
+        assert_eq!(
+            ottofile_value_from_args(&args, Some("env.yml".to_string())),
+            "sub/other.yml"
+        );
+    }
+
+    #[test]
+    fn the_attached_ottofile_form_is_read_too() {
+        let args = names(&["otto", "--ottofile=sub/other.yml", "--help"]);
+        assert_eq!(ottofile_value_from_args(&args, None), "sub/other.yml");
+    }
+
+    #[test]
+    fn the_ottofile_env_is_used_when_no_flag_is_given() {
+        let args = names(&["otto", "--help"]);
+        assert_eq!(ottofile_value_from_args(&args, Some("env.yml".to_string())), "env.yml");
+    }
+
+    #[test]
+    fn the_ottofile_default_is_the_divining_dot() {
+        let args = names(&["otto", "--help"]);
+        assert_eq!(ottofile_value_from_args(&args, None), DEFAULT_OTTOFILE);
+    }
+
+    #[test]
+    fn an_ottofile_after_a_double_dash_is_not_ours() {
+        let args = names(&["otto", "build", "--", "-o", "other.yml"]);
+        assert_eq!(ottofile_value_from_args(&args, None), DEFAULT_OTTOFILE);
+    }
+
+    // =========================================================================
+    // --tui in task args, --Serial scanning, choices
+    // =========================================================================
+
+    #[test]
+    fn take_tui_flag_strips_the_flag_and_reports_it() {
+        let (kept, found) = take_tui_flag(names(&["build", "--tui", "--msg=x"]));
+        assert_eq!(kept, names(&["build", "--msg=x"]));
+        assert!(found);
+    }
+
+    #[test]
+    fn take_tui_flag_leaves_other_args_alone() {
+        let (kept, found) = take_tui_flag(names(&["build", "--msg=x"]));
+        assert_eq!(kept, names(&["build", "--msg=x"]));
+        assert!(!found);
+    }
+
+    #[test]
+    fn take_tui_flag_respects_a_double_dash() {
+        let (kept, found) = take_tui_flag(names(&["build", "--", "--tui"]));
+        assert_eq!(kept, names(&["build", "--", "--tui"]));
+        assert!(!found, "after -- the flag belongs to the task");
+    }
+
+    #[test]
+    fn contains_flag_ignores_a_value_that_spells_the_flag() {
+        let options: HashSet<String> = ["--msg".to_string()].into_iter().collect();
+        assert!(!contains_flag(
+            &names(&["build", "--msg", "--Serial"]),
+            "--Serial",
+            Some(&options)
+        ));
+        assert!(contains_flag(
+            &names(&["build", "--Serial"]),
+            "--Serial",
+            Some(&options)
+        ));
+    }
+
+    #[test]
+    fn canonical_choice_matches_ignoring_case() {
+        let choices = names(&["ascii", "unicode"]);
+        assert_eq!(canonical_choice("ASCII", &choices), Some("ascii"));
+        assert_eq!(canonical_choice("ascii", &choices), Some("ascii"));
+        assert_eq!(canonical_choice("utf8", &choices), None);
+    }
+
+    #[test]
+    fn task_arg_error_names_the_equals_escape_hatch() {
+        let err = task_arg_error(
+            "a value is required".to_string(),
+            clap::error::ErrorKind::InvalidValue,
+            Some("test"),
+        )
+        .to_string();
+        assert!(err.contains("--flag=test"), "{err}");
+    }
+
+    #[test]
+    fn task_arg_error_stays_quiet_when_nothing_was_split_off() {
+        let err = task_arg_error(
+            "a value is required".to_string(),
+            clap::error::ErrorKind::InvalidValue,
+            None,
+        )
+        .to_string();
+        assert_eq!(err, "a value is required");
     }
 
     // New tests for flag functionality
@@ -4437,7 +4902,7 @@ tasks:
     /// Phase 0). `expected_global_options_help()` below substitutes the real
     /// default at test time so the anti-drift check still holds everywhere
     /// else in the string.
-    const EXPECTED_GLOBAL_OPTIONS_HELP_TEMPLATE: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile\n          \n          [env: OTTOFILE=]\n          [default: .]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n      --tasks\n          Print the machine-readable task list and exit\n\n      --format <FORMAT>\n          Output format for --tasks (yaml or json); default: yaml on a tty, json when piped\n          \n          [possible values: yaml, json]\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: {JOBS}]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n      --no-prefix\n          Suppress the [task] prefix on task output\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
+    const EXPECTED_GLOBAL_OPTIONS_HELP_TEMPLATE: &str = "Options:\n  -C, --cwd <DIR>\n          Change to DIR before doing anything\n\n  -o, --ottofile <PATH>\n          path to the ottofile\n          \n          [env: OTTOFILE=]\n          [default: .]\n\n      --list-subtasks\n          List all foreach subtasks and exit\n\n      --tasks\n          Print the machine-readable task list and exit\n\n      --format <FORMAT>\n          Output format for --tasks (yaml or json); default: yaml on a tty, json when piped\n          \n          [possible values: yaml, json]\n\n  -j, --jobs <N>\n          Number of parallel jobs\n          \n          [default: {JOBS}]\n\n  -t, --tui\n          Enable interactive TUI dashboard for task monitoring\n\n      --no-prefix\n          Suppress the [task] prefix on task output\n\n      --log-level <LEVEL>\n          Verbosity of otto's own log file, under $XDG_DATA_HOME/otto/logs\n          \n          [possible values: off, error, warn, info, debug, trace]\n\n  -h, --help\n          Print help\n\n  -V, --version\n          Print version";
 
     /// Renders `EXPECTED_GLOBAL_OPTIONS_HELP_TEMPLATE` against this
     /// machine's actual `-j/--jobs` default, so the comparison is exact

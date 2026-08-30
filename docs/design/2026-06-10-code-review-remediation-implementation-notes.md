@@ -1113,3 +1113,95 @@ batch` bullet was left unchecked and raised as a go/no-go. It is closed here.
 ### Open questions
 
 - None.
+
+## Phase 8: TUI and CLI surface
+
+### Design decisions
+
+- **The terminal restore is a type, not a call site.** `TerminalGuard<T:
+  TerminalRestore>` (`src/tui/mod.rs`) restores on `Drop` and is idempotent, so
+  every `?` between `init_terminal()` and the end of `app.run()` lands in one
+  place. The trait is what makes exactly-once semantics testable without a TTY:
+  the tests drive a counting fake, not a terminal.
+- **The panic hook is claim-gated.** A process-global `TERMINAL_TAKEOVER` flag
+  is set by `init_terminal` and swapped away by whichever of `Drop` or the panic
+  hook gets there first (`claim_terminal_restore`). Without the gate a panic in
+  a plain `otto build` would write alternate-screen escape sequences at a
+  terminal that never entered one.
+- **Ctrl+C is handled on the whole `KeyEvent`.** `handle_key_event` now takes
+  `KeyEvent`, not `KeyCode` (`src/tui/app.rs`); raw mode means the kernel never
+  turns `^C` into SIGINT, so the modifier had to reach the match. It sets
+  `cancel_requested`, which `app.rs` already wires to the Phase 2 cancel signal.
+- **The waiting message names the tasks.** `PaneLayout::running_task_names()`
+  reads the panes (the scheduler has moved into its own task by then) and
+  `execute_with_tui` prints "waiting for N running task(s): a, b" after
+  cancelling.
+- **One builtin table for both output modes.** `app::Builtin` + `find_builtin` +
+  `dispatch_builtin` (`src/app.rs`) replace the four hand-written
+  `find_tasks_by_name` blocks on the terminal path and the *nothing* on the TUI
+  path. A test asserts the table covers every name in `cli::BUILTIN_COMMANDS`,
+  so a builtin the parser injects can no longer arrive without a handler.
+- **Partitioning takes a one-token lookahead.** `indices`/`partitions` take a
+  `ValueTakingOptions` map (task -> the option tokens that consume a value),
+  built from the declared `OPT` params, so `otto build --msg test` no longer
+  splits at `test`. `--` inside a partition stops the split and is then removed
+  before the task's clap sees it.
+- **`--log-level` is pre-parsed in `main`, declared in `global_args()`.** Logging
+  is configured before a parser exists, so `apply_log_level_flag` strips it; the
+  `Arg` stays registered because that is what renders `--help`. Same arrangement
+  `-C/--cwd` already used. `LOG_LEVELS` lives in `cli/parser.rs` and both
+  readers use it.
+- **Logs moved to `xdg_data_dir()`.** `executor::layout::{xdg_data_dir, log_dir}`
+  replace `dirs::data_local_dir()`, which honors `$XDG_DATA_HOME` on Linux only.
+
+### Deviations
+
+- **`Pane::id` and `Pane::status` were kept, not deleted.** The bullet lists
+  them as dead alongside `set_status`. `set_status` is gone; the other two now
+  have a real caller - the "waiting for N running task(s): a, b" message needs
+  both a status filter and a name. Using dead code beats deleting a capability
+  the same phase asks for.
+- **`scroll_down(visible_height)` became `scroll_down()`.** The doc calls out
+  the hardcoded `pane.scroll_down(20)` at the call site; the fix is for the pane
+  to remember the height it last rendered at (`Cell<u16>`, set in `render`),
+  which removes the argument rather than correcting it. Same effect, correct seam.
+- **The partition lookahead protects one token, not a whole `nargs` run.** A
+  multi-value option whose *second* value spells a task name still splits;
+  `--flag=value` remains the escape hatch, and the clap error now names it when
+  a partition was split off after this one.
+- **`--tui` after a task name is stripped in long form only.** `take_tui_flag`
+  handles `--tui`, not `-t`: a task may legitimately declare its own `-t`, and
+  silently stealing it would be a worse bug than the one being fixed.
+- **`test_execute_with_invalid_status_filter` was inverted, not deleted.** It
+  asserted that `--status invalid` was accepted and quietly ignored - the defect
+  itself. It is now `an_invalid_status_is_rejected_at_parse_time`.
+- **Choice values are canonicalized, not just accepted.** `ignore_case(true)`
+  alone would hand the task `$format=ASCII` while the ottofile declares `ascii`;
+  `canonical_choice` maps the value back to the declared spelling at bind time.
+
+### Tradeoffs
+
+- **A duplicate task name is now a hard error** rather than a silent
+  single run. Running it twice was the other option, but otto's model is one
+  node per task in one DAG; erroring says so instead of picking a meaning.
+- **`--log-level` beats `$RUST_LOG`** when both are set. An explicit flag is a
+  decision, an inherited env var is an accident.
+- **The lagged-drain marker costs a buffer line per lag burst.** The alternative
+  (count silently) is what the `while let Ok(..)` did, and a pane that went
+  permanently silent after one burst is exactly the failure being fixed.
+- **Builtins run before the TUI takes the screen.** `Graph`, `History`, `Stats`
+  and friends print to the terminal; rendering them into a pane would be a
+  different feature, so `otto --tui Graph` now behaves exactly like `otto Graph`.
+
+### Open questions
+
+- **A panic *inside* the TUI is not exercised end to end.** The guard's
+  exactly-once restore is unit-tested, and quitting the TUI under a pty was
+  verified to restore canonical mode and echo. Forcing a panic while the
+  dashboard owns the terminal would need a panic-injection hook in production
+  code, which this phase did not add. Confirm whether that is wanted.
+- **`otto -o other.yml Clean` now routes to `CleanCommand`'s own parser.**
+  Routing builtins past global flags means a leading `-o` no longer diverts them
+  into the task path; the ottofile is irrelevant to every builtin, but the
+  accepted flag set differs slightly between the two routes (the standalone
+  parser accepts more). Confirm that is the intent.

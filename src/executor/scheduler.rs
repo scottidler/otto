@@ -24,7 +24,7 @@ use super::state::SkipKind;
 use super::task::{Task, TaskEdge};
 use super::{
     action::{ActionProcessor, ProcessedAction},
-    colors::{colorize_task_prefix, set_global_task_order},
+    colors::{colorize_task_name, colorize_task_prefix, set_global_task_order},
     output::{OutputType, TaskMessage, TaskStreams, TuiTaskStatus},
     workspace::{ExecutionContext, Workspace},
 };
@@ -388,6 +388,16 @@ fn env_to_json(env_content: &str) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+/// The word a status line ends with, per outcome.
+fn task_outcome_word(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Completed => "finished successfully",
+        TaskStatus::Failed(_) => "failed",
+        TaskStatus::Skipped(_) => "skipped",
+        _ => "finished",
+    }
+}
+
 /// Status of a task during execution
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskStatus {
@@ -735,6 +745,19 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         self.no_prefix = no_prefix;
     }
 
+    /// What a scheduler status line leads with: `[task]`, or a bare `task`
+    /// under `--no-prefix`.
+    ///
+    /// The flag used to reach task output only, so a `--no-prefix` run mixed
+    /// unprefixed output with prefixed status lines.
+    fn status_label(&self, task_name: &str) -> String {
+        if self.no_prefix {
+            colorize_task_name(task_name)
+        } else {
+            colorize_task_prefix(task_name)
+        }
+    }
+
     /// Set pre-created TaskStreams for TUI mode
     pub fn set_task_streams(&mut self, streams: std::collections::HashMap<String, TaskStreams>) {
         self.task_streams = Some(Arc::new(streams));
@@ -769,7 +792,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let SkipRecord { kind, detail } = &record;
         info!("Skipping task {} ({detail})", task.name);
         if !self.tui_mode {
-            let msg = format!("{} skipped ({detail})\n", colorize_task_prefix(&task.name));
+            let msg = format!("{} skipped ({detail})\n", self.status_label(&task.name));
             print!("{msg}");
             io::stdout().flush().unwrap_or(());
         }
@@ -827,7 +850,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 
                 // Print user-visible skipped message (only in terminal mode)
                 if !self.tui_mode {
-                    let skipped_msg = format!("{} skipped (up to date)\n", colorize_task_prefix(&task.name));
+                    let skipped_msg = format!("{} skipped (up to date)\n", self.status_label(&task.name));
                     print!("{skipped_msg}");
                     io::stdout().flush().unwrap_or(());
                 }
@@ -1119,14 +1142,14 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 
                     // Print user-visible success/failure message (only in terminal mode)
                     if !self.tui_mode {
-                        let msg = match &final_status {
-                            TaskStatus::Completed => {
-                                format!("{} finished successfully\n", colorize_task_prefix(&completed_task))
-                            }
-                            TaskStatus::Failed(_) => format!("{} failed\n", colorize_task_prefix(&completed_task)),
-                            TaskStatus::Skipped(_) => format!("{} skipped\n", colorize_task_prefix(&completed_task)),
-                            _ => format!("{} finished\n", colorize_task_prefix(&completed_task)),
-                        };
+                        // `--no-prefix` suppressed the `[task]` prefix on task
+                        // output but not here, so a no-prefix run printed
+                        // `OTHER` followed by `[other] finished successfully`.
+                        let msg = format!(
+                            "{} {}\n",
+                            self.status_label(&completed_task),
+                            task_outcome_word(&final_status)
+                        );
                         print!("{msg}");
                         io::stdout().flush().unwrap_or(());
                     }
@@ -1207,7 +1230,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 
                     // Print user-visible failure message (only in terminal mode)
                     if !self.tui_mode {
-                        let failure_msg = format!("{} failed\n", colorize_task_prefix(&task_name));
+                        let failure_msg = format!("{} failed\n", self.status_label(&task_name));
                         eprint!("{failure_msg}");
                         io::stderr().flush().unwrap_or(());
                     }

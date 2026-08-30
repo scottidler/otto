@@ -160,6 +160,126 @@ pub fn extract_stats_params(values: &HashMap<String, Value>) -> StatsParams {
     StatsParams { task_name, limit, json }
 }
 
+/// Parameters for the Convert command, extracted from task values.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConvertParams {
+    pub strict: bool,
+    pub output: Option<PathBuf>,
+}
+
+/// Extract Convert command parameters from task values.
+/// This is a pure function - no I/O, easily testable.
+pub fn extract_convert_params(values: &HashMap<String, Value>) -> ConvertParams {
+    ConvertParams {
+        strict: flag_value(values, "strict"),
+        output: values
+            .get("output")
+            .and_then(|v| if let Value::Item(s) = v { Some(PathBuf::from(s)) } else { None }),
+    }
+}
+
+/// Parameters for the Upgrade command, extracted from task values.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UpgradeParams {
+    pub dry_run: bool,
+    pub version: Option<String>,
+    pub list_versions: bool,
+    pub rollback: bool,
+    pub force: bool,
+    pub no_backup: bool,
+}
+
+/// Extract Upgrade command parameters from task values.
+/// This is a pure function - no I/O, easily testable.
+pub fn extract_upgrade_params(values: &HashMap<String, Value>) -> UpgradeParams {
+    UpgradeParams {
+        dry_run: flag_value(values, "dry-run"),
+        version: values
+            .get("version")
+            .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None }),
+        list_versions: flag_value(values, "list-versions"),
+        rollback: flag_value(values, "rollback"),
+        force: flag_value(values, "force"),
+        no_backup: flag_value(values, "no-backup"),
+    }
+}
+
+/// Read a boolean param the way the parser writes them: `Value::Item("true")`.
+fn flag_value(values: &HashMap<String, Value>, name: &str) -> bool {
+    values
+        .get(name)
+        .and_then(|v| if let Value::Item(s) = v { Some(s == "true") } else { None })
+        .unwrap_or(false)
+}
+
+// ============================================================================
+// Pure Functions - Builtin Dispatch
+// ============================================================================
+
+/// The built-in commands a run can resolve to.
+///
+/// One table, consulted by both output modes. The TUI path used to dispatch
+/// none of these, so `otto --tui Graph` under a TTY printed "No tasks to
+/// execute"; the terminal path dispatched four of the six, so `otto Convert`
+/// behind any global flag did the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Builtin {
+    Clean,
+    Convert,
+    Graph,
+    History,
+    Stats,
+    Upgrade,
+}
+
+impl Builtin {
+    /// The task name this builtin is invoked as.
+    pub fn task_name(&self) -> &'static str {
+        match self {
+            Builtin::Clean => "Clean",
+            Builtin::Convert => "Convert",
+            Builtin::Graph => "Graph",
+            Builtin::History => "History",
+            Builtin::Stats => "Stats",
+            Builtin::Upgrade => "Upgrade",
+        }
+    }
+
+    /// Every builtin, in dispatch order.
+    pub fn all() -> [Builtin; 6] {
+        [
+            Builtin::Clean,
+            Builtin::Convert,
+            Builtin::Graph,
+            Builtin::History,
+            Builtin::Stats,
+            Builtin::Upgrade,
+        ]
+    }
+}
+
+/// The builtin this task list invokes, if any.
+/// This is a pure function - no I/O, easily testable.
+pub fn find_builtin(tasks: &[Task]) -> Option<(Builtin, &Task)> {
+    Builtin::all().into_iter().find_map(|builtin| {
+        find_tasks_by_name(tasks, builtin.task_name())
+            .first()
+            .map(|t| (builtin, *t))
+    })
+}
+
+/// Run a builtin. Shared by the terminal and TUI paths.
+pub async fn dispatch_builtin(builtin: Builtin, task: &Task) -> Result<(), Report> {
+    match builtin {
+        Builtin::Clean => execute_clean_from_task(task).await,
+        Builtin::Convert => execute_convert_from_task(task),
+        Builtin::Graph => DagVisualizer::execute_command(task).await,
+        Builtin::History => execute_history_from_task(task),
+        Builtin::Stats => execute_stats_from_task(task),
+        Builtin::Upgrade => execute_upgrade_from_task(task).await,
+    }
+}
+
 // ============================================================================
 // Pure Functions - Task Filtering
 // ============================================================================
@@ -172,6 +292,16 @@ pub fn filter_execution_tasks(tasks: Vec<Task>) -> Vec<Task> {
         .into_iter()
         .filter(|task| !crate::cli::is_builtin(&task.name))
         .collect()
+}
+
+/// Convert parser tasks into executor tasks.
+///
+/// One conversion for both output modes: the terminal path and the TUI path
+/// each built this list themselves, so a field that only one of them carried
+/// (`is_virtual_parent`, once) was a silent behaviour difference between
+/// `otto build` and `otto --tui build`.
+pub fn build_executor_tasks(tasks: Vec<Task>) -> Vec<crate::executor::Task> {
+    tasks.into_iter().map(Into::into).collect()
 }
 
 /// Find tasks by name in a task list.
@@ -298,25 +428,9 @@ pub async fn execute_with_terminal_output(
         return Ok(());
     }
 
-    // Check for built-in commands using pure function
-    let clean_tasks = find_tasks_by_name(&tasks, "Clean");
-    if !clean_tasks.is_empty() {
-        return execute_clean_from_task(clean_tasks[0]).await;
-    }
-
-    let graph_tasks = find_tasks_by_name(&tasks, "Graph");
-    if !graph_tasks.is_empty() {
-        return DagVisualizer::execute_command(graph_tasks[0]).await;
-    }
-
-    let history_tasks = find_tasks_by_name(&tasks, "History");
-    if !history_tasks.is_empty() {
-        return execute_history_from_task(history_tasks[0]);
-    }
-
-    let stats_tasks = find_tasks_by_name(&tasks, "Stats");
-    if !stats_tasks.is_empty() {
-        return execute_stats_from_task(stats_tasks[0]);
+    // Built-in commands, from the table both output modes share.
+    if let Some((builtin, task)) = find_builtin(&tasks) {
+        return dispatch_builtin(builtin, task).await;
     }
 
     // Filter out built-in commands for normal execution using pure function
@@ -340,7 +454,7 @@ pub async fn execute_with_terminal_output(
     workspace.save_execution_context(execution_context.clone()).await?;
 
     // Convert parser tasks to executor tasks
-    let executor_tasks: Vec<crate::executor::Task> = execution_tasks.into_iter().map(Into::into).collect();
+    let executor_tasks = build_executor_tasks(execution_tasks);
 
     // The scheduler takes ownership; teardown still needs the workspace to close
     // out the run in the database.
@@ -379,6 +493,13 @@ pub async fn execute_with_tui(
         return Ok(());
     }
 
+    // Same builtin table as the terminal path: a builtin is a builtin whether
+    // or not the user asked for a dashboard, and it prints to the terminal, so
+    // it runs before the TUI takes the screen.
+    if let Some((builtin, task)) = find_builtin(&tasks) {
+        return dispatch_builtin(builtin, task).await;
+    }
+
     // Filter out built-in commands for normal execution using pure function
     let execution_tasks = filter_execution_tasks(tasks);
 
@@ -399,20 +520,18 @@ pub async fn execute_with_tui(
     // Save execution context to run directory
     workspace.save_execution_context(execution_context.clone()).await?;
 
-    let mut executor_tasks = Vec::new();
+    let executor_tasks = build_executor_tasks(execution_tasks);
+
     let mut task_streams_map = std::collections::HashMap::new();
     let output_dir = workspace.run().join("tasks");
-
-    for parser_task in execution_tasks {
-        let task_name = parser_task.name.clone();
-
-        let streams = crate::executor::output::TaskStreams::new(&task_name, &output_dir).await?;
-        task_streams_map.insert(task_name.clone(), streams);
-
-        executor_tasks.push(crate::executor::Task::from(parser_task));
+    for task in &executor_tasks {
+        let streams = crate::executor::output::TaskStreams::new(&task.name, &output_dir).await?;
+        task_streams_map.insert(task.name.clone(), streams);
     }
 
-    // Initialize TUI
+    // Initialize the TUI. The guard restores the terminal when it drops, so
+    // every `?` below is safe: before this, an error between here and the
+    // single restore call left the shell in raw mode on the alternate screen.
     let mut terminal = crate::tui::init_terminal().map_err(|e| eyre::eyre!("Failed to initialize TUI: {}", e))?;
 
     let mut app = TuiApp::new();
@@ -447,7 +566,7 @@ pub async fn execute_with_tui(
     scheduler.set_task_streams(task_streams_map);
 
     // Draw initial TUI state before starting tasks (ensures receivers are ready)
-    terminal.draw(|f| {
+    terminal.terminal_mut().draw(|f| {
         app.layout_mut().render(f, f.area());
     })?;
 
@@ -468,10 +587,13 @@ pub async fn execute_with_tui(
     app.set_shutdown_flag(ctrl_c_pressed);
 
     // Run TUI (blocks until user quits or Ctrl+C)
-    let tui_result = app.run(&mut terminal);
+    let tui_result = app.run(terminal.terminal_mut());
 
-    // Always restore terminal, even on Ctrl+C or error
-    if let Err(e) = crate::tui::restore_terminal(&mut terminal) {
+    // Restore explicitly rather than leaving it to the guard's Drop: everything
+    // printed from here on has to land on the user's real screen, not on the
+    // alternate one that is about to be discarded.
+    let still_running = app.running_task_names();
+    if let Err(e) = terminal.restore() {
         eprintln!("Warning: Failed to restore terminal: {}", e);
     }
 
@@ -484,6 +606,16 @@ pub async fn execute_with_tui(
     if !scheduler_handle.is_finished() {
         eprintln!("otto: dashboard closed, cancelling the run...");
         cancel.cancel();
+        // Naming what is still running is the difference between "otto hung"
+        // and "otto is waiting for these": the await below can take as long as
+        // the slowest child takes to notice the cancellation.
+        if !still_running.is_empty() {
+            eprintln!(
+                "otto: waiting for {} running task(s) to stop: {}",
+                still_running.len(),
+                still_running.join(", ")
+            );
+        }
     }
 
     // Wait for scheduler to complete
@@ -526,10 +658,19 @@ pub async fn execute_clean_from_task(task: &Task) -> Result<(), Report> {
 pub fn execute_history_from_task(task: &Task) -> Result<(), Report> {
     let params = extract_history_params(&task.values);
 
+    // The status arrives as a string from the meta task's params; parsing it
+    // here is what keeps `otto History --status bogus` an error rather than a
+    // full unfiltered listing.
+    let status = params
+        .status
+        .as_deref()
+        .map(crate::cli::commands::history::StatusFilter::parse)
+        .transpose()?;
+
     let history_cmd = HistoryCommand {
         task_name: params.task_name,
         limit: params.limit,
-        status: params.status,
+        status,
         project: params.project,
         json: params.json,
     };
@@ -548,6 +689,43 @@ pub fn execute_stats_from_task(task: &Task) -> Result<(), Report> {
         json: params.json,
     };
     stats_cmd.execute()?;
+
+    Ok(())
+}
+
+/// Execute Convert command from a parsed task.
+pub fn execute_convert_from_task(task: &Task) -> Result<(), Report> {
+    let params = extract_convert_params(&task.values);
+
+    let convert_cmd = ConvertCommand {
+        strict: params.strict,
+        output: params.output,
+    };
+    convert_cmd.execute()?;
+
+    Ok(())
+}
+
+/// Execute Upgrade command from a parsed task.
+pub async fn execute_upgrade_from_task(task: &Task) -> Result<(), Report> {
+    use crate::cli::commands::UpgradeCommand;
+
+    let params = extract_upgrade_params(&task.values);
+
+    let upgrade_cmd = UpgradeCommand {
+        dry_run: params.dry_run,
+        version: params.version,
+        list_versions: params.list_versions,
+        rollback: params.rollback,
+        force: params.force,
+        no_backup: params.no_backup,
+        backup_dir: None,
+        // `#[arg(env = "GITHUB_TOKEN")]` only fires when clap parses the args;
+        // constructing the command directly has to read the env itself, or the
+        // task route silently loses the token and rate-limits.
+        github_token: env::var("GITHUB_TOKEN").ok(),
+    };
+    upgrade_cmd.execute().await?;
 
     Ok(())
 }
@@ -861,6 +1039,114 @@ mod tests {
             serial_index: 0,
             tty: false,
         }
+    }
+
+    // =========================================================================
+    // Builtin dispatch parity (Phase 8)
+    // =========================================================================
+
+    #[test]
+    fn every_builtin_is_dispatchable_by_name() {
+        for builtin in Builtin::all() {
+            let tasks = vec![create_test_task(builtin.task_name())];
+            let found = find_builtin(&tasks).expect("the builtin is in the dispatch table");
+            assert_eq!(found.0, builtin);
+            assert_eq!(found.1.name, builtin.task_name());
+        }
+    }
+
+    #[test]
+    fn the_dispatch_table_covers_every_registered_builtin() {
+        // The two lists must agree, or a builtin the parser injects has no
+        // handler and its invocation prints "No tasks to execute".
+        let dispatchable: Vec<&str> = Builtin::all().iter().map(|b| b.task_name()).collect();
+        for name in crate::cli::BUILTIN_COMMANDS {
+            assert!(dispatchable.contains(name), "builtin '{name}' has no dispatch entry");
+        }
+        assert_eq!(dispatchable.len(), crate::cli::BUILTIN_COMMANDS.len());
+    }
+
+    #[test]
+    fn a_plain_task_list_dispatches_no_builtin() {
+        let tasks = vec![create_test_task("build"), create_test_task("test")];
+        assert!(find_builtin(&tasks).is_none());
+    }
+
+    #[test]
+    fn a_builtin_is_found_alongside_ordinary_tasks() {
+        // This is the TUI/terminal parity case: both paths ask this one
+        // question, so `otto --tui Graph` and `otto Graph` resolve alike.
+        let tasks = vec![create_test_task("build"), create_test_task("Graph")];
+        let (builtin, task) = find_builtin(&tasks).expect("Graph is a builtin");
+        assert_eq!(builtin, Builtin::Graph);
+        assert_eq!(task.name, "Graph");
+    }
+
+    #[test]
+    fn build_executor_tasks_carries_every_task_across() {
+        let tasks = vec![create_test_task("build"), create_test_task("test")];
+        let executor_tasks = build_executor_tasks(tasks);
+        let names: Vec<&str> = executor_tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["build", "test"]);
+    }
+
+    #[test]
+    fn build_executor_tasks_preserves_the_virtual_parent_flag() {
+        let mut parent = create_test_task("up");
+        parent.is_virtual_parent = true;
+        let executor_tasks = build_executor_tasks(vec![parent]);
+        assert!(executor_tasks[0].is_virtual_parent);
+    }
+
+    // =========================================================================
+    // Convert / Upgrade param extraction
+    // =========================================================================
+
+    #[test]
+    fn extract_convert_params_defaults_to_stdout_and_lenient() {
+        let params = extract_convert_params(&HashMap::new());
+        assert_eq!(params, ConvertParams::default());
+        assert!(!params.strict);
+        assert_eq!(params.output, None);
+    }
+
+    #[test]
+    fn extract_convert_params_reads_strict_and_output() {
+        let mut values = HashMap::new();
+        values.insert("strict".to_string(), Value::Item("true".to_string()));
+        values.insert("output".to_string(), Value::Item("out.yml".to_string()));
+        let params = extract_convert_params(&values);
+        assert!(params.strict);
+        assert_eq!(params.output, Some(PathBuf::from("out.yml")));
+    }
+
+    #[test]
+    fn extract_upgrade_params_defaults_to_a_plain_upgrade() {
+        let params = extract_upgrade_params(&HashMap::new());
+        assert_eq!(params, UpgradeParams::default());
+    }
+
+    #[test]
+    fn extract_upgrade_params_reads_every_flag() {
+        let mut values = HashMap::new();
+        for name in ["dry-run", "list-versions", "rollback", "force", "no-backup"] {
+            values.insert(name.to_string(), Value::Item("true".to_string()));
+        }
+        values.insert("version".to_string(), Value::Item("1.2.3".to_string()));
+        let params = extract_upgrade_params(&values);
+        assert!(params.dry_run);
+        assert!(params.list_versions);
+        assert!(params.rollback);
+        assert!(params.force);
+        assert!(params.no_backup);
+        assert_eq!(params.version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn a_flag_value_that_is_not_true_reads_as_false() {
+        let mut values = HashMap::new();
+        values.insert("force".to_string(), Value::Item("false".to_string()));
+        assert!(!extract_upgrade_params(&values).force);
     }
 
     #[test]

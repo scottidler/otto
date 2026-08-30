@@ -1,5 +1,5 @@
 use super::layout::PaneLayout;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     Terminal,
     backend::Backend,
@@ -21,6 +21,7 @@ pub struct TuiApp {
     tick_rate: Duration,
     fullscreen_mode: bool,
     shutdown_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    cancel_requested: bool,
 }
 
 impl Default for TuiApp {
@@ -38,7 +39,22 @@ impl TuiApp {
             tick_rate: Duration::from_millis(TUI_TICK_RATE_MS),
             fullscreen_mode: false,
             shutdown_flag: None,
+            cancel_requested: false,
         }
+    }
+
+    /// True when the user asked for the run to stop, not just for the
+    /// dashboard to close (Ctrl+C, or a Ctrl+C delivered as a signal).
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel_requested
+    }
+
+    /// Names of the tasks still running when the dashboard closed.
+    ///
+    /// Read from the panes because the scheduler has already moved into its
+    /// own task by then; the panes mirror its status broadcasts.
+    pub fn running_task_names(&self) -> Vec<String> {
+        self.layout.running_task_names()
     }
 
     pub fn set_shutdown_flag(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
@@ -82,7 +98,7 @@ impl TuiApp {
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
             {
-                self.handle_key_event(key.code);
+                self.handle_key_event(key);
             }
 
             if self.last_tick.elapsed() >= self.tick_rate {
@@ -94,6 +110,7 @@ impl TuiApp {
                 && flag.load(std::sync::atomic::Ordering::SeqCst)
             {
                 self.should_quit = true;
+                self.cancel_requested = true;
             }
 
             if self.should_quit {
@@ -121,17 +138,17 @@ impl TuiApp {
 
         let help_text = if self.fullscreen_mode {
             format!(
-                "{}f/Enter: Exit Fullscreen | ↑↓/jk: Scroll | Home: Top | q/Esc: Quit",
+                "{}f/Enter: Exit Fullscreen | ↑↓/jk: Scroll | Home: Top | q/Esc: Quit | ^C: Cancel run",
                 page_info
             )
         } else if total_pages > 1 {
             format!(
-                "{}PgUp/PgDn: Change Page | f/Enter: Fullscreen | Tab/←→: Switch | ↑↓/jk: Scroll | q/Esc: Quit",
+                "{}PgUp/PgDn: Change Page | f/Enter: Fullscreen | Tab/←→: Switch | ↑↓/jk: Scroll | q/Esc: Quit | ^C: Cancel run",
                 page_info
             )
         } else {
             format!(
-                "{}f/Enter: Fullscreen | Tab/←→: Switch Pane | ↑↓/jk: Scroll | Home: Top | q/Esc: Quit",
+                "{}f/Enter: Fullscreen | Tab/←→: Switch Pane | ↑↓/jk: Scroll | Home: Top | q/Esc: Quit | ^C: Cancel run",
                 page_info
             )
         };
@@ -146,8 +163,18 @@ impl TuiApp {
         frame.render_widget(paragraph, area);
     }
 
-    fn handle_key_event(&mut self, code: KeyCode) {
-        match code {
+    fn handle_key_event(&mut self, key: KeyEvent) {
+        // Ctrl+C first, and on the full event: the call site used to pass only
+        // `key.code`, so the modifier never reached this match and Ctrl+C was
+        // dead for as long as the TUI owned the terminal (raw mode means the
+        // kernel never turns it into SIGINT either).
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            self.cancel_requested = true;
+            return;
+        }
+
+        match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.should_quit = true;
             }
@@ -167,8 +194,7 @@ impl TuiApp {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(pane) = self.layout.focused_pane_mut() {
-                    // TODO: Get visible height from render area
-                    pane.scroll_down(20);
+                    pane.scroll_down();
                 }
             }
             KeyCode::Home => {
@@ -184,5 +210,59 @@ impl TuiApp {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn ctrl_c_quits_and_cancels_the_run() {
+        let mut app = TuiApp::new();
+        app.handle_key_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit, "Ctrl+C closes the dashboard");
+        assert!(
+            app.cancel_requested(),
+            "Ctrl+C cancels the run, it does not just stop watching"
+        );
+    }
+
+    #[test]
+    fn a_bare_c_is_not_ctrl_c() {
+        let mut app = TuiApp::new();
+        app.handle_key_event(key(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(!app.should_quit);
+        assert!(!app.cancel_requested());
+    }
+
+    #[test]
+    fn q_quits_without_cancelling() {
+        let mut app = TuiApp::new();
+        app.handle_key_event(key(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.should_quit);
+        assert!(
+            !app.cancel_requested(),
+            "q closes the dashboard; cancellation is decided by the caller"
+        );
+    }
+
+    #[test]
+    fn f_toggles_fullscreen() {
+        let mut app = TuiApp::new();
+        app.handle_key_event(key(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.fullscreen_mode);
+        app.handle_key_event(key(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(!app.fullscreen_mode);
+    }
+
+    #[test]
+    fn running_task_names_is_empty_without_panes() {
+        let app = TuiApp::new();
+        assert!(app.running_task_names().is_empty());
     }
 }

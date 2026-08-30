@@ -27,6 +27,26 @@ pub fn resolve_otto_home() -> Result<PathBuf> {
     }
 }
 
+/// XDG data dir, honoring `$XDG_DATA_HOME` and falling back to `$HOME/.local/share`.
+///
+/// Not `dirs::data_local_dir()`: that honors `$XDG_DATA_HOME` on Linux only and
+/// returns `~/Library/Application Support` on macOS, so otto's logs landed
+/// somewhere its own `--help` never mentions.
+pub fn xdg_data_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
+        let path = PathBuf::from(dir);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".local").join("share"))
+}
+
+/// Where otto writes `otto.log`: `<xdg-data>/otto/logs`.
+pub fn log_dir() -> Option<PathBuf> {
+    xdg_data_dir().map(|d| d.join("otto").join("logs"))
+}
+
 /// The directory name otto gives a project's run root: `<name>-<hash>`.
 pub fn project_dir_name(name: &str, hash: &str) -> String {
     format!("{name}-{hash}")
@@ -120,5 +140,29 @@ mod tests {
         let home = resolve_otto_home().unwrap();
         let expected = PathBuf::from(std::env::var("HOME").unwrap()).join(".otto");
         assert_eq!(home, expected);
+    }
+
+    #[test]
+    #[serial]
+    fn xdg_data_dir_honors_the_env_and_falls_back() {
+        let prior = std::env::var("XDG_DATA_HOME").ok();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("XDG_DATA_HOME", dir.path()) };
+        assert_eq!(xdg_data_dir().as_deref(), Some(dir.path()));
+        assert_eq!(log_dir(), Some(dir.path().join("otto").join("logs")));
+
+        // A relative value is not a usable data dir; fall back rather than
+        // scattering logs relative to whatever the cwd happened to be.
+        unsafe { std::env::set_var("XDG_DATA_HOME", "relative/path") };
+        assert!(xdg_data_dir().expect("a home dir").ends_with(".local/share"));
+
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        assert!(xdg_data_dir().expect("a home dir").ends_with(".local/share"));
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
     }
 }
