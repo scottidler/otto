@@ -728,6 +728,67 @@ fn test_jobs_zero_is_rejected_at_parse() {
     );
 }
 
+/// `otto.jobs` used to parse and do nothing (design doc Phase 10, the
+/// "inert otto: keys" bullet). It is now the default concurrency when
+/// `-j/--jobs` is not given explicitly.
+#[test]
+fn test_otto_jobs_config_sets_default_when_flag_omitted() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile_path = temp_dir.path().join("otto.yml");
+    fs::write(
+        &ottofile_path,
+        "otto:\n  jobs: 3\ntasks:\n  test:\n    action: echo test\n",
+    )
+    .unwrap();
+
+    let args = vec![
+        "otto".to_string(),
+        "--ottofile".to_string(),
+        ottofile_path.to_string_lossy().to_string(),
+        "test".to_string(),
+    ];
+
+    let mut parser = Parser::new(args).unwrap();
+    let result = parser.parse();
+    assert!(result.is_ok());
+    let (_, _, _, jobs, _, _) = result.unwrap().into_run().unwrap().into_parts();
+    assert_eq!(jobs, 3);
+}
+
+/// An explicit `-j` on the command line wins over `otto.jobs` even when the
+/// two disagree.
+#[test]
+fn test_explicit_jobs_flag_overrides_otto_jobs_config() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile_path = temp_dir.path().join("otto.yml");
+    fs::write(
+        &ottofile_path,
+        "otto:\n  jobs: 3\ntasks:\n  test:\n    action: echo test\n",
+    )
+    .unwrap();
+
+    let args = vec![
+        "otto".to_string(),
+        "-j".to_string(),
+        "7".to_string(),
+        "--ottofile".to_string(),
+        ottofile_path.to_string_lossy().to_string(),
+        "test".to_string(),
+    ];
+
+    let mut parser = Parser::new(args).unwrap();
+    let result = parser.parse();
+    assert!(result.is_ok());
+    let (_, _, _, jobs, _, _) = result.unwrap().into_run().unwrap().into_parts();
+    assert_eq!(jobs, 7);
+}
+
 // Tests for collect_transitive_deps and after semantic
 #[test]
 fn test_collect_transitive_deps_basic() {

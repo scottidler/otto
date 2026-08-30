@@ -1326,3 +1326,92 @@ batch` bullet was left unchecked and raised as a go/no-go. It is closed here.
   is a symlink, not a directory). Per the user's own CLAUDE.md, these are a
   known sandbox artifact, not real repo state, and were excluded from staging;
   flagging only so the next phase's agent does not waste time on them either.
+
+## Phase 10: Doc truth
+
+### Design decisions
+- **`otto.jobs` wired, `otto.home`/`otto.verbosity` deleted, `otto.name`/`otto.about` wired.**
+  `cfg/otto.rs`, `cli/parser.rs::parse`, `cli/parser/command.rs::build_help_command`.
+  All five had zero readers, but `jobs` is set by a dozen committed example
+  ottofiles as if it worked, and `about` already has a real writer
+  (`makefile/converter.rs::convert_otto_spec` sets `"Converted from Makefile"`).
+  `home` duplicates the already-established single knob `$OTTO_HOME`
+  (`executor/layout.rs`); wiring a second, competing knob would only create
+  ambiguity about which wins. Resolved per-key rather than as one binary
+  choice, since the design doc's own API Design bullet allowed either
+  direction and the two are not symmetric.
+- **`-j/--jobs` still always wins over `otto.jobs`.** `cli/parser.rs::parse`
+  uses `matches.value_source("jobs")` to tell "the user typed -j" from
+  "clap filled in its default," and only substitutes `config_spec.otto.jobs`
+  in the latter case. Verified functionally, not just by reading the code:
+  `otto.jobs: 1` with no `-j` ran two tasks serially; `-j 4` against the same
+  file ran them in parallel.
+- **`name`/`about` wired into exactly one of three help builders.**
+  `build_help_command` (self-bound, runs after a `ConfigSpec` exists) reads
+  them; `otto_command()` and `build_bare_help_command()` (both static, serving
+  the initial arg-parse and the "no ottofile" fallback) stay hardcoded
+  `"otto"`/`"A task runner"`, since neither has a config to read from. This
+  limits the field's effect to `otto --help`'s title/description when an
+  ottofile parsed successfully - a real, if narrow, effect.
+- **`.cursor/rules/` deleted rather than patched.** `.cursor/rules/*.mdc` (5
+  files). All five were wrong (dead links, a fictional `nom` dependency, a
+  fictional `-T` flag), and two actively told a reader to write a `timeout:`
+  key that now hard-errors under `deny_unknown_fields`. Patching five
+  already-wrong files key-by-key serves no reader better than removing them;
+  `docs/` is the real architecture reference.
+- **`examples/interactive-demo/PROOF.md` renamed to `proof.md`.** Lowercase
+  matches every other filename in the repo outside the universal `README.md`
+  exception; content was already accurate from an earlier fix and untouched.
+- **`docs/archive/` created via `git mv`, not copy+delete**, so the 35
+  relocated files keep their git history at the new path.
+
+### Deviations
+- **Fixed `examples/ex2/.otto.yml`'s `dest: stored_name`**, a pre-existing
+  break from Phase 6 deleting `dest` from `ParamSpec` that nothing had
+  caught. Outside this phase's own bullets, but found while sweeping every
+  committed ottofile for regressions from the `otto.jobs`/`home`/`verbosity`
+  schema change, and it blocked confirming that sweep's own result for this
+  file.
+- **`.cursor/rules/*.mdc`'s own Phase 10 success criterion ("every key
+  named in a `.mdc` file loads under `deny_unknown_fields`") is moot**, not
+  satisfied literally: the directory was deleted, so there are no files and
+  no keys to check. `find .cursor/rules -type f` returning nothing is a
+  strictly stronger guarantee than "every documented key is valid," recorded
+  as a deviation rather than left as an unsatisfiable checkbox.
+- **Wired two of the five inert `otto:` keys instead of resolving all five
+  the same way.** The design doc's API Design bullet said "wire them or
+  delete them," singular choice implied; the five keys were not equivalent
+  once checked against committed usage, so the resolution is per-key.
+
+### Tradeoffs
+- **Wiring `otto.jobs`/`otto.name`/`otto.about` vs. deleting all five
+  inert keys outright.** Deleting all five is the smaller, more mechanical
+  change and matches this phase's own precedent everywhere else (Phase 9's
+  dead-code sweep, `.cursor/rules/`'s deletion just above). It was rejected
+  for `jobs`/`name`/`about` specifically because deleting them would have
+  falsified a dozen committed example ottofiles that already set `jobs` as
+  if it worked, and discarded `about`'s existing real write-side use in the
+  Makefile converter. `home`/`verbosity` had neither concern, so they were
+  deleted.
+- **`build_help_command`-only wiring for `name`/`about`, not all three
+  help builders.** Wiring `otto_command()` (the initial arg-parse) or
+  `build_bare_help_command()` (the "no ottofile" fallback) would require
+  either parsing the ottofile before the top-level arg-parse (inverting the
+  current bootstrap order) or rendering a custom name/about with no
+  `ConfigSpec` to read from at all. Neither is a doc-truth-scoped change;
+  left as the narrower, unambiguous wiring.
+
+### Open questions
+- **Whether `otto.jobs` should also gain a `deny_unknown_fields`-style
+  clamp on `0`** to match `-j 0`'s CLI-side rejection (`-j 0` errors at
+  parse time; `otto.jobs: 0` currently deserializes and would hot-spin the
+  scheduler exactly like the bug `-j 0`'s CLI validation was built to
+  close). Out of this phase's scope (doc truth, not a new validation rule),
+  flagging since the asymmetry is real and newly created by wiring the
+  field.
+- **Whether `docs/archive/`'s 35 files should eventually be pruned rather
+  than kept indefinitely.** This phase moved them per the design doc's own
+  instruction; it did not delete any of them outright, on the theory that
+  git history plus a clearly-named archive is enough signal that they are
+  not living references. Confirm this is the intended end state, not an
+  interim one.

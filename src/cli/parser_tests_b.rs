@@ -913,6 +913,39 @@ fn options_section(help: &str) -> &str {
     &rest[..end]
 }
 
+/// `otto.name`/`otto.about` used to parse and do nothing (design doc
+/// Phase 10). They now drive the `Command` `otto --help` renders once an
+/// ottofile has been successfully parsed - the one help builder that has a
+/// `ConfigSpec` to read from.
+#[test]
+fn test_otto_name_and_about_reach_help_output() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile_path = temp_dir.path().join("otto.yml");
+    fs::write(
+        &ottofile_path,
+        "otto:\n  name: myproj\n  about: Builds myproj\ntasks:\n  build:\n    action: echo hi\n",
+    )
+    .unwrap();
+
+    let args = vec![
+        "otto".to_string(),
+        "--ottofile".to_string(),
+        ottofile_path.to_string_lossy().to_string(),
+    ];
+    let mut parser = Parser::new(args).unwrap();
+    parser.parse().unwrap();
+
+    let help = parser.build_help_command().render_long_help().to_string();
+    assert!(help.contains("myproj"), "help should render otto.name, got: {help}");
+    assert!(
+        help.contains("Builds myproj"),
+        "help should render otto.about, got: {help}"
+    );
+}
+
 #[test]
 fn test_help_global_flags_no_drift() {
     // Parser::new() doesn't load the ottofile (that happens in parse()),

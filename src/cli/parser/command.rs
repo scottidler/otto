@@ -157,10 +157,15 @@ impl Parser {
         })
     }
 
+    /// Unlike `otto_command()` and `build_bare_help_command()`, this path runs
+    /// after an ottofile has been successfully parsed, so it is the one place
+    /// `otto.name`/`otto.about` can have any effect: the other two builders
+    /// serve the initial arg-parse and the "no ottofile" fallback, neither of
+    /// which has a `ConfigSpec` to read from.
     fn build_help_command(&self) -> Command {
-        let mut cmd = Command::new("otto")
+        let mut cmd = Command::new(self.config_spec.otto.name.clone())
             .version(env!("GIT_DESCRIBE"))
-            .about("A task runner");
+            .about(self.config_spec.otto.about.clone());
         for arg in Self::global_args() {
             cmd = cmd.arg(arg);
         }

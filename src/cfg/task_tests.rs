@@ -871,9 +871,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         about: _,
         api: _,
         jobs: _,
-        home: _,
         tasks: _,
-        verbosity: _,
         envs: _,
         retention: _,
     } = OttoSpec::default();
@@ -946,7 +944,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         ),
         (
             "OttoSpec",
-            9,
+            7,
             expected_keys_from_deny_unknown_fields::<OttoSpec>,
             otto_path,
         ),
@@ -1003,7 +1001,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         total += keys.len();
     }
     assert_eq!(
-        total, 44,
-        "total on-disk key count drifted from the design doc's count of 44"
+        total, 42,
+        "total on-disk key count drifted from the design doc's count of 42"
     );
 }

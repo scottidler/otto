@@ -1,5 +1,23 @@
 # Project-Aware Statistics Design
 
+> **Status note (2026-08-30):** not implemented. `grep -rn
+> "get_task_stats_for_project|list_projects|list-projects" src/` returns
+> zero hits, and `Stats`'s meta-task (`src/cli/parser/meta_tasks.rs`,
+> `inject_stats_meta_task`) injects only `task`, `limit`, `json` - no
+> `project`. The ✅ marks below on the Implementation Checklist's step
+> headings and in Success Criteria are misleading: every individual checkbox
+> item under those headings is unchecked (`- [ ]`), and no code implements
+> any of them. `otto.jobs` and `otto.name`/`otto.about` (Phase 10 of
+> `2026-06-10-code-review-remediation.md`) resolved similarly-inert `otto:`
+> keys by wiring what a real usage pattern justified and deleting the rest;
+> this doc's own decision, unchanged by that work, is still to implement
+> `--project`/`--list-projects` rather than delete the ambition, since
+> nothing here shipped even a stub to delete. The one claim below that is
+> now true: `StateManager::try_new` (`executor/state/manager.rs`) does
+> `log::warn!` on failure and returns `None` rather than panicking, so the
+> "graceful degradation shows a warning" line under Migration Path is
+> accurate as of Phase 4's state/DB rewrite, not aspirational.
+
 ## Problem Statement
 
 The current `otto stats` command aggregates task statistics by task name only, without considering which project the task belongs to. This causes incorrect data aggregation when multiple projects use tasks with the same name (e.g., `test`, `build`, `fmt-check`).
@@ -372,7 +390,7 @@ Update JSON output to include project information:
 
 ## Implementation Checklist
 
-### Step 1: Schema Migration ✅
+### Step 1: Schema Migration (not started)
 - [ ] Add migration function to `src/executor/state/schema.rs`
 - [ ] Implement `migrate_v1_to_v2()` function
 - [ ] Add `name` column to projects table
@@ -381,7 +399,7 @@ Update JSON output to include project information:
 - [ ] Bump `SCHEMA_VERSION` to 2
 - [ ] Add tests for migration
 
-### Step 2: Data Structures ✅
+### Step 2: Data Structures (not started)
 - [ ] Update `TaskStats` struct in `src/executor/state/manager.rs`
   - Add `project_id: i64`
   - Add `project_hash: String`
@@ -389,7 +407,7 @@ Update JSON output to include project information:
 - [ ] Add `ProjectSummary` struct
 - [ ] Update serialization derives
 
-### Step 3: Query Methods ✅
+### Step 3: Query Methods (not started)
 - [ ] Update `get_task_stats()` to join with projects
 - [ ] Update `get_all_task_stats()` to join with projects
 - [ ] Add `get_task_stats_for_project()`
@@ -397,7 +415,7 @@ Update JSON output to include project information:
 - [ ] Update all stat aggregation queries (count, avg, min, max)
 - [ ] Add composite index: `idx_tasks_name_run`
 
-### Step 4: CLI Display ✅
+### Step 4: CLI Display (not started)
 - [ ] Update `StatsCommand` struct in `src/cli/commands/stats.rs`
   - Add `project: Option<String>`
   - Add `list_projects: bool`
@@ -406,12 +424,12 @@ Update JSON output to include project information:
 - [ ] Add `show_projects()` method
 - [ ] Update `execute()` to handle new flags
 
-### Step 5: Filtering Logic ✅
+### Step 5: Filtering Logic (not started)
 - [ ] Implement project filtering in query methods
 - [ ] Support filtering by project name or hash
 - [ ] Handle case where project doesn't exist
 
-### Step 6: Testing ✅
+### Step 6: Testing (not started)
 - [ ] Test migration with existing database
 - [ ] Test stats with multiple projects
 - [ ] Test filtering by project
@@ -419,7 +437,7 @@ Update JSON output to include project information:
 - [ ] Test JSON output format
 - [ ] Test backward compatibility
 
-### Step 7: Documentation ✅
+### Step 7: Documentation (not started)
 - [ ] Update `docs/commands/stats.md`
 - [ ] Add examples with multiple projects
 - [ ] Document new CLI flags
@@ -497,25 +515,17 @@ Add project column, update queries to join with projects
 
 ## Success Criteria
 
-1. ✅ Task stats correctly segregated by project
-2. ✅ No data loss during migration
-3. ✅ Existing databases migrate automatically
-4. ✅ UI clearly shows which project each task belongs to
-5. ✅ JSON output includes project information
-6. ✅ Performance remains acceptable (< 500ms for stats query)
-7. ✅ Tests pass with multiple projects
+None of these are done; the ✅ marks were aspirational when the doc was
+drafted and are corrected here (2026-08-30) rather than left standing as if
+verified.
 
-## Timeline Estimate
-
-- **Phase 1 (Schema):** 2-3 hours
-- **Phase 2 (Data Structures):** 1 hour
-- **Phase 3 (Queries):** 3-4 hours
-- **Phase 4 (CLI):** 2-3 hours
-- **Phase 5 (JSON):** 1 hour
-- **Phase 6 (Testing):** 2-3 hours
-- **Documentation:** 1-2 hours
-
-**Total:** 12-17 hours of development time
+1. Task stats correctly segregated by project
+2. No data loss during migration
+3. Existing databases migrate automatically
+4. UI clearly shows which project each task belongs to
+5. JSON output includes project information
+6. Performance remains acceptable (< 500ms for stats query)
+7. Tests pass with multiple projects
 
 ## References
 

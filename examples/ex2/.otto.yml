@@ -1,6 +1,5 @@
 otto:
   api: 1
-  jobs: 12
   tasks:
   - sometask
 tasks:
@@ -16,7 +15,6 @@ tasks:
         metavar: OPT
         help: opt1 help message
       --opt2:
-        dest: stored_name
         default: three
         choices:
         - one

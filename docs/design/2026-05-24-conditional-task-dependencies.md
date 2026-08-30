@@ -455,6 +455,13 @@ fn compute_task_deps_from_specs(
 
 Validation step (also in this function or immediately after) checks every edge's `task` field resolves to a real task, AND that no `(task, *)` pair has both `when: success` and `when: failure` on the same dependent. Unchanged from today in spirit, just walks `Vec<EdgeSpec>` instead of `Vec<String>` and adds the new pair check.
 
+**Correction (2026-08-30): this validation pass was never built.**
+`git grep` for a same-source paired-edge check across `src/cfg/` and
+`src/executor/` finds nothing; a task with both `{task: X, when: success}`
+and `{task: X, when: failure}` in its `before:`/`after:` list loads without
+complaint and reproduces the perpetually-`Skipped` symptom described above.
+Still open, unclaimed by any shipped phase.
+
 #### `executor::Task` construction
 
 `Task::from_task_with_cwd_and_global_envs` (`executor/task.rs:71`) copies `task_deps` from the parser's computed map directly. The `task_spec.before.clone()` line at `executor/task.rs:77` becomes:
@@ -497,6 +504,20 @@ A task becomes unreachable when any of its edges can never satisfy:
 - `when: Failure` edge whose source is in `completed_set` → unreachable (source can never fail; it already succeeded).
 - `when: Always` edges never make a dependent unreachable.
 
+**Correction (2026-08-30):** this line used to contradict the Open Questions
+entry below it (a `--skip`-cascade design note claiming `when: always`
+dependents of a skipped source evaluate as `Unreachable`), and the
+2026-06-10 remediation doc's Phase 10 bullet recorded the code as siding
+with the contradiction rather than with this line. That was true when
+written but is stale now: commit `c72f911` ("resolve skipped dependencies by
+provenance, not by short-circuit") rewrote `classify_edge`
+(`executor/scheduler.rs`) so a skipped source's `when: Always` edge
+resolves `Satisfied`, matching this line exactly. Verified directly against
+`classify_edge`'s current match arms, not re-derived from the commit
+message alone; `classify_edge_skip_provenance_matrix` pins all nine
+source-kind × `when` combinations so the two gates this doc originally
+found disagreeing cannot drift apart again.
+
 After each task completion or failure, sweep `blocked_tasks` for newly-unreachable tasks and mark them `Skipped`:
 
 ```rust
@@ -527,6 +548,16 @@ A task is `Skipped` when *any* of its edges is `Unreachable`. A task is `Ready` 
 This is a real new behavior: today, a failed dep leaves dependents in mysteriously-blocked limbo and the run exits because the scheduler returns early. With unreachability marking, the dependent is explicitly marked `Skipped`, broadcast to the TUI, and recorded in run history - the user sees *why* it didn't run.
 
 **Skip-reason wiring.** The skip reason ("`dep X failed; this task required when: success`" or `"dep X succeeded; this task required when: failure`") is carried via a sidecar map on the scheduler: `skip_reasons: HashMap<String, String>`. Populated when a task is marked Skipped; consumed by the TUI broadcast and the run-history record. The `TaskStatus::Skipped` enum variant stays simple (no struct variant) - keeps the existing enum's pattern-matching call sites unchanged. Tasks that complete normally have no entry in the sidecar.
+
+**Correction (2026-08-30):** shipped, and now fully true, not only partly.
+The sidecar is `self.skip_records: HashMap<String, SkipRecord>`
+(`scheduler.rs`), populated by `mark_skipped` (`executor/scheduler/support.rs`)
+and consumed by both the TUI broadcast (same function) and
+`persist_skip_records`, which writes `skip_reason`/`skip_kind` into the
+`tasks` table via `StateManager::record_task_skipped`. The 2026-06-10
+remediation doc's Phase 10 bullet flagged this as "still not persisted";
+re-checked directly against `support.rs:persist_skip_records` and that is no
+longer accurate as of Phase 4's state/DB rewrite.
 
 #### Drain-on-failure
 
@@ -890,6 +921,20 @@ Run-history storage on disk does not change schema: `task_deps` was already seri
 ## Open Questions
 
 - [x] **Resolved.** `--skip foo` marks `foo` as `Skipped`, not `Completed`. Skipped is its own terminal state - neither success nor failure. Dependents of `foo` via `when: success` become `Unreachable` (foo never succeeded) → Skipped themselves. Dependents via `when: failure` also become `Unreachable` (foo never failed) → Skipped. Dependents via `when: always` are pending: they evaluate as `Unreachable` because `classify_edge` checks membership in `completed_set ∪ failed_set`, and Skipped is in neither. **This means `--skip foo` cascades skips through the dependency chain regardless of edge condition.** Rationale: `--skip` is the user explicitly saying "this task did not run at this time"; carrying that through the graph is more honest than pretending it succeeded. Document prominently - this differs from how some task runners treat `--skip` (e.g., GNU Make's `-W` treats a skipped target as "made"). Phase 4 implements this; Phase 7 docs call it out.
+
+  **Correction (2026-08-30): this is still a design proposal, not shipped.**
+  `git grep '"skip"' src/cli/` finds no such flag; there is no `--skip` on
+  the real CLI today. Two things below have moved independently since this
+  was written and are worth separating from the missing flag itself: (a) the
+  `when: always` mechanics described here (`Unreachable` for a skipped
+  source) were later fixed *away* from this description - see the
+  `classify_edge` correction above, where a skipped source now resolves
+  `when: always` as `Satisfied`, not `Unreachable` - so if `--skip` ships,
+  its interaction with `when: always` needs re-deciding against the current
+  code, not against this paragraph; (b) `SkipKind` (`executor/state/schema.rs`)
+  has exactly three variants today (`UpToDate`, `SerialPredecessor`,
+  `Unreachable`), none of which represent an operator-requested manual skip,
+  confirming no partial implementation exists to build on.
 - [ ] Foreach interaction: resolved by the Prerequisites section. Virtual parents become real aggregator tasks; their status is the aggregation of their subtasks (any failed → parent failed). A downstream `{task: host, when: failure}` therefore fires when ANY subtask of `host` failed. Pending Architect consensus in round 3 - this is the position v3 takes, not the only option.
 - [ ] Should `When` get more variants later (e.g., `when: timeout`, `when: signal`)? The enum is `#[derive(Deserialize)]` with `rename_all = "kebab-case"` - adding variants is forward-compatible at the type level but breaks ottofiles that pin against the exhaustive set in tests. Leave at `Success | Failure | Always` for now.
 - [ ] Should there be an `otto.fail-fast` config flag in the first cut, or wait for someone to ask? Lean wait. Less code, fewer knobs.

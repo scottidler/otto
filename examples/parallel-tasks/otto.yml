@@ -2,8 +2,6 @@ otto:
   name: otto
   about: A task runner
   api: "1"
-  home: ~/.otto
-  jobs: 4
   tasks: ["final"]
 
 tasks:

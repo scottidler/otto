@@ -752,6 +752,15 @@ impl Parser {
         // then hot-spin the launch loop at 100% CPU forever.
         self.jobs = usize::try_from(*matches.get_one::<u64>("jobs").expect("jobs should have default value"))
             .map_err(|_| eyre!("-j/--jobs value is too large for this platform"))?;
+        // `-j/--jobs` always has a value (clap's default is the CPU count), so
+        // the only way to tell "the user actually typed -j" from "clap filled
+        // it in" is `value_source`. An ottofile's `otto.jobs` gets to set the
+        // default only when the flag was not given explicitly; either way the
+        // flag on the command line always wins.
+        let jobs_explicit = !matches!(
+            matches.value_source("jobs"),
+            Some(clap::parser::ValueSource::DefaultValue)
+        );
 
         // Extract tui flag
         let mut tui_mode = matches.get_flag("tui");
@@ -765,6 +774,10 @@ impl Parser {
         self.config_spec = config_spec;
         self.hash = hash;
         self.ottofile = ottofile;
+
+        if !jobs_explicit {
+            self.jobs = self.config_spec.otto.jobs;
+        }
 
         // Inject built-in commands
         self.inject_builtin_commands();

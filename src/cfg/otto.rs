@@ -92,16 +92,8 @@ fn default_jobs() -> usize {
     num_cpus::get()
 }
 
-fn default_home() -> String {
-    "~/.otto".to_string()
-}
-
 fn default_tasks() -> Vec<String> {
     vec!["*".to_string()]
-}
-
-fn default_verbosity() -> u8 {
-    1
 }
 
 fn default_keep_days() -> u64 {
@@ -199,14 +191,6 @@ fn is_default_jobs(v: &usize) -> bool {
     *v == default_jobs()
 }
 
-fn is_default_home(v: &String) -> bool {
-    *v == default_home()
-}
-
-fn is_default_verbosity(v: &u8) -> bool {
-    *v == default_verbosity()
-}
-
 // `default_tasks()` is `["*"]`, not `[]` - `Vec::is_empty` would leave the
 // default value emitted on every partially-customized `otto:` block (e.g.
 // one that sets only `jobs:`), which is exactly the null-noise this bullet
@@ -232,17 +216,14 @@ pub struct OttoSpec {
     #[serde(default = "default_api")]
     pub api: String,
 
+    /// Default parallelism, used only when `-j/--jobs` was not given
+    /// explicitly on the command line (see `Parser::parse`'s `value_source`
+    /// check). The CLI flag always wins when present.
     #[serde(default = "default_jobs", skip_serializing_if = "is_default_jobs")]
     pub jobs: usize,
 
-    #[serde(default = "default_home", skip_serializing_if = "is_default_home")]
-    pub home: String,
-
     #[serde(default = "default_tasks", skip_serializing_if = "is_default_tasks")]
     pub tasks: Vec<String>,
-
-    #[serde(default = "default_verbosity", skip_serializing_if = "is_default_verbosity")]
-    pub verbosity: u8,
 
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub envs: HashMap<String, String>,
@@ -258,9 +239,7 @@ impl Default for OttoSpec {
             about: default_about(),
             api: default_api(),
             jobs: default_jobs(),
-            home: default_home(),
             tasks: default_tasks(),
-            verbosity: default_verbosity(),
             envs: HashMap::new(),
             retention: RetentionSpec::default(),
         }

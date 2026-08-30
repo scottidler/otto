@@ -96,6 +96,36 @@ otto build
 # Building myproj in build
 ```
 
+## Usage
+
+`otto` runs tasks named in an ottofile (`otto.yml`/`otto.yaml`/`.otto.yml`),
+discovered by walking up from the current directory unless `-o/--ottofile`
+or `-C/--cwd` says otherwise.
+
+```bash
+otto <task> [<task> ...]   # run one or more tasks by name
+otto --help                # list every task plus the six builtins below
+otto -j 4 build            # cap concurrency at 4 (default: number of CPUs,
+                            # or otto.jobs in the ottofile if set)
+otto -t build              # run under the interactive TUI dashboard
+otto --no-prefix build     # drop the "[task]" prefix from task output
+```
+
+**Builtins** (capitalized, run like any other task):
+
+| Builtin | What it does |
+|---|---|
+| `Clean` | Remove old runs from `~/.otto/` (see `docs/commands/clean.md`) |
+| `Convert` | Convert a Makefile (via stdin) to an ottofile: `cat Makefile \| otto Convert > otto.yml` |
+| `Graph` | Visualize the task dependency graph |
+| `History` | View execution history (see `docs/commands/history.md`) |
+| `Stats` | View execution statistics (see `docs/commands/stats.md`) |
+| `Upgrade` | Upgrade otto to a newer release (see `docs/commands/upgrade.md`) |
+
+Every task and builtin has its own `--help`, e.g. `otto Convert --help` or
+`otto build --help`. The full ottofile key reference lives at
+[`docs/commands/ottofile-reference.md`](docs/commands/ottofile-reference.md).
+
 ## Version Reporting
 
 The `otto` binary supports `--version` and `-v` flags:
@@ -117,5 +147,3 @@ otto v0.1.0-3-gabcdef
 4. **Push** the tag: `git push --tags`.
 5. **Build** the binary. The version will be embedded from the tag and `git describe`.
 6. **Create a GitHub Release** and upload the binary. The version in the binary will match the release tag.
-
-> If the version in `Cargo.toml` does not match the latest tag, a warning will be printed at build time.

@@ -270,13 +270,16 @@ impl<F: FileSystem> BashProcessor<F> {
         }
     }
 
-    /// Separate environment variables from CLI parameters
-    /// Only include variables that don't exist in task.values (CLI parameters)
+    /// All of `task.envs` (global env layered under task-scoped env), as-is.
+    ///
+    /// The docstring here used to say the opposite of what this body does
+    /// ("only include variables that don't exist in task.values"), left over
+    /// from an older design where CLI params and env vars shared one map and
+    /// needed separating. They are already separate: `task.envs` never holds
+    /// a CLI parameter, so every entry is included unconditionally.
     fn get_yaml_env_vars(&self, task: &Task) -> std::collections::HashMap<String, String> {
         let mut yaml_envs = std::collections::HashMap::new();
         for (key, value) in &task.envs {
-            // Include all environment variables - CLI parameters are handled separately
-            // The task.envs already contains both global and task-level env vars
             yaml_envs.insert(key.clone(), value.clone());
         }
         yaml_envs
@@ -574,13 +577,16 @@ impl<F: FileSystem> PythonProcessor<F> {
         }
     }
 
-    /// Separate environment variables from CLI parameters
-    /// Only include variables that don't exist in task.values (CLI parameters)
+    /// All of `task.envs` (global env layered under task-scoped env), as-is.
+    ///
+    /// The docstring here used to say the opposite of what this body does
+    /// ("only include variables that don't exist in task.values"), left over
+    /// from an older design where CLI params and env vars shared one map and
+    /// needed separating. They are already separate: `task.envs` never holds
+    /// a CLI parameter, so every entry is included unconditionally.
     fn get_yaml_env_vars(&self, task: &Task) -> std::collections::HashMap<String, String> {
         let mut yaml_envs = std::collections::HashMap::new();
         for (key, value) in &task.envs {
-            // Include all environment variables - CLI parameters are handled separately
-            // The task.envs already contains both global and task-level env vars
             yaml_envs.insert(key.clone(), value.clone());
         }
         yaml_envs

@@ -29,17 +29,30 @@ structs has a default, except `EdgeSpec.task`, which is genuinely required).
 environment variables live at `otto.envs`, one level down. See the migration
 note for the two work repos this broke.
 
-## `otto:` (`OttoSpec`) — 9 keys
+## `otto:` (`OttoSpec`) — 7 keys
+
+**Five more keys used to parse here and do nothing**: `home`, `verbosity`,
+and (before 2026-08-30) `jobs` were accepted-and-ignored — `deny_unknown_fields`
+made them load without error, which made a dead key look official. `home` and
+`verbosity` had no reader anywhere in `src/` and no committed ottofile ever
+set them; they were deleted from the schema rather than wired, since otto's
+state directory already has one real knob (`$OTTO_HOME`, see
+`src/executor/layout.rs`) and inventing a second, competing one would only
+create ambiguity about which wins. `name` and `about` also had no reader, but
+`otto Convert` writes `about` into every Makefile it converts and a dozen
+example ottofiles set both, so they were wired into `otto --help`'s title and
+description instead of deleted. `jobs` was wired the same way: a dozen
+example ottofiles set it as if it worked, so it now IS the default
+concurrency, applied only when `-j/--jobs` was not given explicitly on the
+command line (the flag still always wins).
 
 | key | type | default | notes |
 |---|---|---|---|
-| `otto.name` | string | `"otto"` | Display name for the ottofile/project. |
-| `otto.about` | string | `"A task runner"` | One-line description. |
+| `otto.name` | string | `"otto"` | The `Command` name `otto --help` renders under, when an ottofile parsed successfully. Has no effect on the initial arg-parse or on the "no ottofile" fallback help, which stay `"otto"` since neither has a `ConfigSpec` to read yet. |
+| `otto.about` | string | `"A task runner"` | The one-line description shown by the same `otto --help` path as `name`. `otto Convert` sets this to `"Converted from Makefile"` in its output. |
 | `otto.api` | string | `"1"` | **Schema version gate**, checked before the strict parse. Must be one of the versions this otto's `SUPPORTED_API_VERSIONS` const supports (currently just `"1"`); an unsupported value is rejected with a message naming the declared version, the supported set, and "upgrade otto" — before any unknown-key error, so a newer ottofile on an older otto gets a truthful message instead of a confusing one about whichever key is new. |
-| `otto.jobs` | integer | number of CPUs | Max concurrent tasks. |
-| `otto.home` | string | `"~/.otto"` | Otto's state directory (run history, logs, database). |
+| `otto.jobs` | integer | number of CPUs | Default concurrent-task limit, used only when `-j/--jobs` is not passed on the command line. |
 | `otto.tasks` | list of strings | `["*"]` | Default-task-selection filter (which tasks run when none are named on the command line). **Not** the task map — that is root `tasks:`, a different key at a different level. Naming collision between the two is real; do not confuse them. |
-| `otto.verbosity` | integer (0-255) | `1` | Default log verbosity. |
 | `otto.envs` | map: string -> string | `{}` | **Global environment variables**, available to every task. Free-form key site: the map keys are env-var names, not a fixed field list. This is the key two work repos invented at the wrong level (root `envs:`) before this page existed — see the migration note. |
 | `otto.retention` | map | `RetentionSpec` defaults | See **`otto.retention:`** below. |
 

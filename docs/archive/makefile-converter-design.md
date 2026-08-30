@@ -1,14 +1,23 @@
 # Makefile to Otto Converter - Design & Architecture
 
+> **Status note (2026-08-30):** this is the pre-implementation design for
+> `otto Convert` (archived history, kept for the architecture rationale).
+> The feature shipped; the builtin's name is capitalized (`Convert`, not
+> `convert` - see `src/app.rs`'s `Builtin` enum), and it now carries a real
+> `Diagnostic` warning system (`src/makefile/diagnostic.rs`) that this
+> original draft only sketched. The four places below where the draft's
+> description diverged from what shipped are corrected inline; nothing else
+> in this doc was re-verified against the current `src/makefile/` module.
+
 ## Overview
 
 This feature enables users to convert existing Makefiles to Otto YAML format via stdin/stdout. This allows seamless migration from Make-based workflows to Otto.
 
 **Command Usage:**
 ```bash
-cat Makefile | otto convert > otto.yml
+cat Makefile | otto Convert > otto.yml
 # or
-otto convert < Makefile > otto.yml
+otto Convert < Makefile > otto.yml
 ```
 
 ## Feature Requirements
@@ -19,7 +28,7 @@ otto convert < Makefile > otto.yml
 3. Convert Makefile constructs to Otto YAML equivalents
 4. Output formatted Otto YAML to stdout
 5. Handle common Makefile patterns and idioms
-6. Provide meaningful error messages for unsupported constructs
+6. Provide meaningful error messages for unsupported constructs (**shipped**: every construct the converter cannot represent faithfully becomes a `Diagnostic` printed to stderr, naming the source line; `--strict` turns a non-empty diagnostic list into a non-zero exit instead of a silent conversion. See `src/makefile/diagnostic.rs`.)
 
 ### Supported Makefile Features (Phase 1)
 - Variable definitions (`VAR := value`, `VAR = value`, `VAR ?= value`)
@@ -35,7 +44,7 @@ otto convert < Makefile > otto.yml
 - Pattern rules (`%.o: %.c`)
 - Conditional directives (`ifeq`, `ifdef`, etc.)
 - Include directives
-- Automatic variables (`$@`, `$<`, `$^`, etc.) - will warn user
+- Automatic variables (`$@`, `$<`, `$^`, etc.) - will warn user (**shipped**: `converter.rs` emits `` automatic variable `$@` has no otto equivalent; left as written `` and leaves the reference untouched rather than mangling it)
 - Complex variable expansion with functions
 - Recursive make invocations
 
@@ -147,7 +156,7 @@ impl MakefileParser {
 **Key Parsing Logic:**
 
 - Line-by-line parsing with state machine
-- Detect variable assignments (check for `:=`, `=`, `?=`, `+=`)
+- Detect variable assignments (check for `:=`, `?=`, `+=`, `=`, longest-operator-first so `?=`/`+=` are never split by an eager bare-`=` match - this draft originally listed `=` before `?=`/`+=`, backwards from what `parser.rs`'s `assignment_ops` actually needs and ships)
 - Detect target definitions (lines ending with `:`)
 - Handle tab-indented commands under targets
 - Track `.PHONY` and `.DEFAULT_GOAL` directives
@@ -292,7 +301,7 @@ impl ConvertCommand {
 
 ### Step 7: Integration Tests
 - Test with existing Makefiles in `examples/`
-- Test with real-world Makefiles from `~/repos/tatari-tv/` (run with `cargo test -- --ignored`)
+- Test with real-world Makefiles from third-party projects
 - Verify conversion correctness
 - Test error handling
 - Test edge cases
@@ -300,227 +309,16 @@ impl ConvertCommand {
 
 ## Testing Strategy
 
-### Test Directory Structure
-
-```
-tests/
-  makefile_converter/
-    fixtures/
-      simple.mk           # Basic targets and variables
-      dependencies.mk     # Complex dependency chains
-      shell_vars.mk       # Shell command variables
-      comments.mk         # Help text from comments
-      multiline.mk        # Line continuations
-    expected/
-      simple.yml
-      dependencies.yml
-      shell_vars.yml
-      comments.yml
-      multiline.yml
-    makefile_converter_test.rs
-```
-
-### Additional Real-World Test Sources
-
-**Otto Repository Examples:**
-- `examples/auth-svc/Makefile` - Python service with poetry
-- `examples/devs/Makefile` - Go project with build flags
-- `examples/ex12/Makefile` - Go project with variable expansions
-- `examples/pre-commit-hooks/Makefile` - Simple Python hooks
-- `examples/media-planning-service/Makefile` - Complex service with Docker
-
-**Tatari-TV Repository Examples:**
-Real-world Makefiles can be found in various projects under `~/repos/tatari-tv/<reponame>`. These should be tested to ensure the converter handles diverse production scenarios, including:
-- Complex build pipelines
-- Multi-stage deployments
-- Service-specific configurations
-- Various language ecosystems (Python, Go, Node.js, etc.)
-
-These real-world examples will help validate the converter against production-grade Makefiles and identify edge cases that need special handling.
-
-### Test Makefiles
-
-**1. Simple Makefile** (`simple.mk`)
-```makefile
-.DEFAULT_GOAL := build
-
-VAR1 := value1
-VAR2 = value2
-
-.PHONY: build clean
-
-build:
-	echo "Building..."
-	mkdir -p dist
-
-clean:
-	rm -rf dist
-```
-
-**2. Dependencies** (`dependencies.mk`)
-```makefile
-.PHONY: all test build
-
-all: test build
-
-test:
-	go test ./...
-
-build: test
-	go build -o app
-```
-
-**3. Shell Variables** (`shell_vars.mk`)
-```makefile
-VERSION := $(shell git describe --tags)
-BUILD := $(shell git rev-parse HEAD)
-
-build:
-	go build -ldflags "-X main.Version=$(VERSION)"
-```
-
-**4. Comments for Help** (`comments.mk`)
-```makefile
-# Install development dependencies
-dev:
-	poetry install
-
-# Run all tests with coverage
-test: dev
-	pytest --cov
-```
-
-**5. Multiline Commands** (`multiline.mk`)
-```makefile
-build:
-	mkdir -p dist && \
-	go build -o dist/app && \
-	echo "Build complete"
-```
-
-### Test Implementation
-
-```rust
-// tests/makefile_converter_test.rs
-
-use otto::makefile::{MakefileParser, OttoConverter};
-use std::fs;
-
-#[test]
-fn test_simple_makefile_conversion() {
-    let input = fs::read_to_string("tests/makefile_converter/fixtures/simple.mk").unwrap();
-    let expected = fs::read_to_string("tests/makefile_converter/expected/simple.yml").unwrap();
-
-    let mut parser = MakefileParser::new(input);
-    let ast = parser.parse().unwrap();
-    let converter = OttoConverter::new(ast);
-    let config = converter.convert().unwrap();
-
-    let actual = serde_yaml::to_string(&config).unwrap();
-
-    // Normalize whitespace for comparison
-    assert_yaml_equivalent(&expected, &actual);
-}
-
-#[test]
-fn test_dependencies_conversion() {
-    // Similar test for dependencies.mk
-}
-
-#[test]
-fn test_shell_vars_conversion() {
-    // Similar test for shell_vars.mk
-}
-
-#[test]
-fn test_comments_to_help_conversion() {
-    // Similar test for comments.mk
-}
-
-#[test]
-fn test_multiline_commands_conversion() {
-    // Similar test for multiline.mk
-}
-
-#[test]
-fn test_existing_makefiles() {
-    // Test with actual Makefiles from examples/ directory
-    let examples = [
-        "examples/auth-svc/Makefile",
-        "examples/devs/Makefile",
-        "examples/ex12/Makefile",
-        "examples/pre-commit-hooks/Makefile",
-        "examples/media-planning-service/Makefile",
-    ];
-
-    for makefile_path in examples {
-        let input = fs::read_to_string(makefile_path).unwrap();
-        let mut parser = MakefileParser::new(input);
-        let ast = parser.parse().unwrap();
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
-
-        // Should not panic and should produce valid YAML
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        assert!(!yaml.is_empty());
-    }
-}
-
-#[test]
-#[ignore] // Only run when explicitly requested, as it depends on external repos
-fn test_tatari_tv_makefiles() {
-    // Test with real-world Makefiles from tatari-tv repositories
-    // These tests validate against production Makefiles
-    let home = env::var("HOME").unwrap();
-    let tatari_repos_path = format!("{}/repos/tatari-tv", home);
-
-    if !Path::new(&tatari_repos_path).exists() {
-        eprintln!("Skipping tatari-tv tests: directory not found");
-        return;
-    }
-
-    // Scan for Makefiles in tatari-tv repositories
-    use walkdir::WalkDir;
-
-    for entry in WalkDir::new(tatari_repos_path)
-        .max_depth(2)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_name() == "Makefile" {
-            println!("Testing: {}", entry.path().display());
-
-            let input = fs::read_to_string(entry.path()).unwrap();
-            let mut parser = MakefileParser::new(input);
-
-            match parser.parse() {
-                Ok(ast) => {
-                    let converter = OttoConverter::new(ast);
-                    match converter.convert() {
-                        Ok(config) => {
-                            let yaml = serde_yaml::to_string(&config).unwrap();
-                            assert!(!yaml.is_empty());
-                            println!("  ✅ Converted successfully");
-                        }
-                        Err(e) => {
-                            println!("  ⚠️  Conversion warning: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    println!("  ⚠️  Parse warning: {}", e);
-                }
-            }
-        }
-    }
-}
-
-fn assert_yaml_equivalent(expected: &str, actual: &str) {
-    let expected_val: serde_yaml::Value = serde_yaml::from_str(expected).unwrap();
-    let actual_val: serde_yaml::Value = serde_yaml::from_str(actual).unwrap();
-    assert_eq!(expected_val, actual_val);
-}
-```
+> **What actually shipped (2026-08-30), replacing this section's original
+> plan wholesale:** the directory structure, per-fixture `.yml` files, and
+> `test_tatari_tv_makefiles` sketched below were never built; `tests/fixtures/`
+> does not exist. The real suite is `tests/makefile_converter_test.rs`,
+> against fixtures at `makefiles/<name>/Makefile` (repo-root, not under
+> `tests/`), each with a committed `expected.yml` compared as a `ConfigSpec`
+> rather than as text, plus the exact `Diagnostic` list the fixture must
+> produce. Fixtures cover the negative cases this draft's original assertions
+> missed entirely (`$(shell ...)`, `$(VAR)`, pattern rules, multi-target
+> lines) - see the test file's own module doc for the current fixture list.
 
 ## Error Handling
 

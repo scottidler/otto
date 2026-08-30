@@ -17,6 +17,20 @@ Verified against the 94 real `.otto.yml` files under `~/repos/tatari-tv` and
 `~/repos/scottidler`: 20/94 → 94/94 round-trip cleanly. `tests/roundtrip.rs`
 locks in the discipline going forward.
 
+**Addendum (2026-08-30), a related but separate round-trip exception, not
+covered by Option A above:** `cfg/task.rs`'s `bash:`/`python:` sugar only
+applies when the auto-added shebang is the *whole* first line. A shebang
+with trailing args (e.g. `#!/bin/bash -euo pipefail`) is deliberately left
+in the literal `action:` form on serialize rather than desugared, because
+the sugar path used to strip only the bare `#!/bin/bash` substring and
+strand the args as a mangled first line that reparsed to a different action
+(design doc `2026-06-10-code-review-remediation.md` Phase 6). The `action:`
+path round-trips byte-identically; only the choice of `bash:`/`python:` vs
+`action:` as the on-disk key changes. This has zero `shebang` mentions
+before this addendum because it was fixed after this doc was written and by
+a different phase; noted here since it is the same class of round-trip
+asymmetry this document is about.
+
 Options B and C were discarded. Option D (reshape the type so `params` is
 keyed by the rich form natively) remains a reasonable future refactor but
 was not necessary — the Architect's blast-radius correction (0 refs in
