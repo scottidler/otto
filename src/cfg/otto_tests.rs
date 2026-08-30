@@ -148,3 +148,44 @@ fn test_retention_spec_roundtrip() {
     let deserialized: RetentionSpec = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(spec, deserialized);
 }
+
+#[cfg(test)]
+mod jobs_range_tests {
+    use crate::cfg::config::ConfigSpec;
+
+    /// `otto.jobs: 0` is a config-load error, not a hang.
+    ///
+    /// The remediation plan originally DROPPED this validation, recording that
+    /// "`otto.jobs` has zero consumers, so `jobs: 0` in an ottofile runs fine".
+    /// Both halves later became false: `jobs` is consumed at
+    /// `cli/parser.rs:777-779` whenever `-j` is absent, at which point `jobs: 0`
+    /// reproduces the hot spin the `-j 0` fix removed (measured: exit 124 under
+    /// a 12s timeout, 100% CPU, zero output).
+    #[test]
+    fn jobs_zero_is_rejected_at_config_load() {
+        let err = serde_yaml::from_str::<ConfigSpec>("otto:\n  jobs: 0\ntasks:\n  build:\n    bash: true\n")
+            .expect_err("jobs: 0 must not load");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not a valid job count"),
+            "error must name the problem, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_positive_jobs_value_still_loads() {
+        for n in [1usize, 2, 64] {
+            let yaml = format!("otto:\n  jobs: {n}\ntasks:\n  build:\n    bash: true\n");
+            let spec: ConfigSpec = serde_yaml::from_str(&yaml).expect("positive jobs must load");
+            assert_eq!(spec.otto.jobs, n);
+        }
+    }
+
+    /// Omitting the key must not trip the guard.
+    #[test]
+    fn an_absent_jobs_key_defaults_without_error() {
+        let spec: ConfigSpec =
+            serde_yaml::from_str("tasks:\n  build:\n    bash: true\n").expect("absent jobs must load");
+        assert!(spec.otto.jobs >= 1, "default job count must be at least 1");
+    }
+}

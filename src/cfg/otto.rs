@@ -1,7 +1,7 @@
 //#![allow(unused_imports, unused_variables, dead_code)]
 
 use eyre::{Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::vec::Vec;
 
@@ -175,6 +175,33 @@ pub fn default_otto() -> OttoSpec {
     OttoSpec::default()
 }
 
+/// Reject `otto.jobs: 0` at config load.
+///
+/// `-j 0` is rejected by clap's `value_parser!(u64).range(1..)`, but the
+/// ottofile path had no equivalent guard. This document's plan originally
+/// DROPPED that validation on the recorded premise that "`otto.jobs` has zero
+/// consumers, so `jobs: 0` in an ottofile runs fine". Both halves of that
+/// premise later became false: `otto.jobs` is consumed at
+/// `cli/parser.rs:777-779` whenever `-j` is absent, and `jobs: 0` then
+/// reproduces the exact hot spin the `-j 0` fix removed - the launch loop's
+/// `while active_tasks.len() < max_concurrent` never admits a task and the
+/// sweep `continue`s forever at 100% CPU. `permits_for`'s
+/// `debug_assert!(max_parallel >= 1)` never fires because the loop never
+/// reaches it. Measured before this guard: `timeout 12s otto build` exited
+/// 124 with zero output.
+fn deserialize_jobs<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let jobs = usize::deserialize(deserializer)?;
+    if jobs == 0 {
+        return Err(serde::de::Error::custom(
+            "otto.jobs: 0 is not a valid job count; use 1 or more (omit the key to default to the CPU count)",
+        ));
+    }
+    Ok(jobs)
+}
+
 // Serialization predicates. A field whose value still equals its own default
 // is omitted, so round-tripping an ottofile that wrote no `otto:` block does
 // not hand back a 17-line one. `api` has no predicate on purpose: it is the
@@ -219,7 +246,11 @@ pub struct OttoSpec {
     /// Default parallelism, used only when `-j/--jobs` was not given
     /// explicitly on the command line (see `Parser::parse`'s `value_source`
     /// check). The CLI flag always wins when present.
-    #[serde(default = "default_jobs", skip_serializing_if = "is_default_jobs")]
+    #[serde(
+        default = "default_jobs",
+        skip_serializing_if = "is_default_jobs",
+        deserialize_with = "deserialize_jobs"
+    )]
     pub jobs: usize,
 
     #[serde(default = "default_tasks", skip_serializing_if = "is_default_tasks")]
