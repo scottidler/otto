@@ -38,8 +38,8 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
     (
         "docker-compose-service",
         &[
-            "Makefile:2: warning: `PYPI_USERNAME ?=` is conditional in make; otto always uses this value, ignoring any `PYPI_USERNAME` already in the environment",
-            "Makefile:3: warning: `PYPI_PASSWORD ?=` is conditional in make; otto always uses this value, ignoring any `PYPI_PASSWORD` already in the environment",
+            "Makefile:2: warning: `BUILD_OWNER ?=` is conditional in make; otto always uses this value, ignoring any `BUILD_OWNER` already in the environment",
+            "Makefile:3: warning: `BUILD_TAG ?=` is conditional in make; otto always uses this value, ignoring any `BUILD_TAG` already in the environment",
             "Makefile:28: warning: `type-check` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
             "Makefile:31: warning: `lint` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
             "Makefile:34: warning: `run-rest` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",

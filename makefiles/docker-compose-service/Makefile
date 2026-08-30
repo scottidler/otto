@@ -1,6 +1,6 @@
 GIT_DESCRIBE	:= $(shell git describe --always --abbrev=7)
-PYPI_USERNAME	?= $(shell cat ~/.config/pip/pip.conf | grep extra-index-url | awk -F '[//|@]' '{print $$3}' | awk -F '[:]' '{print $$1}')
-PYPI_PASSWORD	?= $(shell cat ~/.config/pip/pip.conf | grep extra-index-url | awk -F '[//|@]' '{print $$3}' | awk -F '[:]' '{print $$2}')
+BUILD_OWNER	?= $(shell cat ./build.conf | grep build-url | awk -F '[//|@]' '{print $$3}' | awk -F '[:]' '{print $$1}')
+BUILD_TAG	?= $(shell cat ./build.conf | grep build-url | awk -F '[//|@]' '{print $$3}' | awk -F '[:]' '{print $$2}')
 .DEFAULT_GOAL 	:= dev
 
 .PHONY: all

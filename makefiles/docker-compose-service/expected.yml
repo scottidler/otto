@@ -6,9 +6,9 @@ otto:
   tasks:
   - dev
   envs:
-    PYPI_PASSWORD: $(cat ~/.config/pip/pip.conf | grep extra-index-url | awk -F '[//|@]' '{print $3}' | awk -F '[:]' '{print $2}')
+    BUILD_TAG: $(cat ./build.conf | grep build-url | awk -F '[//|@]' '{print $3}' | awk -F '[:]' '{print $2}')
     LOCAL_DUMP_FILE: ./schema/local-db/example-service-pgdump.tar.gz
-    PYPI_USERNAME: $(cat ~/.config/pip/pip.conf | grep extra-index-url | awk -F '[//|@]' '{print $3}' | awk -F '[:]' '{print $1}')
+    BUILD_OWNER: $(cat ./build.conf | grep build-url | awk -F '[//|@]' '{print $3}' | awk -F '[:]' '{print $1}')
     DUMP_CHECK: ${LOCAL_DUMP_FILE}-${LATEST_S3_DUMP_FILE}.check
     LATEST_S3_DUMP_FILE: $(aws s3api list-objects-v2 --bucket "example-pg-dumps" --prefix 'example_service' --query 'sort_by(Contents, &LastModified)[-1].Key' --output=text)
     GIT_DESCRIBE: $(git describe --always --abbrev=7)
