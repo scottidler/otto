@@ -53,8 +53,8 @@ tasks:
 ```
 
 ```bash
-otto sw philo
-# svc=philo
+otto sw web
+# svc=web
 ```
 
 ### Positional parameters and the task-name collision edge
@@ -62,8 +62,8 @@ otto sw philo
 otto splits a multi-task command line by scanning for tokens that match a
 declared task name, before params are bound. A positional value that happens
 to equal another task's name is misread as the start of that task instead of
-being bound to the preceding task's param (`otto sw philo` above binds
-`svc=philo` only because no other task in that ottofile is named `philo`).
+being bound to the preceding task's param (`otto sw web` above binds
+`svc=web` only because no other task in that ottofile is named `web`).
 Avoid naming a task the same as a value you expect to pass positionally to
 another task. See [`docs/commands/positional-parameters.md`](docs/commands/positional-parameters.md)
 for the full declaration shape and a reproduced example of the collision.

@@ -324,7 +324,7 @@ ten (doc).
 
 **Also chased and closed: an apparent data loss that was not one.** The batch
 flagged 352 runs / 446 tasks / 136 projects missing from `~/.otto/otto.db`
-against the `pre-phase11-backup`. Of the 352, 15 are project `clyde` older than
+against the `pre-phase11-backup`. Of the 352, 15 belong to one unrelated local project, older than
 the 30-day retention cutoff (normal), and every one of the other 232 in-window
 rows belongs to a `.tmp*` project: integration-test runs that leaked into the
 real database before the `OTTO_HOME` isolation fix. Filtering for missing rows

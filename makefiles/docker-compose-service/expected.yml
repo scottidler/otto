@@ -74,15 +74,15 @@ tasks:
     bash: ''
   docker-compose-down:
     bash: docker compose -f docker-compose.yaml down
-  docker-compose-with-farnsworth-build:
-    bash: docker compose -f docker-compose.yaml -f docker-compose.farnsworth.yaml up --build -d
-  docker-compose-with-farnsworth:
+  docker-compose-with-sidecar-build:
+    bash: docker compose -f docker-compose.yaml -f docker-compose.sidecar.yaml up --build -d
+  docker-compose-with-sidecar:
     before:
     - get-postgres-dump
-    - docker-compose-with-farnsworth-build
+    - docker-compose-with-sidecar-build
     bash: ''
-  docker-compose-with-farnsworth-down:
-    bash: docker compose -f docker-compose.yaml -f docker-compose.farnsworth.yaml down
+  docker-compose-with-sidecar-down:
+    bash: docker compose -f docker-compose.yaml -f docker-compose.sidecar.yaml down
   docker-compose-clean:
     bash: |-
       echo "Deleting example-service volumes and containers..."

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Otto publishes multi-architecture Docker images to GitHub Container Registry (ghcr.io) on every tagged release. This enables Tatari's base-images to include the otto binary via `COPY --from=` without downloading tarballs.
+Otto publishes multi-architecture Docker images to GitHub Container Registry (ghcr.io) on every tagged release. This enables the organization's shared base images to include the otto binary via `COPY --from=` without downloading tarballs.
 
 ## Registry
 
@@ -58,11 +58,11 @@ ARG TARGETARCH
 COPY --from=binaries ${TARGETARCH}/otto /usr/local/bin/otto
 ```
 
-Base image is `debian:bookworm-slim` to match Tatari's base-images GLIBC version (2.36). The Linux builds run inside a `debian:bookworm` container to ensure binary compatibility.
+Base image is `debian:bookworm-slim` to match the organization's shared base images GLIBC version (2.36). The Linux builds run inside a `debian:bookworm` container to ensure binary compatibility.
 
-## Usage in base-images
+## Usage in shared base images
 
-In Tatari's base-images Dockerfiles:
+In the organization's shared base images Dockerfiles:
 
 ```dockerfile
 ARG OTTO_VERSION="0.6.3"

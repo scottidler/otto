@@ -2,7 +2,7 @@
 
 # Minimal runtime image with pre-built otto binary
 # Binary is provided via build context from CI artifacts
-# Using Debian bookworm to match base-images GLIBC version (2.36)
+# Using Debian bookworm to match the shared base image GLIBC version (2.36)
 
 FROM debian:bookworm-slim
 

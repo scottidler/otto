@@ -23,7 +23,7 @@ There's no way to run `otto ci` against a different project directory from the c
 
 - Running otto from CI scripts that operate across multiple repos
 - Using tools like Claude Code that invoke `otto` with `--manifest-path`-style patterns
-- Running quick checks from a parent directory (`otto -C persona-cli ci`)
+- Running quick checks from a parent directory (`otto -C some-service ci`)
 
 ### Goals
 

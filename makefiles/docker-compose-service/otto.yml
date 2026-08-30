@@ -103,21 +103,21 @@ tasks:
       #!/bin/bash
       docker compose -f docker-compose.yaml down
 
-  docker-compose-with-farnsworth-build:
-    help: "Build Docker Compose services with Farnsworth"
+  docker-compose-with-sidecar-build:
+    help: "Build Docker Compose services with Sidecar"
     bash: |
       #!/bin/bash
-      docker compose -f docker-compose.yaml -f docker-compose.farnsworth.yaml up --build -d
+      docker compose -f docker-compose.yaml -f docker-compose.sidecar.yaml up --build -d
 
-  docker-compose-with-farnsworth:
-    help: "Start Docker Compose services with Farnsworth and database dump"
-    before: [get-postgres-dump, docker-compose-with-farnsworth-build]
+  docker-compose-with-sidecar:
+    help: "Start Docker Compose services with Sidecar and database dump"
+    before: [get-postgres-dump, docker-compose-with-sidecar-build]
 
-  docker-compose-with-farnsworth-down:
-    help: "Stop Docker Compose services with Farnsworth"
+  docker-compose-with-sidecar-down:
+    help: "Stop Docker Compose services with Sidecar"
     bash: |
       #!/bin/bash
-      docker compose -f docker-compose.yaml -f docker-compose.farnsworth.yaml down
+      docker compose -f docker-compose.yaml -f docker-compose.sidecar.yaml down
 
   docker-compose-clean:
     help: "Clean Docker containers and volumes for example-service"

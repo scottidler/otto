@@ -22,12 +22,12 @@ tasks:
 ```
 
 ```bash
-otto sw philo
-# svc=philo
+otto sw web
+# svc=web
 ```
 
 Compare a flag-style param (`-s|--svc: ...`), which requires `otto sw --svc
-philo` or `otto sw -s philo` instead of a bare positional value. Use a
+web` or `otto sw -s web` instead of a bare positional value. Use a
 positional param when the value is the task's one obvious argument (a service
 name, a file path); use a flag when the task has several optional values or
 the call site benefits from a name at the call site.
@@ -51,21 +51,21 @@ tasks:
         help: service name (positional)
     bash: |
       echo "svc=${svc}"
-  philo:
+  web:
     bash: |
-      echo "philo task ran"
+      echo "web task ran"
 ```
 
 ```bash
-$ otto sw philo
+$ otto sw web
 [sw] script.sh: line 17: svc: unbound variable
-[philo] philo task ran
+[web] web task ran
 [sw] failed
-[philo] finished successfully
+[web] finished successfully
 ```
 
-`otto sw philo` did not bind `svc=philo`. It split into two invocations,
-`sw` (positional left unset, task fails) and `philo` (ran as its own task).
+`otto sw web` did not bind `svc=web`. It split into two invocations,
+`sw` (positional left unset, task fails) and `web` (ran as its own task).
 A non-colliding value works exactly as declared:
 
 ```bash

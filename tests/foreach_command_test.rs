@@ -462,7 +462,7 @@ tasks:
 "#,
     );
 
-    let output = otto(&ottofile, &["up", "--svc", "philo"]);
+    let output = otto(&ottofile, &["up", "--svc", "web"]);
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let out = stdout(&output);

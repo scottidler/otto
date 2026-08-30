@@ -70,13 +70,13 @@ docker-compose: get-postgres-dump docker-compose-build
 docker-compose-down:
 	docker compose -f docker-compose.yaml down
 
-docker-compose-with-farnsworth-build:
-	docker compose -f docker-compose.yaml -f docker-compose.farnsworth.yaml up --build -d
+docker-compose-with-sidecar-build:
+	docker compose -f docker-compose.yaml -f docker-compose.sidecar.yaml up --build -d
 
-docker-compose-with-farnsworth: get-postgres-dump docker-compose-with-farnsworth-build
+docker-compose-with-sidecar: get-postgres-dump docker-compose-with-sidecar-build
 
-docker-compose-with-farnsworth-down:
-	docker compose -f docker-compose.yaml -f docker-compose.farnsworth.yaml down
+docker-compose-with-sidecar-down:
+	docker compose -f docker-compose.yaml -f docker-compose.sidecar.yaml down
 
 docker-compose-clean:
 	@echo "Deleting example-service volumes and containers..."

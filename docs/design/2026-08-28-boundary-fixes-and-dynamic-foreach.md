@@ -21,7 +21,7 @@ The otto/otto-dev boundary review (see References) reproduced three defects, one
 Two corrections to the boundary review, found during design research:
 
 - **Task stdin already IS a tty** under a real pty (verified with `script -qec`). Only stdout/stderr are piped (`src/executor/scheduler.rs:938-940`); there is no stdin redirection anywhere in src/. The review measured from a non-tty context. The tty feature is therefore smaller than the review implies: inherit stdout/stderr, skip capture/prefix, run exclusively.
-- **Positional arguments already work.** `ParamType::POS` is wired end-to-end (`src/cfg/param.rs:342` makes bare-named params positional; `src/cli/parser.rs:1376` builds the clap positional). Verified: a task with `params: {svc: {help: ...}}` accepts `otto sw philo` -> `svc=philo`. otto-dev's failure means the task didn't declare one. Reframed as documentation (Phase 8), with one real sharp edge to document: `partitions()` splits args on task names, so a positional value that collides with a task name mis-partitions.
+- **Positional arguments already work.** `ParamType::POS` is wired end-to-end (`src/cfg/param.rs:342` makes bare-named params positional; `src/cli/parser.rs:1376` builds the clap positional). Verified: a task with `params: {svc: {help: ...}}` accepts `otto sw web` -> `svc=web`. otto-dev's failure means the task didn't declare one. Reframed as documentation (Phase 8), with one real sharp edge to document: `partitions()` splits args on task names, so a positional value that collides with a task name mis-partitions.
 
 ### Problem
 
