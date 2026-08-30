@@ -12,6 +12,10 @@ use std::sync::Arc;
 enum Route {
     Body(Vec<u8>),
     Stall,
+    /// One byte every `0` interval, forever, under a `Content-Length` it never
+    /// reaches. The between-bytes read timeout never fires because bytes keep
+    /// arriving; only a whole-transfer budget can end this.
+    Dribble(Duration),
 }
 
 /// Minimal HTTP/1.1 stub bound to an ephemeral localhost port. It lets the
@@ -46,6 +50,19 @@ fn serve(mut stream: std::net::TcpStream, routes: &HashMap<String, Route>) {
                 body.len()
             );
             let _ = stream.write_all(body);
+        }
+        Some(Route::Dribble(interval)) => {
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.flush();
+            loop {
+                if stream.write_all(b"x").is_err() || stream.flush().is_err() {
+                    return;
+                }
+                std::thread::sleep(*interval);
+            }
         }
         Some(Route::Stall) => {
             // Headers promise a body that never arrives: the classic stall.
@@ -121,6 +138,76 @@ fn command() -> UpgradeCommand {
     }
 }
 
+/// ETXTBSY is reproducible on Linux: hold a write descriptor open on an
+/// executable and exec fails with errno 26 for as long as the handle lives.
+///
+/// This pins the two things the retry ceiling change is for: the wait is bounded
+/// by wall clock and not by an attempt count, and when the budget expires the
+/// error says what happened. The previous code returned a bare
+/// "Failed to execute new binary" after an unmeasured 500ms.
+#[cfg(unix)]
+#[test]
+fn a_binary_held_open_for_writing_fails_within_the_budget_and_names_the_cause() {
+    use std::io::Write;
+
+    let temp = TempDir::new().expect("tempdir");
+    let binary = temp.path().join("otto");
+    // A real, runnable executable, so the only reason exec can fail is the
+    // descriptor the test is about to hold.
+    let mut handle = fs::File::create(&binary).expect("create");
+    handle.write_all(b"#!/bin/sh\nexit 0\n").expect("write");
+    handle.flush().expect("flush");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    // `handle` is still open for writing here. That is what produces ETXTBSY.
+    let upgrader = command();
+    let budget = Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let result = upgrader.verify_binary_within(&binary, budget);
+    let elapsed = started.elapsed();
+
+    // If this platform did not actually produce ETXTBSY the test proves nothing,
+    // so say so rather than passing vacuously.
+    let Err(err) = result else {
+        drop(handle);
+        panic!("expected ETXTBSY while a write descriptor was open; exec succeeded instead");
+    };
+    let message = format!("{err:#}");
+
+    assert!(
+        message.contains("held open for writing by"),
+        "the error must explain ETXTBSY rather than restating errno: {message}"
+    );
+    assert!(
+        message.contains(&binary.display().to_string()),
+        "the error must name the binary it could not run: {message}"
+    );
+    assert!(
+        message.contains("Nothing was installed"),
+        "the error must tell the user their current otto is untouched: {message}"
+    );
+
+    // Bounded by the budget, not by an attempt count. The generous upper bound is
+    // process-spawn overhead per attempt, which is not what is being asserted;
+    // the point is that it terminates near the budget rather than at some
+    // attempt-count-derived time unrelated to it.
+    assert!(
+        elapsed >= budget.mul_f32(0.5),
+        "gave up far too early: {elapsed:?} against a {budget:?} budget"
+    );
+    assert!(
+        elapsed < budget * 8,
+        "the budget was not enforced: {elapsed:?} against a {budget:?} budget"
+    );
+
+    // Releasing the descriptor makes the same exec succeed, which proves the
+    // descriptor was the cause and the binary itself was always fine.
+    drop(handle);
+    upgrader
+        .verify_binary_within(&binary, Duration::from_secs(2))
+        .expect("the same binary must verify once the write handle is closed");
+}
+
 /// Run a just-written binary's `--version`, retrying on ETXTBSY.
 ///
 /// These tests write an executable and immediately exec it. Under a
@@ -133,19 +220,23 @@ fn command() -> UpgradeCommand {
 /// load - observed twice in this plan's own phase runs, each time passing
 /// on rerun and in isolation.
 fn run_version(path: &Path) -> String {
-    for attempt in 1..=VERIFY_ATTEMPTS {
+    let started = std::time::Instant::now();
+    loop {
         match Command::new(path).arg("--version").output() {
             Ok(output) => {
                 assert!(output.status.success(), "installed binary failed --version");
                 return String::from_utf8_lossy(&output.stdout).trim().to_string();
             }
-            Err(err) if cfg!(unix) && err.raw_os_error() == Some(ETXTBSY) && attempt < VERIFY_ATTEMPTS => {
+            Err(err)
+                if cfg!(unix)
+                    && err.raw_os_error() == Some(ETXTBSY)
+                    && started.elapsed() + VERIFY_RETRY_DELAY <= VERIFY_BUSY_BUDGET =>
+            {
                 std::thread::sleep(VERIFY_RETRY_DELAY);
             }
-            Err(err) => panic!("run installed binary: {err}"),
+            Err(err) => panic!("run installed binary after {:?}: {err}", started.elapsed()),
         }
     }
-    unreachable!("run_version exhausted retries without returning or panicking")
 }
 
 #[tokio::test]
@@ -236,6 +327,53 @@ async fn download_rejects_a_non_success_status() {
         .expect_err("a 404 must not be treated as an archive");
 
     assert!(err.to_string().contains("Download failed"), "unexpected error: {}", err);
+}
+
+/// A server that keeps sending, just far too slowly.
+///
+/// This is the case the between-bytes `READ_TIMEOUT` structurally cannot catch:
+/// every chunk resets it, so the transfer runs forever. Before the whole-transfer
+/// budget existed this was measured past 150 seconds and had no upper bound at
+/// all. The test dribbles fast enough that the read timeout is never close to
+/// firing, so the only thing that can end the run is the budget.
+#[tokio::test]
+async fn a_download_that_dribbles_forever_is_ended_by_the_whole_transfer_budget() {
+    let mut routes = HashMap::new();
+    routes.insert("/otto.tar.gz".to_string(), Route::Dribble(Duration::from_millis(10)));
+    let base = spawn_stub(routes);
+
+    // Read timeout an order of magnitude longer than the dribble interval: if
+    // this test passes because of the read timeout rather than the budget, that
+    // is a bug in the test and this is what rules it out.
+    let client = build_http_client(CONNECT_TIMEOUT, Duration::from_secs(5)).unwrap();
+    let budget = Duration::from_millis(500);
+
+    let started = SystemTime::now();
+    let err = command()
+        .download_with_progress_within(&client, &format!("{}/otto.tar.gz", base), budget)
+        .await
+        .expect_err("a download that never finishes must be ended by the budget");
+    let elapsed = started.elapsed().unwrap();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("exceeded its"),
+        "the error must say the budget was exceeded, not blame the connection: {message}"
+    );
+    assert!(
+        message.contains("Nothing was installed"),
+        "the error must tell the user their current otto is untouched: {message}"
+    );
+    // Bounded by the budget, and by a margin well under the read timeout, which
+    // proves the budget is what ended it.
+    assert!(
+        elapsed >= budget,
+        "ended before the budget was spent: {elapsed:?} against {budget:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the budget was not enforced: {elapsed:?} against {budget:?}"
+    );
 }
 
 #[tokio::test]

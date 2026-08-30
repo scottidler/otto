@@ -30,9 +30,19 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Whole-request budget for the small metadata requests (release JSON, checksum
-/// sibling). The archive download deliberately has no total cap, only the
-/// between-bytes `READ_TIMEOUT`, so a slow link is not mistaken for a stall.
+/// sibling).
 const METADATA_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Whole-transfer budget for the release archive.
+///
+/// The between-bytes `READ_TIMEOUT` alone does not bound anything: a server
+/// dribbling one byte every 59 seconds resets it forever, and an `otto Upgrade`
+/// against one runs until the user kills it. Measured at over 150 seconds
+/// against a 1-byte-per-20s stream before this existed. The cap is deliberately
+/// generous - a release archive is a few megabytes, so ten minutes is far
+/// outside any honest slow link, and the point is to terminate rather than to
+/// be tight.
+const DOWNLOAD_BUDGET: Duration = Duration::from_secs(600);
 
 /// ETXTBSY: exec of a file that is still open for writing anywhere on the
 /// system. It is transient by definition - a `fork` in another thread that
@@ -40,9 +50,16 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 /// verifying a freshly written binary retries rather than declaring it broken.
 const ETXTBSY: i32 = 26;
 
-/// Attempts and spacing for that retry.
-const VERIFY_ATTEMPTS: u32 = 10;
+/// Spacing and total budget for that retry.
+///
+/// A wall-clock budget rather than an attempt count: what matters is how long a
+/// user waits before otto gives up, and an attempt count says nothing about that
+/// (10 attempts at 50ms was a 500ms ceiling nobody had measured against the
+/// thing it is racing). The holder is another process momentarily inheriting a
+/// write descriptor, so the wait is bounded by that process's scheduling, not by
+/// a number of tries.
 const VERIFY_RETRY_DELAY: Duration = Duration::from_millis(50);
+const VERIFY_BUSY_BUDGET: Duration = Duration::from_secs(2);
 
 /// A downloaded release archive and the directory that owns it.
 ///
@@ -628,7 +645,19 @@ impl UpgradeCommand {
     }
 
     async fn download_with_progress(&self, client: &Client, url: &str) -> Result<DownloadedArchive> {
-        debug!("download_with_progress: url={}", url);
+        self.download_with_progress_within(client, url, DOWNLOAD_BUDGET).await
+    }
+
+    /// `download_with_progress` with the whole-transfer budget injected, so a
+    /// test can prove the cap is enforced without waiting ten minutes.
+    async fn download_with_progress_within(
+        &self,
+        client: &Client,
+        url: &str,
+        budget: Duration,
+    ) -> Result<DownloadedArchive> {
+        debug!("download_with_progress_within: url={} budget={:?}", url, budget);
+        let started = std::time::Instant::now();
         let response = client
             .get(url)
             .send()
@@ -655,6 +684,22 @@ impl UpgradeCommand {
 
         use futures_util::StreamExt;
         while let Some(chunk) = stream.next().await {
+            let elapsed = started.elapsed();
+            if elapsed > budget {
+                pb.abandon_with_message("Download exceeded its time budget");
+                log::warn!(
+                    "download_with_progress_within: budget {:?} exceeded after {:?}, {} bytes",
+                    budget,
+                    elapsed,
+                    downloaded
+                );
+                return Err(eyre!(
+                    "Download of {url} exceeded its {budget:?} budget after {elapsed:?} \
+                     ({downloaded} of {total_size} bytes). Nothing was installed; the current \
+                     otto is untouched. The connection was delivering data, just far too slowly \
+                     to finish."
+                ));
+            }
             let chunk = chunk.with_context(|| format!("Download interrupted for {}", url))?;
             file.write_all(&chunk)?;
             downloaded += chunk.len() as u64;
@@ -780,6 +825,12 @@ impl UpgradeCommand {
             fs::set_permissions(&extracted_binary, perms)?;
         }
 
+        // Close the archive before exec'ing what came out of it. `archive` still
+        // owns the decoder and the underlying `File` at this point; dropping it
+        // removes otto's own descriptors from the set of things that could be
+        // holding a write handle when the verify below execs.
+        drop(archive);
+
         // Verify the new binary works
         self.verify_binary(&extracted_binary)?;
 
@@ -788,29 +839,63 @@ impl UpgradeCommand {
     }
 
     fn verify_binary(&self, binary_path: &Path) -> Result<()> {
-        debug!("verify_binary: path={}", binary_path.display());
+        self.verify_binary_within(binary_path, VERIFY_BUSY_BUDGET)
+    }
+
+    /// `verify_binary` with the ETXTBSY budget injected, so a test can prove the
+    /// budget is enforced without waiting the production two seconds.
+    fn verify_binary_within(&self, binary_path: &Path, busy_budget: Duration) -> Result<()> {
+        debug!(
+            "verify_binary_within: path={} busy_budget={:?}",
+            binary_path.display(),
+            busy_budget
+        );
         use std::process::Command;
 
-        let mut attempt = 0;
+        let started = std::time::Instant::now();
+        let mut attempts = 0u32;
 
         loop {
-            attempt += 1;
+            attempts += 1;
 
             match Command::new(binary_path).arg("--version").output() {
                 Ok(output) => {
                     if !output.status.success() {
                         return Err(eyre!("New binary failed to run --version"));
                     }
+                    debug!("verify_binary_within: ok after {} attempt(s)", attempts);
                     return Ok(());
                 }
                 Err(err) => {
                     let busy = cfg!(unix) && err.raw_os_error() == Some(ETXTBSY);
-                    if busy && attempt < VERIFY_ATTEMPTS {
-                        debug!("verify_binary: ETXTBSY on attempt {}, retrying", attempt);
+                    if !busy {
+                        return Err(err).context("Failed to execute new binary");
+                    }
+                    let elapsed = started.elapsed();
+                    if elapsed + VERIFY_RETRY_DELAY <= busy_budget {
+                        debug!(
+                            "verify_binary_within: ETXTBSY after {:?} (attempt {}), retrying",
+                            elapsed, attempts
+                        );
                         std::thread::sleep(VERIFY_RETRY_DELAY);
                         continue;
                     }
-                    return Err(err).context("Failed to execute new binary");
+                    // Budget spent. Say what ETXTBSY actually means, because
+                    // "Text file busy" tells a user nothing about what to do.
+                    log::warn!(
+                        "verify_binary_within: gave up after {:?} and {} attempts, still ETXTBSY",
+                        elapsed,
+                        attempts
+                    );
+                    return Err(err).context(format!(
+                        "Failed to execute the new binary at {}: still held open for writing by \
+                         another process after {:?} ({} attempts). Nothing was installed; the \
+                         current otto is untouched. Retry the upgrade, and if it persists check \
+                         for a file scanner or backup agent watching that directory.",
+                        binary_path.display(),
+                        elapsed,
+                        attempts
+                    ));
                 }
             }
         }
