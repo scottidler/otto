@@ -848,13 +848,31 @@ mod tests {
         }
     }
 
+    /// Run a just-written binary's `--version`, retrying on ETXTBSY.
+    ///
+    /// These tests write an executable and immediately exec it. Under a
+    /// parallel `cargo test`, another thread's `fork` can momentarily inherit
+    /// the still-open write descriptor, and the exec fails with ETXTBSY
+    /// (`ExecutableFileBusy`) even though the file is complete and correct.
+    /// Production hits the same race, which is why `verify_binary` retries on
+    /// exactly this errno; this helper needs the same treatment for the same
+    /// reason. Without it `rollback_restores_the_previous_binary` flakes under
+    /// load - observed twice in this plan's own phase runs, each time passing
+    /// on rerun and in isolation.
     fn run_version(path: &Path) -> String {
-        let output = Command::new(path)
-            .arg("--version")
-            .output()
-            .expect("run installed binary");
-        assert!(output.status.success(), "installed binary failed --version");
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
+        for attempt in 1..=VERIFY_ATTEMPTS {
+            match Command::new(path).arg("--version").output() {
+                Ok(output) => {
+                    assert!(output.status.success(), "installed binary failed --version");
+                    return String::from_utf8_lossy(&output.stdout).trim().to_string();
+                }
+                Err(err) if cfg!(unix) && err.raw_os_error() == Some(ETXTBSY) && attempt < VERIFY_ATTEMPTS => {
+                    std::thread::sleep(VERIFY_RETRY_DELAY);
+                }
+                Err(err) => panic!("run installed binary: {err}"),
+            }
+        }
+        unreachable!("run_version exhausted retries without returning or panicking")
     }
 
     #[tokio::test]
