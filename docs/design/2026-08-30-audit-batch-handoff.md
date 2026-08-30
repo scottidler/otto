@@ -2,7 +2,7 @@
 
 **Author:** Scott A. Idler
 **Date:** 2026-08-30
-**Status:** In Progress — batches 1-6 complete, 7-14 outstanding
+**Status:** In Progress — batches 1-7 complete, 8-14 outstanding
 **Subject doc:** `docs/design/2026-06-10-code-review-remediation.md` (`Status: Implemented`)
 **HEAD at handoff:** `a567af9` (batches 3-4 audited at `6b28b52`, fixed through `16c2975`)
 
@@ -38,7 +38,7 @@ verdicts than items is rejected and re-run.
 | 4 | Phase 3 — Containment (injection, deletion, output) | 361-379 | 9 | **DONE** — 2 must-fix, fixed at `42704a9`, `16c2975` |
 | 5 | Phase 4 — State and DB integrity | 380-403 | 10 | **DONE** — 2 must-fix, fixed at `a10f911`, `0254baa` |
 | 6 | Phase 5 — Upgrade and HTTP safety | 404-413 | 4 | **DONE** — 1 must-fix, fixed at `e71638e` |
-| 7 | Phase 6 — cfg correctness | 414-448 | 10 | TODO |
+| 7 | Phase 6 — cfg correctness | 414-448 | 10 | **DONE** — 1 must-fix, fixed at `7f7ffd5` |
 | 8 | Phase 7 — Makefile converter truth | 449-464 | 7 | TODO |
 | 9 | Phase 8 — TUI and CLI surface | 465-485 | 10 | TODO |
 | 10 | Phase 9 — Repo and dependency hygiene | 486-502 | 7 | TODO |
@@ -370,9 +370,59 @@ propagates with `?`. The real residue is narrower: `clean.rs` `continue`s past a
 refusal so Clean can exit 0 having refused, and that branch is reachable only by
 a TOCTOU race since both scans already skip symlinks.
 
+### Batch 7 (Phase 6) — 1 must-fix, 4 cheap-win
+
+All six phase success criteria hold on a real binary, including the per-item
+foreach cache. The defects were in bullet 10.
+
+**Must-fix, and the batch reported it backwards.** Batch 7 filed it as "a
+legitimate `otto.envs` variable in a foreach path hard-fails, while the identical
+construct in a non-foreach task runs clean". The non-foreach task running clean
+was itself the bug. Measured: `input: ["${SRCDIR}/a.txt"]` expanded nothing, so
+the glob matched no file, the task tracked no inputs, and it re-ran on EVERY
+invocation while reporting success; the same task with a literal `src/a.txt`
+skipped as up to date. Meanwhile `examples/environment-variables/otto.yml` ships
+`output: ["${BUILD_DIR}/${PROJECT_NAME}"]`, so variables in paths are a
+documented feature that silently did nothing.
+
+So the fix is not "stop the foreach task erroring", it is "make both work". Fixed
+at `7f7ffd5`: foreach resolves its loop variable and preserves the rest,
+`expand_env_in_paths` resolves those against the task's evaluated environment
+before globbing, undefined is an error naming task/field/path. One shipped test
+deliberately inverted, disclosed in the commit.
+
+**Generalise this, and it is the fourth lesson for the prompt: a control that
+"runs clean" is not automatically a passing control.** When two paths disagree,
+establish which one is CORRECT before assuming the failing one is wrong. Both a
+reviewer seat and the batch lead read "runs clean" as "works".
+
+**Placement decision, which bullet 10 told itself to record and never did.** The
+check runs at task construction, not config load, because that is the first point
+a task's own `envs:` merge with the globals; validating earlier would guess at
+task-level envs and reject valid ottofiles. Cost: `--help` and `--list-subtasks`
+do not build tasks and so do not report a bad path variable. Batch 7 filed the
+run-time-vs-load-time gap as a second must-fix; it is really this decision, now
+made and written down, plus a comment that was wrong and is now accurate.
+
+Cheap-wins: dedent coverage widened past U+2002 to five multibyte widths plus a
+mixed indent, and a non-bash shebang round-trip added (`4bd6b25`) - each shipped
+test pinned exactly the one input that produced its original panic, which is
+narrower than the defect. Bullet 9's `envs.get` evidence is stale: it returns
+`env.rs:505`, a CHECKED lookup added by `16c2975`, a later commit in this same
+audit. Fourth instance of a criterion true only as of the commit that measured
+it.
+
+Deliberately not changed: the multi-action-source error names the sources but not
+the task, because the `TaskSpec` deserializer cannot see the map key and serde's
+`at line 5 column 3` already locates it.
+
 ## Standing rules for whoever continues
 
 ### Verification standard
+- **A control that "runs clean" is not automatically a passing control.** When
+  two code paths disagree, establish which one is correct before assuming the
+  failing one is wrong. Batch 7 filed a must-fix backwards on exactly this: the
+  "working" path was silently doing nothing.
 - `otto ci` with the Bash sandbox **disabled**, or `sccache` fails with
   `Operation not permitted (os error 1)` and reads as a false code failure.
 - Run under two environments: `env -u OTTO_HOME -u OTTO_DB_PATH otto ci` and
