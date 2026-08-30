@@ -643,7 +643,16 @@ impl StateManager {
                     .optional()?
                     .unwrap_or((None, None));
 
-                let last_status = last_status_str.and_then(|s| TaskStatus::parse(&s));
+                // Surfaced, not nulled. `and_then` turned an unrecognised status
+                // into "this task has no last status", so a corrupt row rendered
+                // as a clean stats report. Same rule as `row_to_task_record`.
+                let last_status = match last_status_str {
+                    Some(ref s) => Some(
+                        TaskStatus::parse(s)
+                            .ok_or_else(|| eyre::eyre!("unknown task status {s:?} in the task stats query"))?,
+                    ),
+                    None => None,
+                };
 
                 stats.push(TaskStats {
                     project_id,
@@ -801,7 +810,16 @@ impl StateManager {
                     .optional()?
                     .unwrap_or((None, None));
 
-                let last_status = last_status_str.and_then(|s| TaskStatus::parse(&s));
+                // Surfaced, not nulled. `and_then` turned an unrecognised status
+                // into "this task has no last status", so a corrupt row rendered
+                // as a clean stats report. Same rule as `row_to_task_record`.
+                let last_status = match last_status_str {
+                    Some(ref s) => Some(
+                        TaskStatus::parse(s)
+                            .ok_or_else(|| eyre::eyre!("unknown task status {s:?} in the task stats query"))?,
+                    ),
+                    None => None,
+                };
 
                 stats.push(TaskStats {
                     project_id,
