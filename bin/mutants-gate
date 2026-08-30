@@ -44,17 +44,46 @@ if ! command -v cargo-mutants >/dev/null 2>&1; then
     exit 127
 fi
 
+# The ratchet's scope, unless the caller named files explicitly.
+SCOPE="mutants-scope.txt"
+scope_args=()
+if [[ ! " ${extra[*]+"${extra[*]}"} " =~ " --file " ]]; then
+    if [[ ! -f "$SCOPE" ]]; then
+        echo "mutants-gate: $SCOPE is missing; it defines which files the ratchet covers" >&2
+        exit 1
+    fi
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        if [[ ! -f "$line" ]]; then
+            # A scope entry naming a file that no longer exists would silently
+            # shrink coverage, which is the failure mode this whole gate is for.
+            echo "mutants-gate: $SCOPE names '$line', which does not exist" >&2
+            exit 1
+        fi
+        scope_args+=(--file "$line")
+    done < "$SCOPE"
+    if [[ ${#scope_args[@]} -eq 0 ]]; then
+        echo "mutants-gate: $SCOPE lists no files; the gate would pass without testing anything" >&2
+        exit 1
+    fi
+    echo "mutants-gate: scope is $((${#scope_args[@]} / 2)) file(s) from $SCOPE"
+fi
+
 echo "mutants-gate: running cargo mutants (this is slow; it reruns the suite once per mutant)"
 
 # cargo-mutants exits non-zero when mutants survive, which is the normal case
 # here - the baseline decides whether that is a failure. Capture the code
 # immediately; anything between the command and `$?` loses it.
 set +e
-cargo mutants --output "$OUT_DIR" "${extra[@]+"${extra[@]}"}"
+cargo mutants --output "$OUT_DIR" "${scope_args[@]+"${scope_args[@]}"}" "${extra[@]+"${extra[@]}"}"
 mutants_rc=$?
 set -e
 
-MISSED="$OUT_DIR/missed.txt"
+# `cargo mutants --output DIR` writes its results to DIR/mutants.out, one level
+# down from DIR itself. Reading DIR/missed.txt finds nothing and, without the
+# existence check below, would have read as "no mutants survived".
+RESULTS="$OUT_DIR/mutants.out"
+MISSED="$RESULTS/missed.txt"
 if [[ ! -f "$MISSED" ]]; then
     # No missed.txt means cargo-mutants did not get far enough to produce a
     # verdict. That is a real failure, not an empty survivor set: treating a
@@ -64,12 +93,42 @@ if [[ ! -f "$MISSED" ]]; then
     exit 1
 fi
 
+# Existence is not enough, and this gate proved it on itself. A run killed
+# part-way through leaves all four outcome files present and EMPTY, and an
+# earlier version of this script read that as "nothing survived" and passed - the
+# exact defect class it was written to eliminate. The verdict is only meaningful
+# if the outcomes account for the mutants cargo-mutants said it would test.
+outcome_total=0
+for outcome in caught missed timeout unviable; do
+    f="$RESULTS/$outcome.txt"
+    [[ -f "$f" ]] || { echo "mutants-gate: $f does not exist; the run produced no verdict" >&2; exit 1; }
+    outcome_total=$(( outcome_total + $(wc -l < "$f") ))
+done
+
+if [[ "$outcome_total" -eq 0 ]]; then
+    echo "mutants-gate: the run tested ZERO mutants. That is a failure, not a pass." >&2
+    echo "  cargo mutants exited $mutants_rc. Check $RESULTS/debug.log - a killed or timed-out" >&2
+    echo "  run leaves every outcome file present and empty." >&2
+    exit 1
+fi
+
+# cargo-mutants announces "Found N mutants to test" before it starts. If the
+# outcomes do not add up to N the run did not finish, however it exited.
+found=$(grep -oE 'Found [0-9]+ mutants to test' "$RESULTS/debug.log" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || true)
+if [[ -n "$found" && "$outcome_total" -ne "$found" ]]; then
+    echo "mutants-gate: incomplete run. cargo-mutants found $found mutants but only $outcome_total have outcomes." >&2
+    echo "  A partial run cannot clear the gate; rerun without a wall-clock cap." >&2
+    exit 1
+fi
+
+echo "mutants-gate: $outcome_total mutants accounted for (${found:-unknown} found)"
+
 # Sorted so the comparison is order-independent; cargo-mutants does not promise
 # a stable order between runs.
-sort -u "$MISSED" > "$OUT_DIR/missed.sorted"
+sort -u "$MISSED" > "$RESULTS/missed.sorted"
 
 if [[ "$WRITE" == "1" ]]; then
-    cp "$OUT_DIR/missed.sorted" "$BASELINE"
+    cp "$RESULTS/missed.sorted" "$BASELINE"
     echo "mutants-gate: baseline written to $BASELINE ($(wc -l < "$BASELINE") surviving mutants)"
     exit 0
 fi
@@ -79,13 +138,13 @@ if [[ ! -f "$BASELINE" ]]; then
     exit 1
 fi
 
-sort -u "$BASELINE" > "$OUT_DIR/baseline.sorted"
+sort -u "$BASELINE" > "$RESULTS/baseline.sorted"
 
 # Lines in this run's survivors that are not in the baseline.
-new_survivors=$(comm -23 "$OUT_DIR/missed.sorted" "$OUT_DIR/baseline.sorted" || true)
+new_survivors=$(comm -23 "$RESULTS/missed.sorted" "$RESULTS/baseline.sorted" || true)
 # Lines in the baseline that no longer survive: progress, reported so the
 # baseline can be tightened.
-fixed=$(comm -13 "$OUT_DIR/missed.sorted" "$OUT_DIR/baseline.sorted" || true)
+fixed=$(comm -13 "$RESULTS/missed.sorted" "$RESULTS/baseline.sorted" || true)
 
 if [[ -n "$fixed" ]]; then
     echo
@@ -104,4 +163,4 @@ if [[ -n "$new_survivors" ]]; then
 fi
 
 echo
-echo "mutants-gate: OK. $(wc -l < "$OUT_DIR/missed.sorted") surviving mutants, all known to $BASELINE."
+echo "mutants-gate: OK. $(wc -l < "$RESULTS/missed.sorted") surviving mutants, all known to $BASELINE."

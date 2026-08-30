@@ -1,0 +1,16 @@
+# Files under the mutation ratchet, one per line.
+#
+# The gate runs cargo-mutants over exactly these files and compares the
+# survivors against mutants-baseline.txt. Scope is explicit and committed
+# because a baseline is only meaningful next to the scope that produced it: a
+# later run over more files would otherwise report every survivor in the new
+# files as a regression.
+#
+# Crate-wide is 2441 mutants at ~17.6s each, roughly twelve hours, so this list
+# grows deliberately rather than all at once. Adding a file is a reviewable
+# diff, and so is the baseline change that comes with it.
+#
+# Order of expansion follows where hollow tests were actually found: the
+# scheduler's gates, env interpolation, the parser surface.
+
+src/naming.rs

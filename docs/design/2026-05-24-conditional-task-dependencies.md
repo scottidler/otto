@@ -455,12 +455,28 @@ fn compute_task_deps_from_specs(
 
 Validation step (also in this function or immediately after) checks every edge's `task` field resolves to a real task, AND that no `(task, *)` pair has both `when: success` and `when: failure` on the same dependent. Unchanged from today in spirit, just walks `Vec<EdgeSpec>` instead of `Vec<String>` and adds the new pair check.
 
-**Correction (2026-08-30): this validation pass was never built.**
-`git grep` for a same-source paired-edge check across `src/cfg/` and
-`src/executor/` finds nothing; a task with both `{task: X, when: success}`
-and `{task: X, when: failure}` in its `before:`/`after:` list loads without
-complaint and reproduces the perpetually-`Skipped` symptom described above.
-Still open, unclaimed by any shipped phase.
+**Correction (2026-08-30): built as described.** `Parser::compute_task_deps_from_specs`
+rejects it at config load, `src/cli/parser/params.rs:322-352`: a task holding both
+`{task: X, when: success}` and `{task: X, when: failure}` exits 1 with
+`Task '<dependent>' depends on '<source>' with both 'when: success' and 'when: failure'`
+and a hint pointing at `when: always`. Pinned by three tests, cited by name
+rather than by line because this document's line anchors have rotted three times:
+`parser_tests_b.rs::test_paired_success_and_failure_edges_are_rejected`,
+`parser_tests_b.rs::test_distinct_sources_with_opposite_conditions_are_accepted`
+(the negative case: distinct sources, or `always` beside a conditional, must
+still be accepted), and
+`skip_provenance_test.rs::test_paired_success_and_failure_edges_are_rejected_at_config_load`.
+
+**Retracted (2026-08-30, same day): an earlier correction here claimed this pass
+"was never built".** Every clause of it was false, and it was written in the same
+commit (`7e14053`) that the check was already present in. The mechanism is
+recorded because it is the failure this document keeps repeating: the grep behind
+it searched `src/cfg/` and `src/executor/`, and the check lives in `src/cli/`. A
+grep scoped to the wrong subtree returns nothing and reads exactly like an
+absence. The claim also contradicted this same design doc's own Phase 11 section,
+which cites the third test above by name. The "still open, unclaimed by any
+shipped phase" line that closed the retracted paragraph goes with it: the pass is
+shipped, and Phase 4 is the phase that claimed it.
 
 #### `executor::Task` construction
 
