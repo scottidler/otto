@@ -233,6 +233,25 @@ tasks:
     );
 }
 
+/// A NON-bash shebang with args round-trips too.
+///
+/// The bug was a prefix match on `"#!/bin/bash"`, so the shipped case pins the
+/// one interpreter the buggy code special-cased. An interpreter it never matched
+/// exercises the other side of the same branch. Added by the batched audit,
+/// batch 7 of 14.
+#[test]
+fn config_with_non_bash_shebang_args_roundtrips() {
+    assert_roundtrips(
+        r#"
+tasks:
+  build:
+    action: |
+      #!/usr/bin/env python3 -u
+      print("hello")
+"#,
+    );
+}
+
 /// A bare auto-added shebang (no args) is still recognized as `bash:` sugar
 /// and stays terse on re-emit rather than falling back to `action:`.
 #[test]

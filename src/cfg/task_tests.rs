@@ -719,6 +719,41 @@ fn deserialize_script_string_dedents_multibyte_whitespace_without_panicking() {
     assert_eq!(deserialize_script_string(script), "a\nb");
 }
 
+/// The same, across every multibyte whitespace character likely to reach a
+/// script body, plus a mixed multibyte/ASCII indent.
+///
+/// The shipped case pinned U+2002 alone, which is the character that produced
+/// the original panic - but the defect was byte-vs-char slicing, so any
+/// multibyte indent reaches it. Widened by the batched audit, batch 7 of 14.
+#[test]
+fn deserialize_script_string_dedents_every_multibyte_whitespace_width() {
+    // (label, the character, its UTF-8 length in bytes)
+    let widths = [
+        ("U+00A0 NO-BREAK SPACE", '\u{00A0}', 2),
+        ("U+2002 EN SPACE", '\u{2002}', 3),
+        ("U+2003 EM SPACE", '\u{2003}', 3),
+        ("U+2009 THIN SPACE", '\u{2009}', 3),
+        ("U+3000 IDEOGRAPHIC SPACE", '\u{3000}', 3),
+    ];
+
+    for (label, ch, want_len) in widths {
+        assert_eq!(ch.len_utf8(), want_len, "{label}: fixture assumption wrong");
+        let script = format!("  a\n{ch}b");
+        assert_eq!(
+            deserialize_script_string(&script),
+            "a\nb",
+            "{label} panicked or mis-dedented"
+        );
+
+        // Mixed indent: a multibyte character followed by ASCII, so the byte
+        // offset and the char offset disagree by more than one. Both lines carry
+        // a two-CHARACTER indent, so both dedent fully - which is the point: the
+        // strip is counted in characters, not bytes.
+        let mixed = format!("  a\n{ch} b");
+        assert_eq!(deserialize_script_string(&mixed), "a\nb", "{label} mixed indent");
+    }
+}
+
 /// `tty:` on a foreach task means "give each of these the terminal", so every
 /// generated subtask carries it. The exclusivity gate then serializes them
 /// even under `parallel: true`; that is documented behavior, not an error.
