@@ -818,3 +818,27 @@ async fn a_stale_staging_file_from_a_dead_pid_is_reaped() {
     );
     assert_eq!(run_version(&target), "otto 9.9.9");
 }
+
+/// `--help` must never render the value of `GITHUB_TOKEN`.
+///
+/// clap renders an env-backed arg as `[env: VAR=<value>]` by default, so
+/// `otto Upgrade --help` printed the user's live token to stdout - into terminal
+/// scrollback, CI logs, and any transcript of a help invocation. Observed during
+/// the audit against a real `ghp_`-prefixed token on this machine. Found by the
+/// batched audit, batch 9 of 14.
+#[test]
+fn help_never_renders_the_github_token_value() {
+    use clap::CommandFactory;
+
+    const SENTINEL: &str = "ghp_SENTINEL_DO_NOT_PRINT_123456";
+    // SAFETY: single-threaded test process; the var is removed immediately after.
+    unsafe { std::env::set_var("GITHUB_TOKEN", SENTINEL) };
+    let help = UpgradeCommand::command().render_long_help().to_string();
+    unsafe { std::env::remove_var("GITHUB_TOKEN") };
+
+    assert!(!help.contains(SENTINEL), "--help leaked the token value:\n{help}");
+    assert!(
+        help.contains("github-token"),
+        "the flag itself must still be documented:\n{help}"
+    );
+}
