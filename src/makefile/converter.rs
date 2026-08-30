@@ -110,6 +110,27 @@ impl OttoConverter {
                 );
             }
 
+            // `?=` assigns only if the variable has no value yet, so make lets
+            // the ambient environment win. otto's `envs:` is "the system
+            // environment minus every declared key" (`cfg/env.rs`), so a
+            // declared key unconditionally shadows the ambient one and the
+            // conditional half is lost. Measured against real make:
+            //   VERSION=9.9 make -s show  -> 9.9
+            //   VERSION=9.9 otto show     -> 1.0
+            // `+=` already warns for exactly this class of loss; `?=` warned
+            // for nothing at all, which is the silent corruption this phase's
+            // "every silent corruption above becomes a warning at minimum"
+            // criterion exists to forbid.
+            if var.assignment_type == AssignmentType::Conditional {
+                self.warn(
+                    var.line,
+                    format!(
+                        "`{} ?=` is conditional in make; otto always uses this value, ignoring any `{}` already in the environment",
+                        var.name, var.name
+                    ),
+                );
+            }
+
             // `VERSION := $(shell git describe)` used to be emitted verbatim,
             // and otto then tried to run a command called `shell`, failing the
             // whole config load - which took every other env down with it.

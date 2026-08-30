@@ -29,15 +29,23 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
     (
         "python-poetry-service",
         &[
+            "Makefile:2: warning: `CERTS_DIR ?=` is conditional in make; otto always uses this value, ignoring any `CERTS_DIR` already in the environment",
             "Makefile:42: warning: `CLIENT_ID` is not defined in the Makefile; it will come from the environment",
             "Makefile:42: warning: `CLIENT_ID` is not defined in the Makefile; it will come from the environment",
         ],
     ),
     ("python-pre-commit", &[]),
-    ("docker-compose-service", &[]),
+    (
+        "docker-compose-service",
+        &[
+            "Makefile:2: warning: `PYPI_USERNAME ?=` is conditional in make; otto always uses this value, ignoring any `PYPI_USERNAME` already in the environment",
+            "Makefile:3: warning: `PYPI_PASSWORD ?=` is conditional in make; otto always uses this value, ignoring any `PYPI_PASSWORD` already in the environment",
+        ],
+    ),
     (
         "makefile-example",
         &[
+            "Makefile:12: warning: `GIT_COMMIT ?=` is conditional in make; otto always uses this value, ignoring any `GIT_COMMIT` already in the environment",
             "Makefile:17: warning: `MAKEFILE_LIST` is a make-internal variable; it will be empty in otto",
             "Makefile:42: warning: `PROJECT_NAME` is not defined in the Makefile; it will come from the environment",
             "Makefile:42: warning: dependency `build` of `package` has no rule in this Makefile; otto will reject the edge",
@@ -409,6 +417,48 @@ fn test_strict_turns_warnings_into_a_nonzero_exit() {
     assert_eq!(code, 1, "--strict must fail on warnings. stderr: {stderr}");
     assert!(stdout.is_empty(), "--strict must not emit a conversion: {stdout}");
     assert!(stderr.contains("--strict was given"), "{stderr}");
+}
+
+/// `?=` converted as a plain `=`, with no warning at all.
+///
+/// otto's `envs:` is "the system environment minus every declared key"
+/// (`cfg/env.rs`), so a declared key unconditionally shadows the ambient one -
+/// the exact opposite of what `?=` means. Measured against real make on
+/// `VERSION ?= 1.0`:
+///
+///   VERSION=9.9 make -s show  -> 9.9
+///   VERSION=9.9 otto show     -> 1.0
+///
+/// otto does not gain make's conditional-assignment semantics here: the
+/// contract for `envs:` is not this test's to change. What it gains is saying
+/// so. `+=` already warned for this same class of loss and `?=` warned for
+/// nothing, contradicting Phase 7's own "every silent corruption above becomes
+/// a warning at minimum".
+#[test]
+fn test_conditional_assignment_warns_that_the_environment_no_longer_wins() {
+    let conversion = convert("VERSION ?= 1.0\n\nshow:\n\t@echo $(VERSION)\n".to_string());
+
+    assert_eq!(
+        conversion.warnings,
+        vec![
+            "Makefile:1: warning: `VERSION ?=` is conditional in make; otto always uses this \
+             value, ignoring any `VERSION` already in the environment"
+        ],
+        "a `?=` that silently becomes `=` must say so"
+    );
+}
+
+/// And `--strict` promotes it, per the same criterion's second half.
+#[test]
+fn test_strict_fails_on_a_conditional_assignment() {
+    let (code, stdout, stderr) = run_convert("VERSION ?= 1.0\n\nshow:\n\t@echo $(VERSION)\n", &["--strict"]);
+
+    assert_eq!(code, 1, "--strict must fail on a `?=` warning. stderr: {stderr}");
+    assert!(stdout.is_empty(), "--strict must not emit a conversion: {stdout}");
+    assert!(
+        stderr.contains("VERSION ?="),
+        "the warning must name the variable: {stderr}"
+    );
 }
 
 #[test]
