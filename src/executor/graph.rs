@@ -494,7 +494,7 @@ impl DagVisualizer {
         // First pass: identify foreach subtasks and group them
         for node in dag.raw_nodes() {
             let task = &node.weight;
-            if let Some((parent, _subtask)) = task.name.split_once(':') {
+            if let Some((parent, _subtask)) = crate::naming::split_subtask(&task.name) {
                 // This is a foreach subtask
                 foreach_groups.entry(parent.to_string()).or_default().push(task);
             }
@@ -504,7 +504,7 @@ impl DagVisualizer {
         for node in dag.raw_nodes() {
             let task = &node.weight;
 
-            if let Some((parent, _)) = task.name.split_once(':') {
+            if let Some(parent) = crate::naming::parent_of(&task.name) {
                 // This is a foreach subtask - only add the parent once
                 if !result.contains_key(parent) {
                     let subtasks = foreach_groups.get(parent).unwrap();
@@ -608,7 +608,7 @@ impl DagVisualizer {
         // Extract the identifier part (after the colon) from each subtask name
         let identifiers: Vec<&str> = subtasks
             .iter()
-            .filter_map(|t| t.name.split_once(':').map(|(_, id)| id))
+            .filter_map(|t| crate::naming::identifier_of(&t.name))
             .collect();
 
         if identifiers.is_empty() {
@@ -670,11 +670,7 @@ impl DagVisualizer {
             .iter()
             .filter_map(|dep_name| {
                 // Handle collapsed names - deps might reference subtasks but we show parents
-                let lookup_name = if let Some((parent, _)) = dep_name.split_once(':') {
-                    parent.to_string()
-                } else {
-                    dep_name.clone()
-                };
+                let lookup_name = crate::naming::parent_or_self(dep_name).to_string();
                 all_tasks.get(&lookup_name).map(|info| (lookup_name, info))
             })
             .collect();

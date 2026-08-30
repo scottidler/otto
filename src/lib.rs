@@ -3,6 +3,7 @@ pub mod cfg;
 pub mod cli;
 pub mod executor;
 pub mod makefile;
+pub mod naming;
 pub mod ports;
 pub mod tui;
 

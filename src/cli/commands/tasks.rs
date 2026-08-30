@@ -92,7 +92,10 @@ pub fn build_tasks_view(
                     // A command source prints its own empty-scope notice while resolving.
                     eprintln!("Notice: task '{name}' foreach matched 0 items");
                 }
-                items.iter().map(|item| format!("{name}:{}", item.identifier)).collect()
+                items
+                    .iter()
+                    .map(|item| crate::naming::subtask_name(name, &item.identifier))
+                    .collect()
             }
             None => Vec::new(),
         };

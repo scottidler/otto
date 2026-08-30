@@ -62,11 +62,11 @@ impl Parser {
                     continue;
                 }
                 for item in self.resolve_foreach(name, foreach)? {
-                    task_names.push(format!("{}:{}", name, item.identifier));
+                    task_names.push(crate::naming::subtask_name(name, &item.identifier));
                 }
             } else if let Ok(items) = self.resolve_foreach(name, foreach) {
                 for item in items {
-                    task_names.push(format!("{}:{}", name, item.identifier));
+                    task_names.push(crate::naming::subtask_name(name, &item.identifier));
                 }
             }
         }
@@ -154,7 +154,7 @@ impl Parser {
 
     /// `up:gamma` -> `up`; anything else unchanged.
     fn parent_task_name(name: &str) -> &str {
-        name.split_once(':').map_or(name, |(parent, _)| parent)
+        crate::naming::parent_or_self(name)
     }
 
     fn extract_task_names_from_partitions(&self) -> Vec<String> {

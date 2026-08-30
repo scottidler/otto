@@ -796,7 +796,7 @@ impl TaskSpec {
             .enumerate()
             .map(|(index, (item, identifier))| {
                 let mut subtask = self.clone();
-                subtask.name = format!("{}:{}", self.name, identifier);
+                subtask.name = crate::naming::subtask_name(&self.name, &identifier);
                 subtask.foreach = None; // Prevent recursive expansion
 
                 // Inject foreach variables into environment. The item is data, so

@@ -65,13 +65,13 @@ pub struct Task {
 impl Task {
     /// The parent task a foreach subtask belongs to, derived from its name.
     ///
-    /// A subtask is named `<parent>:<item>`, so the parent is everything before the
-    /// first colon and a name without a colon has no parent. One definition, because
-    /// this rule was written out three times (twice here, once in the graph's test
-    /// fixture) and a fourth copy is how the rule drifts.
+    /// Owned-`String` convenience over [`crate::naming::parent_of`], which is the
+    /// single definition of the rule. This function used to *be* that definition
+    /// and said so, and six open-coded copies grew anyway; it now delegates so
+    /// there is nothing here to drift from.
     #[must_use]
     pub fn derive_parent(name: &str) -> Option<String> {
-        name.split_once(':').map(|(parent, _)| parent.to_string())
+        crate::naming::parent_of(name).map(str::to_string)
     }
 
     #[must_use]
