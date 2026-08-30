@@ -37,6 +37,9 @@ impl DatabaseManager {
     /// 2. Enable WAL mode for better concurrency
     /// 3. Run schema migrations
     pub fn new(db_path: PathBuf) -> Result<Self> {
+        #[cfg(test)]
+        Self::refuse_the_developers_real_database(&db_path);
+
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).context("Failed to create database directory")?;
@@ -128,6 +131,42 @@ impl DatabaseManager {
     /// `$HOME/.otto`, so `OTTO_HOME` is the single knob that moves otto's state.
     /// It used to move only the run directories: a run under a scratch
     /// `OTTO_HOME` still wrote its rows into the developer's real database.
+    /// Under `cfg(test)` only: abort rather than open `$HOME/.otto/otto.db`.
+    ///
+    /// Several `--lib` tests mutate `OTTO_HOME` process-globally and a few
+    /// `remove_var` it, which leaves a window where `default_db_path()`
+    /// resolves to the developer's real database. Rust runs the tests in one
+    /// process across parallel threads, so a concurrent test that builds a
+    /// default-path store during that window writes - or deletes - real rows.
+    /// A review of this audit measured exactly that: a full `cargo test` that
+    /// moved `~/.otto/otto.db` and dropped one `runs` row, not reproducible on
+    /// a later run because it is a race.
+    ///
+    /// The window is not closed by fixing the call sites one at a time; the
+    /// next test to add a `remove_var` reopens it. This makes the failure
+    /// impossible to have silently: a test that would touch the real store
+    /// panics naming itself instead. Production is unaffected - the whole
+    /// function compiles out.
+    ///
+    /// Path resolution itself is untouched, so the tests that assert the
+    /// `$HOME/.otto` fallback still pass: they compute the path, they do not
+    /// open it.
+    #[cfg(test)]
+    fn refuse_the_developers_real_database(db_path: &std::path::Path) {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let real = PathBuf::from(home).join(".otto").join(DB_FILE_NAME);
+        assert!(
+            db_path != real,
+            "a test tried to open the developer's real database at {}. \
+             Something left OTTO_HOME unset, or built a store with no explicit path. \
+             Use an isolated home (tests/common::isolated_state_manager, or \
+             StateManager::with_db_path into a TempDir).",
+            real.display()
+        );
+    }
+
     pub fn default_db_path() -> Result<PathBuf> {
         if let Ok(db_path) = std::env::var("OTTO_DB_PATH") {
             return Ok(PathBuf::from(db_path));

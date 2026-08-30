@@ -87,7 +87,33 @@ pub async fn auto_prune(otto_home: &Path, retention: &RetentionSpec) {
         quiet: true,
     };
 
-    if let Err(e) = cmd.execute().await {
+    // Prune the store belonging to the home this function was GIVEN.
+    //
+    // `cmd.execute()` resolves the store from `$OTTO_DB_PATH`/`$OTTO_HOME`,
+    // ignoring `otto_home` entirely. In production the two agree, so this read
+    // as correct - but it means a caller that passes a different home prunes
+    // somebody else's database. That is how two unit tests in this very module,
+    // which pass a `TempDir` for the marker, came to delete rows from the
+    // developer's real `~/.otto/otto.db` on an ordinary `cargo test`; a review
+    // of this audit measured one `runs` row disappearing. It is the same defect
+    // Phase 4 fixed globally - `OTTO_HOME` moving the run directories but not
+    // the database - surviving in one function that took the home as an
+    // argument and then did not use it.
+    //
+    // `$OTTO_DB_PATH` still wins, matching `DatabaseManager::default_db_path`'s
+    // documented precedence; only the fallback is anchored to `otto_home`.
+    let db_path = std::env::var_os("OTTO_DB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| otto_home.join("otto.db"));
+    let store = match crate::executor::state::StateManager::with_db_path(db_path) {
+        Ok(store) => store,
+        Err(e) => {
+            warn!("Auto-prune could not open the store: {}", e);
+            return;
+        }
+    };
+
+    if let Err(e) = cmd.execute_with_store(Some(std::sync::Arc::new(store))).await {
         warn!("Auto-prune failed: {}", e);
         return;
     }
