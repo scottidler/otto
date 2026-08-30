@@ -14,7 +14,7 @@ use tokio::{
     io::BufReader,
     process::Command,
     sync::{Mutex, Semaphore, mpsc},
-    task::JoinHandle,
+    task::JoinSet,
     time::timeout,
 };
 
@@ -38,6 +38,162 @@ const OUTPUT_PROCESSING_TIMEOUT_SECS: u64 = 5;
 /// claim the task was silent when its output actually went straight to the
 /// terminal. The marker keeps the record honest.
 pub const TTY_LOG_MARKER: &str = "otto: tty task, output not captured";
+
+/// One task's terminal report, sent exactly once per started task.
+///
+/// The task name is a field, not something to be recovered from the error
+/// text. The channel used to carry `Result<String>` and the failure arm dug the
+/// name out with `error_str.split_whitespace().nth(1)`; for a spawn failure
+/// ("No such file or directory (os error 2)") that yielded "such", so the real
+/// task was never removed from the active set and the run hung until killed.
+/// `exit_code` is carried for the same reason: the database used to re-parse it
+/// out of the message and fall back to 1, so `exit 7` was recorded as 1.
+#[derive(Debug)]
+pub struct TaskReport {
+    /// The task this report is about.
+    pub name: String,
+    /// The process exit code, when a process ran and exited with one.
+    pub exit_code: Option<i32>,
+    /// `None` when the task succeeded.
+    pub error: Option<eyre::Report>,
+}
+
+impl TaskReport {
+    fn success(name: String) -> Self {
+        Self {
+            name,
+            exit_code: Some(0),
+            error: None,
+        }
+    }
+
+    fn failure(name: String, error: eyre::Report, exit_code: Option<i32>) -> Self {
+        Self {
+            name,
+            exit_code,
+            error: Some(error),
+        }
+    }
+}
+
+/// Failure of a task body, carrying the process exit code when there was one.
+///
+/// Every `?` inside the body used to abandon the task without sending anything;
+/// this type is what lets the whole body be one fallible expression whose single
+/// exit path reports.
+struct TaskFailure {
+    error: eyre::Report,
+    exit_code: Option<i32>,
+}
+
+impl From<eyre::Report> for TaskFailure {
+    fn from(error: eyre::Report) -> Self {
+        Self { error, exit_code: None }
+    }
+}
+
+impl From<std::io::Error> for TaskFailure {
+    fn from(error: std::io::Error) -> Self {
+        Self {
+            error: error.into(),
+            exit_code: None,
+        }
+    }
+}
+
+impl From<tokio::sync::AcquireError> for TaskFailure {
+    fn from(error: tokio::sync::AcquireError) -> Self {
+        Self {
+            error: error.into(),
+            exit_code: None,
+        }
+    }
+}
+
+/// The tasks currently running, with their join handles.
+///
+/// Handles are reaped rather than dropped on the floor: a body that ends
+/// without reporting (a panic) would otherwise leave the scheduler waiting
+/// forever on a message that can never arrive.
+#[derive(Default)]
+struct ActiveTasks {
+    /// Spawned bodies that have not been joined yet, by join id.
+    names: HashMap<tokio::task::Id, String>,
+    /// Names the scheduler still counts as in flight.
+    running: std::collections::HashSet<String>,
+    joins: JoinSet<()>,
+}
+
+impl ActiveTasks {
+    fn len(&self) -> usize {
+        self.running.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.running.is_empty()
+    }
+
+    fn spawn<Fut>(&mut self, name: String, body: Fut)
+    where
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handle = self.joins.spawn(body);
+        self.names.insert(handle.id(), name.clone());
+        self.running.insert(name);
+    }
+
+    /// Mark a task as no longer in flight, having received its report.
+    fn reported(&mut self, name: &str) {
+        self.running.remove(name);
+        self.names.retain(|_, n| n != name);
+    }
+
+    /// Resolves only when a body ends *without* reporting, yielding its name.
+    ///
+    /// Bodies that ended normally are joined and discarded; when none are left
+    /// this never resolves, so it can sit in a `select!` arm alongside the
+    /// report channel without starving it.
+    async fn reap_unreported(&mut self) -> String {
+        loop {
+            match self.joins.join_next_with_id().await {
+                None => std::future::pending::<()>().await,
+                Some(Ok((id, ()))) => {
+                    self.names.remove(&id);
+                }
+                Some(Err(e)) => {
+                    let id = e.id();
+                    match self.names.remove(&id) {
+                        Some(name) => {
+                            error!("Task {name} ended without reporting: {e}");
+                            self.running.remove(&name);
+                            return name;
+                        }
+                        None => error!("A task body ended without reporting and could not be identified: {e}"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Join every remaining body, logging any that panicked.
+    async fn drain(&mut self) {
+        while let Some(joined) = self.joins.join_next_with_id().await {
+            match joined {
+                Ok((id, ())) => {
+                    self.names.remove(&id);
+                }
+                Err(e) => {
+                    let name = self.names.remove(&e.id());
+                    error!(
+                        "Task {} ended without reporting: {e}",
+                        name.as_deref().unwrap_or("<unknown>")
+                    );
+                }
+            }
+        }
+        self.running.clear();
+    }
+}
 
 /// Permits a task must hold to run: one for an ordinary task, the semaphore's
 /// entire initial count for a `tty: true` task, which is what makes it exclusive.
@@ -374,6 +530,11 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         max_parallel: usize,
         tui_mode: bool,
     ) -> Result<Self> {
+        // Topological validation before anything is scheduled: a cycle makes the
+        // run set unsatisfiable, and the ready loop's only response to that used
+        // to be marking everything Skipped and returning Ok.
+        crate::executor::graph::DagVisualizer::validate_acyclic(&tasks)?;
+
         let task_statuses = Arc::new(Mutex::new(HashMap::new()));
         let task_start_times = Arc::new(Mutex::new(HashMap::new()));
 
@@ -464,8 +625,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     async fn try_start_ready_task(
         &self,
         task: Task,
-        tx: mpsc::Sender<Result<String>>,
-        active_tasks: &mut std::collections::HashMap<String, JoinHandle<Result<()>>>,
+        tx: mpsc::Sender<TaskReport>,
+        active_tasks: &mut ActiveTasks,
         completed_set: &mut std::collections::HashSet<String>,
         blocked_tasks: &mut Vec<Task>,
         ready_queue: &mut std::collections::VecDeque<Task>,
@@ -486,9 +647,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     timestamp: std::time::SystemTime::now(),
                 });
 
-                let handle = self.execute_task(task.clone(), tx.clone()).await?;
-                let task_name = task.name.clone();
-                active_tasks.insert(task_name.clone(), handle);
+                self.execute_task(task.clone(), tx.clone(), active_tasks).await?;
             }
             Ok(false) => {
                 // Task can be skipped - outputs are up to date
@@ -557,9 +716,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     timestamp: std::time::SystemTime::now(),
                 });
 
-                let handle = self.execute_task(task.clone(), tx.clone()).await?;
-                let task_name = task.name.clone();
-                active_tasks.insert(task_name.clone(), handle);
+                self.execute_task(task.clone(), tx.clone(), active_tasks).await?;
             }
         }
         Ok(())
@@ -604,7 +761,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 
         let mut completed_tasks = 0;
         let total_tasks = self.tasks.len();
-        let mut active_tasks = std::collections::HashMap::new();
+        let mut active_tasks = ActiveTasks::default();
         let max_concurrent = self.max_parallel;
 
         // Track completed and failed tasks for dependency satisfaction checking.
@@ -693,9 +850,24 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 continue;
             }
 
-            // Wait for any task to complete
-            match rx.recv().await {
-                Some(Ok(completed_task)) => {
+            // Wait for any task to report. A body that ends without reporting
+            // (a panic) is reaped instead, and synthesized into a failure so the
+            // run terminates rather than waiting on a message that never comes.
+            let received = tokio::select! {
+                message = rx.recv() => message,
+                name = active_tasks.reap_unreported() => Some(TaskReport::failure(
+                    name.clone(),
+                    eyre!("Task {name} panicked"),
+                    None,
+                )),
+            };
+
+            match received {
+                Some(TaskReport {
+                    name: completed_task,
+                    error: None,
+                    ..
+                }) => {
                     info!("Task {completed_task} completed successfully");
 
                     // Calculate task duration
@@ -780,7 +952,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         statuses.insert(completed_task.clone(), final_status);
                     }
                     completed_tasks += 1;
-                    active_tasks.remove(&completed_task);
+                    active_tasks.reported(&completed_task);
 
                     // Sweep blocked_tasks: newly-ready and newly-unreachable.
                     let mut newly_ready = Vec::new();
@@ -814,71 +986,68 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         }
                     }
                 }
-                Some(Err(e)) => {
-                    error!("Task execution failed: {e}");
+                Some(TaskReport {
+                    name: task_name,
+                    error: Some(e),
+                    ..
+                }) => {
+                    error!("Task {task_name} failed: {e}");
 
-                    // Extract task name from error message for user-visible failure message
-                    let error_str = e.to_string();
-                    let task_name_opt = error_str.split_whitespace().nth(1).map(|s| s.to_string());
+                    // Calculate task duration
+                    let duration_ms = {
+                        let mut start_times = self.task_start_times.lock().await;
+                        start_times
+                            .remove(&task_name)
+                            .map(|start| start.elapsed().as_millis() as u64)
+                            .unwrap_or(0)
+                    };
 
-                    if let Some(task_name) = &task_name_opt {
-                        // Calculate task duration
-                        let duration_ms = {
-                            let mut start_times = self.task_start_times.lock().await;
-                            start_times
-                                .remove(task_name)
-                                .map(|start| start.elapsed().as_millis() as u64)
-                                .unwrap_or(0)
-                        };
+                    // Print user-visible failure message (only in terminal mode)
+                    if !self.tui_mode {
+                        let failure_msg = format!("{} failed\n", colorize_task_prefix(&task_name));
+                        eprint!("{failure_msg}");
+                        io::stderr().flush().unwrap_or(());
+                    }
 
-                        // Print user-visible failure message (only in terminal mode)
-                        if !self.tui_mode {
-                            let failure_msg = format!("{} failed\n", colorize_task_prefix(task_name));
-                            eprint!("{failure_msg}");
-                            io::stderr().flush().unwrap_or(());
+                    // Broadcast task failure to TUI
+                    self.broadcast_message(TaskMessage::Finished {
+                        task_name: task_name.clone(),
+                        status: TuiTaskStatus::Failed,
+                        timestamp: std::time::SystemTime::now(),
+                        duration_ms,
+                    });
+
+                    // Record failure in tracking sets and statuses.
+                    {
+                        let mut statuses = self.task_statuses.lock().await;
+                        statuses.insert(task_name.clone(), TaskStatus::Failed(e.to_string()));
+                    }
+                    failed_set.insert(task_name.clone());
+                    active_tasks.reported(&task_name);
+                    completed_tasks += 1;
+
+                    // Sweep blocked_tasks: newly-ready and newly-unreachable.
+                    let mut newly_ready = Vec::new();
+                    let mut newly_skipped: Vec<Task> = Vec::new();
+                    blocked_tasks.retain(|task| {
+                        let states = classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
+                        if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
+                            newly_skipped.push(task.clone());
+                            return false;
                         }
-
-                        // Broadcast task failure to TUI
-                        self.broadcast_message(TaskMessage::Finished {
-                            task_name: task_name.clone(),
-                            status: TuiTaskStatus::Failed,
-                            timestamp: std::time::SystemTime::now(),
-                            duration_ms,
-                        });
-
-                        // Record failure in tracking sets and statuses.
-                        {
-                            let mut statuses = self.task_statuses.lock().await;
-                            statuses.insert(task_name.clone(), TaskStatus::Failed(error_str.clone()));
+                        if states.iter().all(|s| matches!(s, EdgeState::Satisfied)) {
+                            newly_ready.push(task.clone());
+                            return false;
                         }
-                        failed_set.insert(task_name.clone());
-                        active_tasks.remove(task_name);
+                        true
+                    });
+                    for t in newly_ready {
+                        ready_queue.push_back(t);
+                    }
+                    for t in newly_skipped {
+                        let reason = skip_reason_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
+                        self.mark_skipped(&t, reason, &mut skipped_set).await;
                         completed_tasks += 1;
-
-                        // Sweep blocked_tasks: newly-ready and newly-unreachable.
-                        let mut newly_ready = Vec::new();
-                        let mut newly_skipped: Vec<Task> = Vec::new();
-                        blocked_tasks.retain(|task| {
-                            let states =
-                                classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                            if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
-                                newly_skipped.push(task.clone());
-                                return false;
-                            }
-                            if states.iter().all(|s| matches!(s, EdgeState::Satisfied)) {
-                                newly_ready.push(task.clone());
-                                return false;
-                            }
-                            true
-                        });
-                        for t in newly_ready {
-                            ready_queue.push_back(t);
-                        }
-                        for t in newly_skipped {
-                            let reason = skip_reason_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                            self.mark_skipped(&t, reason, &mut skipped_set).await;
-                            completed_tasks += 1;
-                        }
                     }
 
                     if final_error.is_none() {
@@ -901,13 +1070,55 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             self.mark_skipped(&task, reason, &mut skipped_set).await;
         }
 
+        // Join every spawned body so a panic is logged rather than silently
+        // aborted when the JoinSet drops.
+        active_tasks.drain().await;
+
+        // Persist skip provenance to the run record. Built and dropped before
+        // this: `get_skip_reasons()` had no caller in the whole tree.
+        self.persist_skip_reasons().await;
+
         if let Some(err) = final_error {
             return Err(err);
+        }
+
+        // Nothing ran. Every task in the run set was declared unreachable, which
+        // means the run accomplished nothing and must not report success. An
+        // up-to-date skip is not this case: those land in `completed_set`.
+        if completed_set.is_empty() && failed_set.is_empty() && !skipped_set.is_empty() {
+            return Err(eyre!(
+                "no task reached a terminal state: all {} task(s) in this run were skipped as unreachable",
+                skipped_set.len()
+            ));
         }
         Ok(())
     }
 
-    async fn execute_task(&self, task: Task, tx: mpsc::Sender<Result<String>>) -> Result<JoinHandle<Result<()>>> {
+    /// Write each skipped task and the reason it was skipped into the run
+    /// record, so `otto History` can say why a task did not run.
+    async fn persist_skip_reasons(&self) {
+        let reasons = self.get_skip_reasons().await;
+        if reasons.is_empty() {
+            return;
+        }
+        let (Some(run_id), Some(store)) = (self.workspace.db_run_id(), self.workspace.state_store()) else {
+            return;
+        };
+        for (task_name, reason) in reasons {
+            if let Err(e) = store.record_task_skipped(run_id, &task_name, None, Some(&reason)) {
+                log::warn!("Failed to record skipped task {task_name} in database: {e}");
+            }
+        }
+    }
+
+    /// Spawn `task`'s body into `active`, reporting exactly once when it ends.
+    ///
+    /// The body is one fallible expression: every early exit inside it - the
+    /// semaphore, the dependency double-check, `create_dir_all`, the symlinks,
+    /// the action processor - lands in the same place, and that place is the
+    /// only sender. Before this, a `?` on any of those abandoned the task with
+    /// nothing sent, and the scheduler waited on it forever.
+    async fn execute_task(&self, task: Task, tx: mpsc::Sender<TaskReport>, active: &mut ActiveTasks) -> Result<()> {
         let semaphore = self.semaphore.clone();
 
         let task_name = task.name.clone();
@@ -926,292 +1137,315 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let tty = task.tty;
         let permits = permits_for(tty, self.max_parallel)?;
 
-        Ok(tokio::spawn(async move {
-            // Acquire semaphore permit. A tty task takes every permit, so nothing
-            // else runs while it owns the terminal; tokio's semaphore is FIFO, so
-            // this wait cannot be starved by later single-permit acquires.
-            let _permit = semaphore.acquire_many(permits).await?;
+        let spawn_name = task_name.clone();
+        active.spawn(spawn_name, async move {
+            // Set by the run block when a process actually exited, so the
+            // database records the real code instead of re-parsing it back out
+            // of the error message and defaulting to 1.
+            let mut exit_code: Option<i32> = None;
+            // Assigned once the task has a database row; the completion write
+            // happens after the body, on the single report path.
+            let mut db_task_id: Option<i64> = None;
+            // A virtual parent has no script, no output files and no database
+            // row: it only aggregates its subtasks' statuses.
+            let mut aggregator_only = false;
 
-            // Empty-action fast path (used by virtual parent tasks). The parent
-            // task has no script to run - it exists only to aggregate subtask
-            // statuses. We mark it Running briefly so the scheduler's success
-            // arm picks it up and applies the aggregation override.
-            if is_virtual_parent && action_is_empty {
+            let outcome: std::result::Result<(), TaskFailure> = async {
+                // Acquire semaphore permit. A tty task takes every permit, so nothing
+                // else runs while it owns the terminal; tokio's semaphore is FIFO, so
+                // this wait cannot be starved by later single-permit acquires.
+                let _permit = semaphore.acquire_many(permits).await?;
+
+                // Empty-action fast path (used by virtual parent tasks). The parent
+                // task has no script to run - it exists only to aggregate subtask
+                // statuses. We mark it Running briefly so the scheduler's success
+                // arm picks it up and applies the aggregation override.
+                if is_virtual_parent && action_is_empty {
+                    {
+                        let mut statuses = task_statuses.lock().await;
+                        statuses.insert(task_name.clone(), TaskStatus::Running);
+                    }
+                    aggregator_only = true;
+                    return Ok(());
+                }
+
+                {
+                    let statuses = task_statuses.lock().await;
+                    for dep in &task_deps {
+                        let status = statuses.get(&dep.task);
+                        let satisfied = match (dep.when, status) {
+                            // when: success requires Completed (Skipped is treated as success-like
+                            // for back-compat with the up-to-date skip pathway).
+                            (When::Success, Some(TaskStatus::Completed)) => true,
+                            (When::Success, Some(TaskStatus::Skipped)) => true,
+                            // when: failure requires a Failed status on the source.
+                            (When::Failure, Some(TaskStatus::Failed(_))) => true,
+                            // when: always is satisfied by any terminal state.
+                            (When::Always, Some(TaskStatus::Completed)) => true,
+                            (When::Always, Some(TaskStatus::Skipped)) => true,
+                            (When::Always, Some(TaskStatus::Failed(_))) => true,
+                            _ => false,
+                        };
+                        if !satisfied {
+                            return Err(eyre!(
+                                "Dependency {} not satisfied (when: {:?}, status: {:?}) for task {}",
+                                dep.task,
+                                dep.when,
+                                status,
+                                task_name
+                            )
+                            .into());
+                        }
+                    }
+                }
+
+                // Update task status to Running ONLY after dependency check
                 {
                     let mut statuses = task_statuses.lock().await;
                     statuses.insert(task_name.clone(), TaskStatus::Running);
                 }
-                // Send Ok so the scheduler's Ok arm runs and applies aggregation.
-                let _ = tx.send(Ok(task_name.clone())).await;
-                return Ok(());
-            }
 
-            {
-                let statuses = task_statuses.lock().await;
-                for dep in &task_deps {
-                    let status = statuses.get(&dep.task);
-                    let satisfied = match (dep.when, status) {
-                        // when: success requires Completed (Skipped is treated as success-like
-                        // for back-compat with the up-to-date skip pathway).
-                        (When::Success, Some(TaskStatus::Completed)) => true,
-                        (When::Success, Some(TaskStatus::Skipped)) => true,
-                        // when: failure requires a Failed status on the source.
-                        (When::Failure, Some(TaskStatus::Failed(_))) => true,
-                        // when: always is satisfied by any terminal state.
-                        (When::Always, Some(TaskStatus::Completed)) => true,
-                        (When::Always, Some(TaskStatus::Skipped)) => true,
-                        (When::Always, Some(TaskStatus::Failed(_))) => true,
-                        _ => false,
-                    };
-                    if !satisfied {
-                        return Err(eyre!(
-                            "Dependency {} not satisfied (when: {:?}, status: {:?}) for task {}",
-                            dep.task,
-                            dep.when,
-                            status,
-                            task_name
-                        ));
-                    }
-                }
-            }
+                info!("Starting task {task_name}");
 
-            // Update task status to Running ONLY after dependency check
-            {
-                let mut statuses = task_statuses.lock().await;
-                statuses.insert(task_name.clone(), TaskStatus::Running);
-            }
+                tokio::fs::create_dir_all(&task_dir).await?;
 
-            info!("Starting task {task_name}");
+                // Setup dependency input files (symlink outputs from dependencies)
+                for dep_edge in &task_deps {
+                    let dep_name = &dep_edge.task;
+                    let dep_output_file = workspace.task_output_file(dep_name);
+                    let current_input_file = workspace.task_input_file(&task_name, dep_name);
+                    let current_input_env_file = workspace.task_input_env_file(&task_name, dep_name);
 
-            tokio::fs::create_dir_all(&task_dir).await?;
-
-            // Setup dependency input files (symlink outputs from dependencies)
-            for dep_edge in &task_deps {
-                let dep_name = &dep_edge.task;
-                let dep_output_file = workspace.task_output_file(dep_name);
-                let current_input_file = workspace.task_input_file(&task_name, dep_name);
-                let current_input_env_file = workspace.task_input_env_file(&task_name, dep_name);
-
-                // Only create symlink if dependency output exists
-                if dep_output_file.exists() {
-                    if current_input_file.exists() {
-                        tokio::fs::remove_file(&current_input_file).await.ok();
-                    }
-
-                    // Create symlink from dependency output to current task input
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs;
-                        // Use relative path for portability
-                        let relative_dep_path = workspace.relative_task_dependency_path(dep_name);
-                        fs::symlink(&relative_dep_path, &current_input_file)?;
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        // Fallback: copy file on non-Unix systems
-                        tokio::fs::copy(&dep_output_file, &current_input_file).await?;
-                    }
-
-                    // Generate .env file from JSON for jq-free bash deserialization
-                    // This allows bash to source the .env file instead of parsing JSON with jq
-                    if let Ok(json_content) = tokio::fs::read_to_string(&dep_output_file).await
-                        && let Ok(json_data) = serde_json::from_str::<serde_json::Value>(&json_content)
-                    {
-                        let env_content = json_to_env(&json_data, dep_name);
-                        tokio::fs::write(&current_input_env_file, env_content).await.ok();
-                    }
-                }
-            }
-
-            // Process the user's action script with Otto enhancements
-            let action_processor = ActionProcessor::new(workspace.clone(), &task_name)?;
-            let processed_action = action_processor.process(&task.action, &task)?;
-
-            // Extract script path and determine interpreter
-            let (script_path, interpreter) = match processed_action {
-                ProcessedAction::Bash { path, .. } => (path, "bash"),
-                ProcessedAction::Python3 { path, .. } => (path, "python3"),
-            };
-
-            // Record task start in database with paths (graceful degradation)
-            let db_task_id = if let Some(run_id) = workspace.db_run_id() {
-                if let Some(store) = workspace.state_store() {
-                    let stdout_path = tasks_dir.join(&task_name).join("stdout.log");
-                    let stderr_path = tasks_dir.join(&task_name).join("stderr.log");
-
-                    match store.record_task_start(
-                        run_id,
-                        &task_name,
-                        None, // TODO: Compute script hash in future phase
-                        Some(&stdout_path),
-                        Some(&stderr_path),
-                        Some(&script_path),
-                    ) {
-                        Ok(task_id) => Some(task_id),
-                        Err(e) => {
-                            log::warn!("Failed to record task start in database: {}", e);
-                            None
+                    // Only create symlink if dependency output exists
+                    if dep_output_file.exists() {
+                        if current_input_file.exists() {
+                            tokio::fs::remove_file(&current_input_file).await.ok();
                         }
+
+                        // Create symlink from dependency output to current task input
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs;
+                            // Use relative path for portability
+                            let relative_dep_path = workspace.relative_task_dependency_path(dep_name);
+                            fs::symlink(&relative_dep_path, &current_input_file)?;
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            // Fallback: copy file on non-Unix systems
+                            tokio::fs::copy(&dep_output_file, &current_input_file).await?;
+                        }
+
+                        // Generate .env file from JSON for jq-free bash deserialization
+                        // This allows bash to source the .env file instead of parsing JSON with jq
+                        if let Ok(json_content) = tokio::fs::read_to_string(&dep_output_file).await
+                            && let Ok(json_data) = serde_json::from_str::<serde_json::Value>(&json_content)
+                        {
+                            let env_content = json_to_env(&json_data, dep_name);
+                            tokio::fs::write(&current_input_env_file, env_content).await.ok();
+                        }
+                    }
+                }
+
+                // Process the user's action script with Otto enhancements
+                let action_processor = ActionProcessor::new(workspace.clone(), &task_name)?;
+                let processed_action = action_processor.process(&task.action, &task)?;
+
+                // Extract script path and determine interpreter
+                let (script_path, interpreter) = match processed_action {
+                    ProcessedAction::Bash { path, .. } => (path, "bash"),
+                    ProcessedAction::Python3 { path, .. } => (path, "python3"),
+                };
+
+                // Record task start in database with paths (graceful degradation)
+                db_task_id = if let Some(run_id) = workspace.db_run_id() {
+                    if let Some(store) = workspace.state_store() {
+                        let stdout_path = tasks_dir.join(&task_name).join("stdout.log");
+                        let stderr_path = tasks_dir.join(&task_name).join("stderr.log");
+
+                        match store.record_task_start(
+                            run_id,
+                            &task_name,
+                            None, // TODO: Compute script hash in future phase
+                            Some(&stdout_path),
+                            Some(&stderr_path),
+                            Some(&script_path),
+                        ) {
+                            Ok(task_id) => Some(task_id),
+                            Err(e) => {
+                                log::warn!("Failed to record task start in database: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
                     }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
-            // Setup command environment
-            let mut cmd = Command::new(interpreter);
-            cmd.arg(&script_path)
-                .current_dir(workspace.root())
-                // Inherit current environment by default (no env_clear())
-                .envs(&envs) // Override with user-specified env vars
-                .env("OTTO_TASK", &task_name)
-                .env("OTTO_TASK_DIR", task_dir.to_string_lossy().to_string())
-                .env("OTTO_WORKSPACE", workspace.root().to_string_lossy().to_string())
-                .env("OTTO_TASKS_DIR", tasks_dir.to_string_lossy().to_string())
-                .env("OTTO_USER", &execution_context.user);
+                // Setup command environment
+                let mut cmd = Command::new(interpreter);
+                cmd.arg(&script_path)
+                    .current_dir(workspace.root())
+                    // Inherit current environment by default (no env_clear())
+                    .envs(&envs) // Override with user-specified env vars
+                    .env("OTTO_TASK", &task_name)
+                    .env("OTTO_TASK_DIR", task_dir.to_string_lossy().to_string())
+                    .env("OTTO_WORKSPACE", workspace.root().to_string_lossy().to_string())
+                    .env("OTTO_TASKS_DIR", tasks_dir.to_string_lossy().to_string())
+                    .env("OTTO_USER", &execution_context.user);
 
-            // Execute without timeout - runs until completion or failure
-            let result = async {
-                if tty {
-                    // The task owns the terminal: inherit stdout/stderr (stdin is
-                    // already inherited - otto never redirects it) and skip
-                    // TaskStreams entirely, so there is no capture and no [task]
-                    // prefix. The logs still exist, carrying the marker line.
-                    write_tty_log_markers(&tasks_dir, &task_name).await?;
+                // Execute without timeout - runs until completion or failure
+                let result = async {
+                    if tty {
+                        // The task owns the terminal: inherit stdout/stderr (stdin is
+                        // already inherited - otto never redirects it) and skip
+                        // TaskStreams entirely, so there is no capture and no [task]
+                        // prefix. The logs still exist, carrying the marker line.
+                        write_tty_log_markers(&tasks_dir, &task_name).await?;
+                        let mut child = cmd
+                            .stdout(std::process::Stdio::inherit())
+                            .stderr(std::process::Stdio::inherit())
+                            .spawn()
+                            .map_err(|e| eyre!("Task {task_name} could not start {interpreter}: {e}"))?;
+                        let status = child.wait().await?;
+                        exit_code = status.code();
+                        if status.success() {
+                            return Ok(());
+                        }
+                        let stdout_log = tasks_dir.join(&task_name).join("stdout.log");
+                        let stderr_log = tasks_dir.join(&task_name).join("stderr.log");
+                        // No stderr preview: nothing was captured, and echoing the
+                        // marker line back as "error output" would be a lie.
+                        return Err(eyre!(
+                            "Task {} failed with exit code {:?}\n\nLogs:\n  stdout: {}\n  stderr: {}",
+                            task_name,
+                            status.code(),
+                            stdout_log.display(),
+                            stderr_log.display()
+                        ));
+                    }
+
                     let mut child = cmd
-                        .stdout(std::process::Stdio::inherit())
-                        .stderr(std::process::Stdio::inherit())
-                        .spawn()?;
-                    let status = child.wait().await?;
-                    if status.success() {
-                        return Ok(());
-                    }
-                    let stdout_log = tasks_dir.join(&task_name).join("stdout.log");
-                    let stderr_log = tasks_dir.join(&task_name).join("stderr.log");
-                    // No stderr preview: nothing was captured, and echoing the
-                    // marker line back as "error output" would be a lie.
-                    return Err(eyre!(
-                        "Task {} failed with exit code {:?}\n\nLogs:\n  stdout: {}\n  stderr: {}",
-                        task_name,
-                        status.code(),
-                        stdout_log.display(),
-                        stderr_log.display()
-                    ));
-                }
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .map_err(|e| eyre!("Task {task_name} could not start {interpreter}: {e}"))?;
 
-                let mut child = cmd
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()?;
+                    // Setup output streams
+                    let stdout = child.stdout.take().ok_or_else(|| eyre!("Failed to capture stdout"))?;
+                    let stderr = child.stderr.take().ok_or_else(|| eyre!("Failed to capture stderr"))?;
 
-                // Setup output streams
-                let stdout = child.stdout.take().ok_or_else(|| eyre!("Failed to capture stdout"))?;
-                let stderr = child.stderr.take().ok_or_else(|| eyre!("Failed to capture stderr"))?;
-
-                let streams = if let Some(streams_map) = &task_streams {
-                    streams_map
-                        .get(&task_name)
-                        .ok_or_else(|| eyre!("TaskStreams not found for task {}", task_name))?
-                        .clone()
-                } else {
-                    TaskStreams::new(&task_name, &tasks_dir).await?
-                };
-
-                // Start output handling
-                let stdout_handle = {
-                    let streams = streams.clone();
-                    let task_name = task_name.clone();
-                    tokio::spawn(async move {
-                        let reader = BufReader::new(stdout);
-                        streams
-                            .process_output(task_name, OutputType::Stdout, reader, suppress_terminal, no_prefix)
-                            .await
-                    })
-                };
-
-                let stderr_handle = {
-                    let streams = streams.clone();
-                    let task_name = task_name.clone();
-                    tokio::spawn(async move {
-                        let reader = BufReader::new(stderr);
-                        streams
-                            .process_output(task_name, OutputType::Stderr, reader, suppress_terminal, no_prefix)
-                            .await
-                    })
-                };
-
-                // Wait for process to complete
-                let status = child.wait().await?;
-
-                // Wait for output handling to complete with timeout (only for output processing)
-                let output_timeout = Duration::from_secs(OUTPUT_PROCESSING_TIMEOUT_SECS);
-
-                match timeout(output_timeout, stdout_handle).await {
-                    Ok(Ok(Ok(()))) => {
-                        // Stdout processing completed successfully
-                    }
-                    Ok(Ok(Err(e))) => {
-                        error!("Stdout processing failed for task {task_name}: {e}");
-                    }
-                    Ok(Err(e)) => {
-                        error!("Stdout processing join failed for task {task_name}: {e}");
-                    }
-                    Err(_) => {
-                        error!("Stdout processing timed out for task {task_name}");
-                    }
-                }
-
-                match timeout(output_timeout, stderr_handle).await {
-                    Ok(Ok(Ok(()))) => {
-                        // Stderr processing completed successfully
-                    }
-                    Ok(Ok(Err(e))) => {
-                        error!("Stderr processing failed for task {task_name}: {e}");
-                    }
-                    Ok(Err(e)) => {
-                        error!("Stderr processing join failed for task {task_name}: {e}");
-                    }
-                    Err(_) => {
-                        error!("Stderr processing timed out for task {task_name}");
-                    }
-                }
-
-                if status.success() {
-                    Ok(())
-                } else {
-                    // Get fully qualified log file paths
-                    let stdout_log = tasks_dir.join(&task_name).join("stdout.log");
-                    let stderr_log = tasks_dir.join(&task_name).join("stderr.log");
-
-                    // Read stderr content to include in error message
-                    let stderr_content = tokio::fs::read_to_string(&stderr_log).await.unwrap_or_default();
-                    let stderr_preview = if !stderr_content.trim().is_empty() {
-                        let lines: Vec<&str> = stderr_content.lines().collect();
-                        let preview_lines = if lines.len() > 20 { &lines[lines.len() - 20..] } else { &lines[..] };
-                        format!(
-                            "\n\nError output (last {} lines):\n{}",
-                            preview_lines.len(),
-                            preview_lines.join("\n")
-                        )
+                    let streams = if let Some(streams_map) = &task_streams {
+                        streams_map
+                            .get(&task_name)
+                            .ok_or_else(|| eyre!("TaskStreams not found for task {}", task_name))?
+                            .clone()
                     } else {
-                        String::new()
+                        TaskStreams::new(&task_name, &tasks_dir).await?
                     };
 
-                    Err(eyre!(
-                        "Task {} failed with exit code {:?}{}\n\nLogs:\n  stdout: {}\n  stderr: {}",
-                        task_name,
-                        status.code(),
-                        stderr_preview,
-                        stdout_log.canonicalize().unwrap_or(stdout_log).display(),
-                        stderr_log.canonicalize().unwrap_or(stderr_log).display()
-                    ))
+                    // Start output handling
+                    let stdout_handle = {
+                        let streams = streams.clone();
+                        let task_name = task_name.clone();
+                        tokio::spawn(async move {
+                            let reader = BufReader::new(stdout);
+                            streams
+                                .process_output(task_name, OutputType::Stdout, reader, suppress_terminal, no_prefix)
+                                .await
+                        })
+                    };
+
+                    let stderr_handle = {
+                        let streams = streams.clone();
+                        let task_name = task_name.clone();
+                        tokio::spawn(async move {
+                            let reader = BufReader::new(stderr);
+                            streams
+                                .process_output(task_name, OutputType::Stderr, reader, suppress_terminal, no_prefix)
+                                .await
+                        })
+                    };
+
+                    // Wait for process to complete
+                    let status = child.wait().await?;
+                    exit_code = status.code();
+
+                    // Wait for output handling to complete with timeout (only for output processing)
+                    let output_timeout = Duration::from_secs(OUTPUT_PROCESSING_TIMEOUT_SECS);
+
+                    match timeout(output_timeout, stdout_handle).await {
+                        Ok(Ok(Ok(()))) => {
+                            // Stdout processing completed successfully
+                        }
+                        Ok(Ok(Err(e))) => {
+                            error!("Stdout processing failed for task {task_name}: {e}");
+                        }
+                        Ok(Err(e)) => {
+                            error!("Stdout processing join failed for task {task_name}: {e}");
+                        }
+                        Err(_) => {
+                            error!("Stdout processing timed out for task {task_name}");
+                        }
+                    }
+
+                    match timeout(output_timeout, stderr_handle).await {
+                        Ok(Ok(Ok(()))) => {
+                            // Stderr processing completed successfully
+                        }
+                        Ok(Ok(Err(e))) => {
+                            error!("Stderr processing failed for task {task_name}: {e}");
+                        }
+                        Ok(Err(e)) => {
+                            error!("Stderr processing join failed for task {task_name}: {e}");
+                        }
+                        Err(_) => {
+                            error!("Stderr processing timed out for task {task_name}");
+                        }
+                    }
+
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        // Get fully qualified log file paths
+                        let stdout_log = tasks_dir.join(&task_name).join("stdout.log");
+                        let stderr_log = tasks_dir.join(&task_name).join("stderr.log");
+
+                        // Read stderr content to include in error message
+                        let stderr_content = tokio::fs::read_to_string(&stderr_log).await.unwrap_or_default();
+                        let stderr_preview = if !stderr_content.trim().is_empty() {
+                            let lines: Vec<&str> = stderr_content.lines().collect();
+                            let preview_lines = if lines.len() > 20 { &lines[lines.len() - 20..] } else { &lines[..] };
+                            format!(
+                                "\n\nError output (last {} lines):\n{}",
+                                preview_lines.len(),
+                                preview_lines.join("\n")
+                            )
+                        } else {
+                            String::new()
+                        };
+
+                        Err(eyre!(
+                            "Task {} failed with exit code {:?}{}\n\nLogs:\n  stdout: {}\n  stderr: {}",
+                            task_name,
+                            status.code(),
+                            stderr_preview,
+                            stdout_log.canonicalize().unwrap_or(stdout_log).display(),
+                            stderr_log.canonicalize().unwrap_or(stderr_log).display()
+                        ))
+                    }
                 }
+                .await;
+
+                result.map_err(TaskFailure::from)
             }
             .await;
 
-            match result {
+            // Exactly one report per started task, whichever way the body ended.
+            let report = match outcome {
+                Ok(()) if aggregator_only => TaskReport::success(task_name.clone()),
                 Ok(()) => {
                     info!("Task {task_name} completed successfully");
 
@@ -1238,45 +1472,49 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     // Record task completion in database (graceful degradation)
                     if let Some(task_id) = db_task_id
                         && let Some(store) = workspace.state_store()
-                        && let Err(e) = store.record_task_complete(task_id, 0, super::state::TaskStatus::Completed)
+                        && let Err(e) = store.record_task_complete(
+                            task_id,
+                            exit_code.unwrap_or(0),
+                            super::state::TaskStatus::Completed,
+                        )
                     {
                         log::warn!("Failed to record task completion in database: {}", e);
                     }
 
-                    // Ensure we send the completion message
-                    if let Err(e) = tx.send(Ok(task_name.clone())).await {
-                        error!("Failed to send completion notification for task {task_name}: {e}");
-                    }
+                    TaskReport::success(task_name.clone())
                 }
-                Err(e) => {
-                    error!("Task {task_name} failed: {e}");
+                Err(TaskFailure { error, exit_code: code }) => {
+                    error!("Task {task_name} failed: {error}");
+                    // The body's own observation wins; `code` only carries a
+                    // value on paths that set it before failing.
+                    let recorded = code.or(exit_code);
 
                     // Record task failure in database (graceful degradation)
                     if let Some(task_id) = db_task_id
                         && let Some(store) = workspace.state_store()
                     {
-                        // Extract exit code from error message if possible
-                        let exit_code = e
-                            .to_string()
-                            .split("exit code")
-                            .nth(1)
-                            .and_then(|s| s.trim().parse::<i32>().ok())
-                            .unwrap_or(1);
-
                         // Ignore errors in graceful degradation
-                        let _ = store.record_task_complete(task_id, exit_code, super::state::TaskStatus::Failed);
+                        let _ = store.record_task_complete(
+                            task_id,
+                            recorded.unwrap_or(1),
+                            super::state::TaskStatus::Failed,
+                        );
                     }
 
-                    let mut statuses = task_statuses.lock().await;
-                    statuses.insert(task_name.clone(), TaskStatus::Failed(e.to_string()));
-                    if let Err(send_err) = tx.send(Err(e)).await {
-                        error!("Failed to send error notification for task {task_name}: {send_err}");
+                    {
+                        let mut statuses = task_statuses.lock().await;
+                        statuses.insert(task_name.clone(), TaskStatus::Failed(error.to_string()));
                     }
+                    TaskReport::failure(task_name.clone(), error, recorded)
                 }
-            }
+            };
 
-            Ok(())
-        }))
+            if let Err(e) = tx.send(report).await {
+                error!("Failed to report outcome for task {task_name}: {e}");
+            }
+        });
+
+        Ok(())
     }
 
     pub async fn get_task_statuses(&self) -> HashMap<String, TaskStatus> {
@@ -1394,6 +1632,76 @@ mod tests {
             std::env::set_var("OTTO_DB_PATH", &db_path);
             std::env::set_var("OTTO_HOME", &otto_home);
         }
+    }
+
+    fn plain_task(name: &str, deps: Vec<TaskEdge>) -> Task {
+        Task::new(
+            name.to_string(),
+            None,
+            deps,
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo hi".to_string(),
+        )
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_scheduler_rejects_a_dependency_cycle_at_init() {
+        let temp_dir = TempDir::new().unwrap();
+        setup_test_db(temp_dir.path());
+        let workspace = Workspace::new(PathBuf::from(temp_dir.path())).await.unwrap();
+        workspace.init().await.unwrap();
+
+        let tasks = vec![
+            plain_task("a", vec![TaskEdge::success("b")]),
+            plain_task("b", vec![TaskEdge::success("a")]),
+        ];
+
+        let err = match TaskScheduler::new(tasks, Arc::new(workspace), ExecutionContext::new(), 2, false).await {
+            Ok(_) => panic!("a 2-cycle must be rejected before anything is scheduled"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("dependency cycle detected"), "{err}");
+    }
+
+    /// A run in which every task is gated out accomplished nothing, and used to
+    /// report that as success.
+    #[tokio::test]
+    #[serial]
+    async fn test_execute_all_errors_when_no_task_reached_a_terminal_state() {
+        let temp_dir = TempDir::new().unwrap();
+        setup_test_db(temp_dir.path());
+        let workspace = Workspace::new(PathBuf::from(temp_dir.path())).await.unwrap();
+        workspace.init().await.unwrap();
+
+        // `b` depends on a task that is not in the run set, so its edge never
+        // resolves and post-loop reconciliation marks it Skipped.
+        let tasks = vec![plain_task("b", vec![TaskEdge::success("absent")])];
+        let scheduler = TaskScheduler::new(tasks, Arc::new(workspace), ExecutionContext::new(), 2, false)
+            .await
+            .unwrap();
+
+        let err = scheduler
+            .execute_all()
+            .await
+            .expect_err("a run where nothing ran must not report success");
+        assert!(err.to_string().contains("no task reached a terminal state"), "{err}");
+    }
+
+    #[test]
+    fn test_task_report_carries_the_name_and_code_structurally() {
+        let ok = TaskReport::success("build".to_string());
+        assert_eq!(ok.name, "build");
+        assert_eq!(ok.exit_code, Some(0));
+        assert!(ok.error.is_none());
+
+        let failed = TaskReport::failure("build".to_string(), eyre!("No such file or directory"), Some(7));
+        assert_eq!(failed.name, "build", "the name must not come from the error text");
+        assert_eq!(failed.exit_code, Some(7));
+        assert!(failed.error.is_some());
     }
 
     fn serial_member(name: &str, group: &str, index: usize) -> Task {
@@ -1906,6 +2214,10 @@ mod tests {
     #[serial]
     async fn test_file_dependencies_timestamp_precision() -> Result<()> {
         let temp_dir = TempDir::new()?;
+        // Without this the workspace lands wherever the previously-run
+        // serial test left OTTO_HOME pointing (the MemFs workspace tests set it
+        // to /otto-home and never restore it), which is not writable.
+        setup_test_db(temp_dir.path());
         let work_dir = PathBuf::from(temp_dir.path());
 
         let input_file = work_dir.join("input.txt");
@@ -1949,6 +2261,10 @@ mod tests {
     #[serial]
     async fn test_file_dependencies_empty_lists() -> Result<()> {
         let temp_dir = TempDir::new()?;
+        // Without this the workspace lands wherever the previously-run
+        // serial test left OTTO_HOME pointing (the MemFs workspace tests set it
+        // to /otto-home and never restore it), which is not writable.
+        setup_test_db(temp_dir.path());
         let work_dir = PathBuf::from(temp_dir.path());
 
         // Task with no file dependencies

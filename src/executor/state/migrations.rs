@@ -2,7 +2,7 @@ use eyre::{Context, Result};
 use rusqlite::Connection;
 use std::time::SystemTime;
 
-use super::schema::{SCHEMA_VERSION, init_schema, migrate_v1_to_v2};
+use super::schema::{SCHEMA_VERSION, init_schema, migrate_v1_to_v2, migrate_v2_to_v3};
 
 pub fn get_current_version(conn: &Connection) -> Result<i64> {
     let table_exists: bool = conn
@@ -60,7 +60,15 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             migrate_v1_to_v2(conn).context("Failed to migrate from v1 to v2")?;
             set_version(conn, 2)?;
         }
-        // Future migrations will go here (v2 to v3, etc.)
+        if current_version < 3 {
+            // Step and version bump in one transaction: a crash between them
+            // leaves a database whose recorded version lies about its shape.
+            let tx = conn.unchecked_transaction()?;
+            migrate_v2_to_v3(conn).context("Failed to migrate from v2 to v3")?;
+            set_version(conn, 3)?;
+            tx.commit()?;
+        }
+        // Future migrations will go here (v3 to v4, etc.)
     } else if current_version > SCHEMA_VERSION {
         return Err(eyre::eyre!(
             "Database schema version {} is newer than supported version {}. Please upgrade otto.",
@@ -121,6 +129,70 @@ mod tests {
 
         assert_eq!(version1, version2);
 
+        Ok(())
+    }
+
+    /// A v2-shaped tasks table, i.e. the schema before `skip_reason` existed.
+    fn init_v2_tasks_table(conn: &Connection) -> Result<()> {
+        conn.execute(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE tasks (
+                id INTEGER PRIMARY KEY,
+                run_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                script_hash TEXT,
+                exit_code INTEGER,
+                started_at INTEGER,
+                ended_at INTEGER,
+                duration_seconds REAL,
+                stdout_path TEXT,
+                stderr_path TEXT,
+                script_path TEXT
+            )",
+            [],
+        )?;
+        set_version(conn, 2)?;
+        Ok(())
+    }
+
+    fn has_skip_reason(conn: &Connection) -> Result<bool> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'skip_reason'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    #[test]
+    fn test_migrate_v2_to_v3_adds_skip_reason() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        init_v2_tasks_table(&conn)?;
+        assert!(!has_skip_reason(&conn)?, "the v2 table must not have the column yet");
+
+        migrate(&conn)?;
+
+        assert_eq!(get_current_version(&conn)?, SCHEMA_VERSION);
+        assert!(has_skip_reason(&conn)?, "v3 adds skip_reason to tasks");
+        Ok(())
+    }
+
+    #[test]
+    fn test_migrate_v2_to_v3_survives_an_interrupted_run() -> Result<()> {
+        // The column landed but the version bump did not: re-running must fix
+        // the version rather than failing on a duplicate column.
+        let conn = Connection::open_in_memory()?;
+        init_v2_tasks_table(&conn)?;
+        conn.execute("ALTER TABLE tasks ADD COLUMN skip_reason TEXT", [])?;
+
+        migrate(&conn)?;
+
+        assert_eq!(get_current_version(&conn)?, SCHEMA_VERSION);
+        assert!(has_skip_reason(&conn)?);
         Ok(())
     }
 

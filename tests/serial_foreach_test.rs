@@ -32,7 +32,7 @@ fn plan(ottofile: &Path, targets: &[&str]) -> Result<Vec<Task>> {
     ];
     args.extend(targets.iter().map(|t| (*t).to_string()));
     let mut parser = Parser::new(args)?;
-    let (parser_tasks, _, _, _, _, _) = parser.parse()?;
+    let (parser_tasks, _, _, _, _, _) = parser.parse()?.into_run()?.into_parts();
     Ok(parser_tasks.into_iter().map(Task::from).collect())
 }
 

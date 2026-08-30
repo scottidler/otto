@@ -74,7 +74,7 @@ tasks:
         "fmt-check".to_string(),
     ];
     let mut parser = Parser::new(args)?;
-    let (parser_tasks, _, _, _, _, _) = parser.parse()?;
+    let (parser_tasks, _, _, _, _, _) = parser.parse()?.into_run()?.into_parts();
 
     let tasks = convert_to_executor_tasks(parser_tasks);
     let workspace = Workspace::new(work_dir).await?;
@@ -121,7 +121,7 @@ tasks:
         "fmt-check".to_string(),
     ];
     let mut parser = Parser::new(args)?;
-    let (parser_tasks, _, _, _, _, _) = parser.parse()?;
+    let (parser_tasks, _, _, _, _, _) = parser.parse()?.into_run()?.into_parts();
 
     let tasks = convert_to_executor_tasks(parser_tasks);
     let workspace = Workspace::new(work_dir).await?;

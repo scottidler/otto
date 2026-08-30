@@ -47,7 +47,7 @@ tasks:
     ];
 
     let mut parser = Parser::new(args).unwrap();
-    let (tasks, _, _, _, _, _) = parser.parse().unwrap();
+    let (tasks, _, _, _, _, _) = parser.parse().unwrap().into_run().unwrap().into_parts();
 
     assert_eq!(tasks.len(), 1);
     let task = &tasks[0];
@@ -94,7 +94,7 @@ tasks:
     ];
 
     let mut parser = Parser::new(args).unwrap();
-    let (tasks, _, _, _, _, _) = parser.parse().unwrap();
+    let (tasks, _, _, _, _, _) = parser.parse().unwrap().into_run().unwrap().into_parts();
 
     assert_eq!(tasks.len(), 1);
     let task = &tasks[0];
@@ -151,7 +151,7 @@ tasks:
     ];
 
     let mut parser = Parser::new(args).unwrap();
-    let (tasks, _, _, _, _, _) = parser.parse().unwrap();
+    let (tasks, _, _, _, _, _) = parser.parse().unwrap().into_run().unwrap().into_parts();
 
     assert_eq!(tasks.len(), 1);
     let task = &tasks[0];
@@ -205,7 +205,7 @@ tasks:
     ];
 
     let mut parser = Parser::new(args).unwrap();
-    let (tasks, _, _, _, _, _) = parser.parse().unwrap();
+    let (tasks, _, _, _, _, _) = parser.parse().unwrap().into_run().unwrap().into_parts();
 
     assert_eq!(tasks.len(), 1);
     let task = &tasks[0];
@@ -280,7 +280,7 @@ tasks:
     ];
 
     let mut parser = Parser::new(args).unwrap();
-    let (tasks, _, _, _, _, _) = parser.parse().unwrap();
+    let (tasks, _, _, _, _, _) = parser.parse().unwrap().into_run().unwrap().into_parts();
 
     assert_eq!(tasks.len(), 1);
     let task = &tasks[0];
@@ -343,7 +343,7 @@ tasks:
     ];
 
     let mut parser = Parser::new(args).unwrap();
-    let (tasks, _, _, _, _, _) = parser.parse().unwrap();
+    let (tasks, _, _, _, _, _) = parser.parse().unwrap().into_run().unwrap().into_parts();
 
     assert_eq!(tasks.len(), 1);
     let task = &tasks[0];
@@ -385,7 +385,7 @@ tasks:
     ];
 
     let mut parser = Parser::new(args_parallel).unwrap();
-    let (tasks_parallel, _, _, _, _, _) = parser.parse().unwrap();
+    let (tasks_parallel, _, _, _, _, _) = parser.parse().unwrap().into_run().unwrap().into_parts();
 
     // Subtasks should not depend on each other (parent's When::Always edges to subtasks
     // are excluded - that's the aggregation gate, not a sibling dependency).
@@ -418,7 +418,7 @@ tasks:
     ];
 
     let mut parser = Parser::new(args_serial).unwrap();
-    let (tasks_serial, _, _, _, _, _) = parser.parse().unwrap();
+    let (tasks_serial, _, _, _, _, _) = parser.parse().unwrap().into_run().unwrap().into_parts();
 
     let mut ordered: Vec<(usize, String)> = Vec::new();
     for task in tasks_serial.iter().filter(|t| t.name.starts_with("examples:")) {
@@ -508,7 +508,9 @@ tasks:
     std::env::set_current_dir(&original_dir).unwrap();
 
     // The parse should succeed and find the examples
-    let (tasks, _, _, _, _, _) = result.expect("Parse should succeed even from subdirectory");
+    let (tasks, _, _, _, _, _) = result
+        .map(|o| o.into_run().unwrap().into_parts())
+        .expect("Parse should succeed even from subdirectory");
 
     // Should have expanded subtasks for both .rs files
     let subtask_names: Vec<_> = tasks.iter().map(|t| t.name.as_str()).collect();
@@ -597,7 +599,9 @@ tasks:
 
     std::env::set_current_dir(&original_dir).unwrap();
 
-    let (tasks, _, _, _, _, _) = result.expect("Parse should succeed from docs subdirectory");
+    let (tasks, _, _, _, _, _) = result
+        .map(|o| o.into_run().unwrap().into_parts())
+        .expect("Parse should succeed from docs subdirectory");
 
     // Should find all 3 shell scripts
     let foreach_subtasks: Vec<_> = tasks
@@ -656,7 +660,9 @@ tasks:
 
     std::env::set_current_dir(&original_dir).unwrap();
 
-    let (tasks, _, _, _, _, _) = result.expect("Parse should succeed from subdirectory");
+    let (tasks, _, _, _, _, _) = result
+        .map(|o| o.into_run().unwrap().into_parts())
+        .expect("Parse should succeed from subdirectory");
 
     let foreach_subtasks: Vec<_> = tasks
         .iter()

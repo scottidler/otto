@@ -29,7 +29,13 @@ pub trait StateStore: Send + Sync {
         script_path: Option<&PathBuf>,
     ) -> Result<i64>;
     fn record_task_complete(&self, task_id: i64, exit_code: i32, status: TaskStatus) -> Result<()>;
-    fn record_task_skipped(&self, run_id: i64, task_name: &str, script_hash: Option<&str>) -> Result<i64>;
+    fn record_task_skipped(
+        &self,
+        run_id: i64,
+        task_name: &str,
+        script_hash: Option<&str>,
+        skip_reason: Option<&str>,
+    ) -> Result<i64>;
 
     // Query methods
     fn get_recent_runs(&self, limit: usize, project_filter: Option<&str>) -> Result<Vec<RunRecord>>;
@@ -198,6 +204,7 @@ impl StateStore for MemoryStateStore {
             stdout_path: stdout_path.cloned(),
             stderr_path: stderr_path.cloned(),
             script_path: script_path.cloned(),
+            skip_reason: None,
         };
 
         self.tasks.write().unwrap().push(task);
@@ -224,7 +231,13 @@ impl StateStore for MemoryStateStore {
         Ok(())
     }
 
-    fn record_task_skipped(&self, run_id: i64, task_name: &str, script_hash: Option<&str>) -> Result<i64> {
+    fn record_task_skipped(
+        &self,
+        run_id: i64,
+        task_name: &str,
+        script_hash: Option<&str>,
+        skip_reason: Option<&str>,
+    ) -> Result<i64> {
         let task_id = self.next_task_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let task = TaskRecord {
@@ -240,6 +253,7 @@ impl StateStore for MemoryStateStore {
             stdout_path: None,
             stderr_path: None,
             script_path: None,
+            skip_reason: skip_reason.map(String::from),
         };
 
         self.tasks.write().unwrap().push(task);
@@ -568,7 +582,9 @@ mod tests {
         let metadata = create_test_metadata("abc123", 1234567890);
         let run_id = store.record_run_start(&metadata).unwrap();
 
-        let task_id = store.record_task_skipped(run_id, "build", Some("hash123")).unwrap();
+        let task_id = store
+            .record_task_skipped(run_id, "build", Some("hash123"), Some("dep fetch skipped; cascade"))
+            .unwrap();
 
         assert!(task_id > 0);
 

@@ -28,7 +28,7 @@ fn parse_config(config: &str, cli_args: Vec<&str>) -> Result<Vec<Task>, eyre::Re
     args.extend(cli_args.into_iter().map(String::from));
 
     let mut parser = Parser::new(args)?;
-    let (tasks, _, _, _, _, _) = parser.parse()?;
+    let (tasks, _, _, _, _, _) = parser.parse()?.into_run()?.into_parts();
     Ok(tasks)
 }
 

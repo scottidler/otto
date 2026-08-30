@@ -1,8 +1,8 @@
 use env_logger::Target;
 use eyre::{Report, Result, WrapErr};
 use log::info;
-use otto::RuntimeConfig;
 use otto::cli::Parser;
+use otto::{RuntimeConfig, Startup};
 use std::env;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -144,8 +144,11 @@ async fn main() {
         }
     };
 
+    // The parser reports what to do; this is the only place that ends the
+    // process. `Startup::Exit` means help/version/--tasks already printed.
     let config = match RuntimeConfig::from_parser(&mut parser) {
-        Ok(c) => c,
+        Ok(Startup::Run(c)) => *c,
+        Ok(Startup::Exit(code)) => std::process::exit(code),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);

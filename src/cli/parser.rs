@@ -23,7 +23,7 @@ use crate::cfg::env as env_eval;
 use crate::cfg::param::ParamType;
 use crate::cfg::resolver::DynamicResolver;
 use crate::cfg::task::{ForeachItem, ForeachSpec, TaskSpecs};
-use crate::cli::builtins::BUILTIN_COMMANDS;
+use crate::cli::builtins::{BUILTIN_COMMANDS, is_builtin};
 
 pub type DAG<T> = Dag<T, (), u32>;
 
@@ -62,6 +62,106 @@ pub fn is_valid_ottofile_name(filename: &str) -> bool {
 }
 
 static DEFAULT_JOBS: Lazy<String> = Lazy::new(|| num_cpus::get().to_string());
+
+/// Largest edit distance at which an unknown task name is worth suggesting a
+/// replacement for. Beyond this the "did you mean" is noise, not help.
+const MAX_SUGGESTION_DISTANCE: usize = 3;
+
+/// Everything `otto` needs to execute a run, once the command line has been
+/// parsed and the ottofile has been loaded.
+#[derive(Debug)]
+pub struct RunPlan {
+    pub tasks: Vec<Task>,
+    pub hash: String,
+    pub ottofile: Option<PathBuf>,
+    pub jobs: usize,
+    pub tui_mode: bool,
+    /// `--no-prefix`: suppress the `[task]` prefix on terminal output.
+    pub no_prefix: bool,
+}
+
+impl RunPlan {
+    /// The plan as a positional tuple, for call sites that only want one or two
+    /// of the fields.
+    #[allow(clippy::type_complexity)]
+    pub fn into_parts(self) -> (Vec<Task>, String, Option<PathBuf>, usize, bool, bool) {
+        (
+            self.tasks,
+            self.hash,
+            self.ottofile,
+            self.jobs,
+            self.tui_mode,
+            self.no_prefix,
+        )
+    }
+}
+
+/// What `Parser::parse` decided this invocation should do.
+///
+/// The parser is a library: it decides and reports, and `main` is the only
+/// place allowed to end the process. `Exit` means the requested output (help,
+/// version, `--tasks`, `--list-subtasks`) has already been written and the
+/// process should terminate with the carried code, running no task.
+#[derive(Debug)]
+pub enum ParseOutcome {
+    Run(RunPlan),
+    Exit(i32),
+}
+
+impl ParseOutcome {
+    /// The run plan, or an error if this invocation was not a run.
+    pub fn into_run(self) -> Result<RunPlan> {
+        match self {
+            ParseOutcome::Run(plan) => Ok(plan),
+            ParseOutcome::Exit(code) => Err(eyre!("expected a run plan, got an exit request with code {code}")),
+        }
+    }
+}
+
+/// The leading args that `partitions()` would drop on the floor.
+///
+/// `partitions()` splits at the first arg that names a task, so everything
+/// before that index is silently discarded. Those args are unknown task names
+/// (a task's own flags always follow its name, never precede it), and this is
+/// what makes them visible. Returns `None` when every arg is accounted for.
+fn unconsumed_args<'a>(args: &'a [String], task_names: &[String]) -> Option<&'a [String]> {
+    if args.is_empty() {
+        return None;
+    }
+    let first_task = args.iter().position(|arg| task_names.contains(arg));
+    match first_task {
+        Some(0) => None,
+        Some(i) => Some(&args[..i]),
+        None => Some(args),
+    }
+}
+
+/// The nearest known task name to `unknown`, if one is near enough to suggest.
+fn nearest_task_name<'a>(unknown: &str, task_names: &'a [String]) -> Option<&'a str> {
+    task_names
+        .iter()
+        .filter(|name| name.as_str() != "graph" && name.as_str() != "help")
+        .map(|name| (levenshtein::levenshtein(unknown, name), name.as_str()))
+        .filter(|(distance, name)| *distance <= MAX_SUGGESTION_DISTANCE && *distance < name.len())
+        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)))
+        .map(|(_, name)| name)
+}
+
+/// The error `otto <unknown-task>` fails with, carrying a near-match
+/// suggestion when there is one - the suggestion is what makes the new failure
+/// self-explanatory instead of just louder.
+fn unknown_task_error(unknown: &[String], task_names: &[String]) -> eyre::Report {
+    let names: Vec<&str> = unknown.iter().map(String::as_str).collect();
+    let head = if names.len() == 1 {
+        format!("unknown task '{}'", names[0])
+    } else {
+        format!("unknown tasks: {}", names.join(", "))
+    };
+    match nearest_task_name(names[0], task_names) {
+        Some(suggestion) => eyre!("{head}; did you mean '{suggestion}'?"),
+        None => eyre!("{head}"),
+    }
+}
 
 fn calculate_hash(action: &String) -> String {
     let mut hasher = Sha256::new();
@@ -388,8 +488,12 @@ impl Parser {
         self.config_spec.otto.retention.clone()
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn parse(&mut self) -> Result<(Vec<Task>, String, Option<PathBuf>, usize, bool, bool)> {
+    /// Parse the command line and decide what this invocation should do.
+    ///
+    /// Never terminates the process: every path that used to end the process
+    /// from library code now returns `ParseOutcome::Exit(code)` after writing
+    /// its own output, so the only place that ends the process is `main`.
+    pub fn parse(&mut self) -> Result<ParseOutcome> {
         let help_requested = self.args.contains(&"--help".to_string()) || self.args.contains(&"-h".to_string());
 
         let otto_cmd = Self::otto_command();
@@ -400,7 +504,7 @@ impl Parser {
                 match e.kind() {
                     ErrorKind::DisplayVersion => {
                         e.print().expect("clap error print failed");
-                        std::process::exit(0);
+                        return Ok(ParseOutcome::Exit(0));
                     }
                     ErrorKind::DisplayHelp => {
                         if help_requested {
@@ -427,7 +531,7 @@ impl Parser {
                                             temp_parser.inject_builtin_commands();
                                             let mut help_cmd = temp_parser.build_help_command();
                                             help_cmd.print_help().expect("Failed to print help");
-                                            std::process::exit(0);
+                                            return Ok(ParseOutcome::Exit(0));
                                         }
                                         Err(e) => {
                                             // The ottofile EXISTS and failed to
@@ -442,7 +546,7 @@ impl Parser {
                                             let mut help_cmd = Self::build_bare_help_command();
                                             help_cmd.print_help().expect("Failed to print help");
                                             eprintln!("{}", ottofile_parse_error_message(&path, &e));
-                                            std::process::exit(2);
+                                            return Ok(ParseOutcome::Exit(2));
                                         }
                                     }
                                 }
@@ -450,12 +554,12 @@ impl Parser {
                                     // No ottofile found, show help with error message
                                     let mut help_cmd = Self::build_help_command_with_error();
                                     help_cmd.print_help().expect("Failed to print help");
-                                    std::process::exit(2);
+                                    return Ok(ParseOutcome::Exit(2));
                                 }
                             }
                         } else {
                             e.print().expect("clap error print failed");
-                            std::process::exit(0);
+                            return Ok(ParseOutcome::Exit(0));
                         }
                     }
                     _ => return Err(eyre!(e)),
@@ -469,18 +573,12 @@ impl Parser {
             .cloned()
             .expect("ottofile should have a value from flag, env var, or default");
 
-        // Extract jobs parameter (has default value from DEFAULT_JOBS)
-        let jobs_str = matches
-            .get_one::<String>("jobs")
-            .expect("jobs should have default value");
-        self.jobs = jobs_str.parse::<usize>().unwrap_or_else(|_| {
-            eprintln!(
-                "Warning: Invalid jobs value '{}', using {} CPUs",
-                jobs_str,
-                num_cpus::get()
-            );
-            num_cpus::get()
-        });
+        // Extract jobs parameter. The value parser rejects 0 and non-numbers at
+        // parse time (clap exits 2 with a usage error), so anything that reaches
+        // here is a usable concurrency limit - `-j 0` used to be accepted and
+        // then hot-spin the launch loop at 100% CPU forever.
+        self.jobs = usize::try_from(*matches.get_one::<u64>("jobs").expect("jobs should have default value"))
+            .map_err(|_| eyre!("-j/--jobs value is too large for this platform"))?;
 
         // Extract tui flag
         let tui_mode = matches.get_flag("tui");
@@ -505,9 +603,9 @@ impl Parser {
                 // failure must name the command and its exit code, not just
                 // the outermost "failed to resolve" context.
                 eprintln!("Error: {e:#}");
-                std::process::exit(1);
+                return Ok(ParseOutcome::Exit(1));
             }
-            std::process::exit(0);
+            return Ok(ParseOutcome::Exit(0));
         }
 
         // Handle --tasks flag: emit the machine-readable task list and exit,
@@ -525,17 +623,17 @@ impl Parser {
                     match crate::cli::commands::tasks::render_tasks_view(&view, format) {
                         Ok(rendered) => {
                             println!("{rendered}");
-                            std::process::exit(0);
+                            return Ok(ParseOutcome::Exit(0));
                         }
                         Err(e) => {
                             eprintln!("Error: {e:#}");
-                            std::process::exit(1);
+                            return Ok(ParseOutcome::Exit(1));
                         }
                     }
                 }
                 Err(e) => {
                     eprintln!("Error: {e:#}");
-                    std::process::exit(1);
+                    return Ok(ParseOutcome::Exit(1));
                 }
             }
         }
@@ -546,7 +644,7 @@ impl Parser {
         // Handle help commands
         if self.should_show_help(&remaining_args) {
             self.show_help(&remaining_args)?;
-            std::process::exit(0);
+            return Ok(ParseOutcome::Exit(0));
         }
 
         // SECOND PASS: Determine which tasks to run
@@ -556,6 +654,13 @@ impl Parser {
         } else {
             // Task arguments provided - partition and parse them
             let task_names = self.get_task_names(&remaining_args)?;
+            // An arg that no partition consumes is a task name otto does not
+            // know. Erroring here is what stops `otto nonexistent` from being a
+            // silent exit 0 and `otto nonexistent build` from quietly running
+            // build.
+            if let Some(unknown) = unconsumed_args(&remaining_args, &task_names) {
+                return Err(unknown_task_error(unknown, &task_names));
+            }
             let partitions = partitions(&remaining_args, &task_names);
             self.pargs = partitions;
 
@@ -566,14 +671,14 @@ impl Parser {
         // Process tasks and build DAG
         let tasks = self.process_tasks_with_filter(&tasks_to_run)?;
 
-        Ok((
+        Ok(ParseOutcome::Run(RunPlan {
             tasks,
-            self.hash.clone(),
-            self.ottofile.clone(),
-            self.jobs,
+            hash: self.hash.clone(),
+            ottofile: self.ottofile.clone(),
+            jobs: self.jobs,
             tui_mode,
             no_prefix,
-        ))
+        }))
     }
 
     pub fn parse_all_tasks(&mut self) -> Result<(Vec<Task>, String, Option<PathBuf>)> {
@@ -599,7 +704,7 @@ impl Parser {
                         .config_spec
                         .tasks
                         .keys()
-                        .filter(|name| *name != "graph")
+                        .filter(|name| !is_builtin(name))
                         .cloned()
                         .collect();
 
@@ -628,7 +733,7 @@ impl Parser {
             .config_spec
             .tasks
             .keys()
-            .filter(|name| *name != "graph")
+            .filter(|name| !is_builtin(name))
             .cloned()
             .collect();
 
@@ -681,7 +786,7 @@ impl Parser {
                 .value_name("N")
                 .help("Number of parallel jobs")
                 .default_value(DEFAULT_JOBS.as_str())
-                .value_parser(value_parser!(String)),
+                .value_parser(value_parser!(u64).range(1..)),
             Arg::new("tui")
                 .short('t')
                 .long("tui")
@@ -737,6 +842,10 @@ impl Parser {
             if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
                 return true;
             }
+            // An explicit task request is never a help request. Falling through
+            // to the default-tasks check below is what made `otto build` with
+            // `otto: tasks: []` print nothing and exit 0.
+            return false;
         }
 
         let default_tasks = &self.config_spec.otto.tasks;
@@ -761,6 +870,13 @@ impl Parser {
             // "otto <task> --help" or "otto <task> -h" - show task-specific help
             let task_name = &args[0];
             self.show_task_help(task_name)?;
+        } else {
+            // Exhaustive on purpose: the missing else used to swallow
+            // `otto help build extra` into a silent exit 0.
+            return Err(eyre!(
+                "unrecognized help request: {}; usage: otto help [TASK]",
+                args.join(" ")
+            ));
         }
         Ok(())
     }
@@ -770,10 +886,18 @@ impl Parser {
             let mut task_cmd = self.task_to_command_for_help(task);
             task_cmd.print_help()?;
         } else {
-            eprintln!("Task '{task_name}' not found");
-            std::process::exit(1);
+            return Err(match nearest_task_name(task_name, &self.known_task_names()) {
+                Some(suggestion) => eyre!("Task '{task_name}' not found; did you mean '{suggestion}'?"),
+                None => eyre!("Task '{task_name}' not found"),
+            });
         }
         Ok(())
+    }
+
+    /// Every task name this ottofile defines, built-ins included. The
+    /// suggestion set for an unknown name typed at the top level.
+    fn known_task_names(&self) -> Vec<String> {
+        self.config_spec.tasks.keys().cloned().collect()
     }
 
     /// Print all foreach subtasks and their parent tasks.
@@ -832,13 +956,13 @@ impl Parser {
         for task_pattern in default_tasks {
             if task_pattern == "*" {
                 // "*" means all tasks
-                resolved_tasks.extend(
-                    self.config_spec
-                        .tasks
-                        .keys()
-                        .filter(|name| *name != "graph") // Exclude meta-tasks
-                        .cloned(),
-                );
+                // Built-ins are injected into `tasks` before this runs, so an
+                // unfiltered `*` used to expand to them: a bare `otto` in a
+                // project defining only build/test executed the `Clean`
+                // builtin and exited 0. The stale lowercase `"graph"` filter
+                // this replaces never matched, because BUILTIN_COMMANDS are
+                // capitalized.
+                resolved_tasks.extend(self.config_spec.tasks.keys().filter(|name| !is_builtin(name)).cloned());
             } else {
                 // Specific task name
                 if self.config_spec.tasks.contains_key(task_pattern) {
@@ -867,7 +991,10 @@ impl Parser {
     /// the expansion site instead.
     fn get_task_names(&self, requested: &[String]) -> Result<Vec<String>> {
         let mut task_names: Vec<String> = self.config_spec.tasks.keys().cloned().collect();
-        task_names.push("graph".to_string()); // Always include built-in tasks
+        // Built-ins are already in `tasks` (injected before this runs). The
+        // lowercase `"graph"` that used to be pushed here was dead: the builtin
+        // is `Graph`, so `otto graph` partitioned on a name no task ever had and
+        // died later with "Task 'graph' not found".
         task_names.push("help".to_string()); // Always include help as a special command
 
         // Also include expanded subtask names for foreach tasks
@@ -1025,7 +1152,12 @@ impl Parser {
                 // - the expanded virtual parent has `foreach: None` and would reject the flag.
                 let clap_spec = self.config_spec.tasks.get(task_name).unwrap_or(task_spec);
                 let task_command = self.task_to_command(clap_spec, BuildMode::Bind)?;
-                let matches = task_command.get_matches_from(args);
+                // `try_`, not `get_matches_from`: the latter prints clap's usage
+                // and exits 2 from library code, so `otto build --bogus` could
+                // never be handled by a caller.
+                let matches = task_command
+                    .try_get_matches_from(args)
+                    .map_err(|e| eyre!("{}", e.render().ansi()))?;
 
                 for param_spec in task_spec.params.values() {
                     match param_spec.param_type {
@@ -2481,6 +2613,103 @@ fn partitions(args: &[String], task_names: &[String]) -> Vec<Vec<String>> {
 mod tests {
     use super::*;
 
+    // =========================================================================
+    // unknown-task detection (Phase 1: silent-success criticals)
+    // =========================================================================
+
+    fn names(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_unconsumed_args_none_when_first_arg_is_a_task() {
+        let args = names(&["build", "--flag", "value"]);
+        assert_eq!(unconsumed_args(&args, &names(&["build", "test"])), None);
+    }
+
+    #[test]
+    fn test_unconsumed_args_reports_leading_unknown_names() {
+        let args = names(&["nonexistent", "build"]);
+        let unknown = unconsumed_args(&args, &names(&["build", "test"])).expect("the leading arg is unknown");
+        assert_eq!(unknown, ["nonexistent".to_string()]);
+    }
+
+    #[test]
+    fn test_unconsumed_args_reports_everything_when_no_arg_names_a_task() {
+        let args = names(&["nope", "alsonope"]);
+        let unknown = unconsumed_args(&args, &names(&["build"])).expect("nothing was consumed");
+        assert_eq!(unknown, ["nope".to_string(), "alsonope".to_string()]);
+    }
+
+    #[test]
+    fn test_unconsumed_args_empty_input() {
+        assert_eq!(unconsumed_args(&[], &names(&["build"])), None);
+    }
+
+    #[test]
+    fn test_nearest_task_name_finds_a_one_edit_typo() {
+        assert_eq!(nearest_task_name("buld", &names(&["build", "test"])), Some("build"));
+    }
+
+    #[test]
+    fn test_nearest_task_name_gives_up_on_a_distant_name() {
+        assert_eq!(nearest_task_name("deploy-everything", &names(&["build", "test"])), None);
+    }
+
+    #[test]
+    fn test_nearest_task_name_ignores_the_internal_names() {
+        // "graph" and "help" are partition-only entries, not things to suggest.
+        assert_eq!(nearest_task_name("grap", &names(&["graph", "help"])), None);
+    }
+
+    #[test]
+    fn test_unknown_task_error_carries_a_suggestion() {
+        let err = unknown_task_error(&names(&["buld"]), &names(&["build"]));
+        let msg = err.to_string();
+        assert!(msg.contains("unknown task 'buld'"), "{msg}");
+        assert!(msg.contains("did you mean 'build'?"), "{msg}");
+    }
+
+    #[test]
+    fn test_unknown_task_error_without_a_near_match() {
+        let err = unknown_task_error(&names(&["zzzzzzzz"]), &names(&["build"]));
+        let msg = err.to_string();
+        assert_eq!(msg, "unknown task 'zzzzzzzz'");
+    }
+
+    #[test]
+    fn test_unknown_task_error_lists_every_unconsumed_name() {
+        let err = unknown_task_error(&names(&["zzzzzzzz", "yyyyyyyy"]), &names(&["build"]));
+        assert_eq!(err.to_string(), "unknown tasks: zzzzzzzz, yyyyyyyy");
+    }
+
+    #[test]
+    fn test_parse_outcome_into_run_rejects_an_exit_request() {
+        let err = ParseOutcome::Exit(2).into_run().expect_err("Exit is not a run");
+        assert!(err.to_string().contains("exit request with code 2"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_outcome_into_run_returns_the_plan() {
+        let plan = ParseOutcome::Run(RunPlan {
+            tasks: vec![],
+            hash: "abc".to_string(),
+            ottofile: None,
+            jobs: 4,
+            tui_mode: false,
+            no_prefix: true,
+        })
+        .into_run()
+        .expect("Run carries a plan");
+        let (tasks, hash, ottofile, jobs, tui, no_prefix) = plan.into_parts();
+        assert!(tasks.is_empty());
+        assert_eq!(hash, "abc");
+        assert!(ottofile.is_none());
+        assert_eq!(jobs, 4);
+        assert!(!tui);
+        assert!(no_prefix);
+    }
+
     /// A bare parser for the command-building tests. `task_to_command` and
     /// `param_to_arg` became methods in Phase 6b (the Bind mode needs the
     /// resolver and the ottofile directory), so these tests need an instance;
@@ -2815,7 +3044,7 @@ mod tests {
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse();
         assert!(result.is_ok());
-        let (_, _, _, jobs, _, _) = result.unwrap();
+        let (_, _, _, jobs, _, _) = result.unwrap().into_run().unwrap().into_parts();
         assert_eq!(jobs, 4);
     }
 
@@ -2839,12 +3068,16 @@ mod tests {
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse();
         assert!(result.is_ok());
-        let (_, _, _, jobs, _, _) = result.unwrap();
+        let (_, _, _, jobs, _, _) = result.unwrap().into_run().unwrap().into_parts();
         assert_eq!(jobs, num_cpus::get());
     }
 
+    /// Inverted deliberately: this test used to assert that `-j invalid`
+    /// silently fell back to `num_cpus::get()`. A concurrency limit the operator
+    /// typed and otto ignored is exactly the class of silent success this phase
+    /// closes, so the value parser now rejects it.
     #[test]
-    fn test_jobs_parameter_invalid() {
+    fn test_jobs_parameter_invalid_is_rejected() {
         use std::fs;
         use tempfile::TempDir;
 
@@ -2852,7 +3085,6 @@ mod tests {
         let ottofile_path = temp_dir.path().join("otto.yml");
         fs::write(&ottofile_path, "tasks:\n  test:\n    action: echo test\n").unwrap();
 
-        // Test with invalid jobs value (should fall back to num_cpus::get())
         let args = vec![
             "otto".to_string(),
             "-j".to_string(),
@@ -2863,10 +3095,42 @@ mod tests {
         ];
 
         let mut parser = Parser::new(args).unwrap();
-        let result = parser.parse();
-        assert!(result.is_ok());
-        let (_, _, _, jobs, _, _) = result.unwrap();
-        assert_eq!(jobs, num_cpus::get());
+        let err = parser
+            .parse()
+            .expect_err("-j invalid must be rejected, not silently defaulted");
+        assert!(
+            err.to_string().contains("invalid value 'invalid'"),
+            "error should name the rejected value, got: {err}"
+        );
+    }
+
+    /// `-j 0` used to be accepted and then hot-spin the launch loop at ~100% CPU
+    /// forever, because `while active_tasks.len() < 0` never admits a task.
+    #[test]
+    fn test_jobs_zero_is_rejected_at_parse() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ottofile_path = temp_dir.path().join("otto.yml");
+        fs::write(&ottofile_path, "tasks:\n  test:\n    action: echo test\n").unwrap();
+
+        let args = vec![
+            "otto".to_string(),
+            "-j".to_string(),
+            "0".to_string(),
+            "--ottofile".to_string(),
+            ottofile_path.to_string_lossy().to_string(),
+            "test".to_string(),
+        ];
+
+        let mut parser = Parser::new(args).unwrap();
+        let err = parser.parse().expect_err("-j 0 must be rejected at parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid value '0'") && msg.contains("not in 1.."),
+            "error should say 0 is out of range, got: {msg}"
+        );
     }
 
     // Tests for collect_transitive_deps and after semantic
@@ -3191,7 +3455,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result.into_run().unwrap().into_parts();
 
         // Find the subtasks and verify they are chained
         let subtask_a = tasks.iter().find(|t| t.name == "install:a");
@@ -3254,7 +3518,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result.into_run().unwrap().into_parts();
 
         // Find the subtasks
         let subtask_a = tasks.iter().find(|t| t.name == "install:a");
@@ -3314,7 +3578,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result.into_run().unwrap().into_parts();
 
         // Find subtask b
         let subtask_b = tasks.iter().find(|t| t.name == "install:b").unwrap();
@@ -3746,7 +4010,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result.into_run().unwrap().into_parts();
 
         // Should only have install:td, NOT install:ts or install:cs
         let task_names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
@@ -3793,7 +4057,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result.into_run().unwrap().into_parts();
 
         // Should have all subtasks plus the (now executable) virtual parent
         let task_names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
@@ -3836,7 +4100,7 @@ tasks:
 
         let mut parser = Parser::new(args).unwrap();
         let result = parser.parse().unwrap();
-        let (tasks, _, _, _, _, _) = result;
+        let (tasks, _, _, _, _, _) = result.into_run().unwrap().into_parts();
 
         let task_names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
         assert!(task_names.contains(&"deploy"), "deploy should be present");

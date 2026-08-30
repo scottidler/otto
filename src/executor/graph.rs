@@ -1,5 +1,5 @@
 use eyre::{Result, eyre};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::Path;
 use std::process::Command;
@@ -144,6 +144,75 @@ impl DagVisualizer {
             .collect();
 
         Self::create_dag_from_tasks(executor_tasks)
+    }
+
+    /// Reject a task set whose `after:`/`before:` edges form a cycle.
+    ///
+    /// Reuses the same daggy construction `otto Graph` uses, so the two can
+    /// never disagree about what is a DAG. The scheduler calls this at init:
+    /// without it a cycle is not detected on the execution path at all, and
+    /// `a -> b -> a` printed two skip lines and exited 0.
+    pub fn validate_acyclic(tasks: &[Task]) -> Result<()> {
+        if Self::create_dag_from_tasks(tasks.to_vec()).is_ok() {
+            return Ok(());
+        }
+        // daggy decides *whether* there is a cycle; this walk supplies the path,
+        // because "WouldCycle" alone does not tell an operator what to edit.
+        let path = Self::find_cycle_path(tasks).unwrap_or_else(|| "<could not resolve the cycle>".to_string());
+        Err(eyre!(
+            "dependency cycle detected: {path}. otto cannot order these tasks; break the cycle in the ottofile"
+        ))
+    }
+
+    /// The first dependency cycle in `tasks`, rendered as `a -> b -> a`.
+    fn find_cycle_path(tasks: &[Task]) -> Option<String> {
+        let deps: HashMap<&str, Vec<&str>> = tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.name.as_str(),
+                    t.task_deps.iter().map(|d| d.task.as_str()).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+
+        let mut settled: HashSet<&str> = HashSet::new();
+        for task in tasks {
+            let mut on_path: Vec<&str> = Vec::new();
+            if let Some(cycle) = Self::walk_for_cycle(task.name.as_str(), &deps, &mut settled, &mut on_path) {
+                return Some(cycle);
+            }
+        }
+        None
+    }
+
+    /// Depth-first walk marking the current path; a revisit of a node already on
+    /// the path is the cycle, and the path from that node onward is its body.
+    fn walk_for_cycle<'a>(
+        node: &'a str,
+        deps: &HashMap<&'a str, Vec<&'a str>>,
+        settled: &mut HashSet<&'a str>,
+        on_path: &mut Vec<&'a str>,
+    ) -> Option<String> {
+        if let Some(start) = on_path.iter().position(|n| *n == node) {
+            let mut cycle: Vec<&str> = on_path[start..].to_vec();
+            cycle.push(node);
+            return Some(cycle.join(" -> "));
+        }
+        if settled.contains(node) {
+            return None;
+        }
+        on_path.push(node);
+        if let Some(children) = deps.get(node) {
+            for child in children {
+                if let Some(cycle) = Self::walk_for_cycle(child, deps, settled, on_path) {
+                    return Some(cycle);
+                }
+            }
+        }
+        on_path.pop();
+        settled.insert(node);
+        None
     }
 
     fn create_dag_from_tasks(mut tasks: Vec<Task>) -> Result<DAG<Task>> {
@@ -763,6 +832,43 @@ impl DagVisualizer {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn test_validate_acyclic_accepts_a_dag() {
+        let tasks = vec![
+            create_test_task("a", vec![]),
+            create_test_task("b", vec!["a"]),
+            create_test_task("c", vec!["b"]),
+        ];
+        assert!(DagVisualizer::validate_acyclic(&tasks).is_ok());
+    }
+
+    #[test]
+    fn test_validate_acyclic_rejects_a_two_cycle_and_names_it() {
+        let tasks = vec![create_test_task("a", vec!["b"]), create_test_task("b", vec!["a"])];
+        let err = DagVisualizer::validate_acyclic(&tasks).expect_err("a -> b -> a is not a DAG");
+        let msg = err.to_string();
+        assert!(msg.contains("dependency cycle detected"), "{msg}");
+        assert!(
+            msg.contains("a -> b") || msg.contains("b -> a"),
+            "the path must be named: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_acyclic_rejects_a_self_dependency() {
+        let tasks = vec![create_test_task("a", vec!["a"])];
+        let err = DagVisualizer::validate_acyclic(&tasks).expect_err("a depending on itself is a cycle");
+        assert!(err.to_string().contains("a -> a"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_acyclic_ignores_dependencies_outside_the_task_set() {
+        // `collect_transitive_deps` can hand the scheduler a task whose dep is
+        // not in the run set; that is not a cycle.
+        let tasks = vec![create_test_task("b", vec!["a"])];
+        assert!(DagVisualizer::validate_acyclic(&tasks).is_ok());
+    }
 
     fn create_test_task(name: &str, deps: Vec<&str>) -> Task {
         // Derive parent for subtasks (names with colons)

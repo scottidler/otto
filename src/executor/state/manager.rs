@@ -45,6 +45,10 @@ pub struct TaskRecord {
     pub stdout_path: Option<PathBuf>,
     pub stderr_path: Option<PathBuf>,
     pub script_path: Option<PathBuf>,
+    /// Why this task was skipped, for skips caused by an unreachable
+    /// dependency edge or a serial-group cascade. `None` for every other status
+    /// and for an up-to-date skip, which is a success, not a gated-out task.
+    pub skip_reason: Option<String>,
 }
 
 /// Overall system statistics
@@ -236,13 +240,25 @@ impl StateManager {
         })
     }
 
-    /// Record that a task was skipped
-    pub fn record_task_skipped(&self, run_id: i64, task_name: &str, script_hash: Option<&str>) -> Result<i64> {
+    /// Record that a task was skipped, and why.
+    pub fn record_task_skipped(
+        &self,
+        run_id: i64,
+        task_name: &str,
+        script_hash: Option<&str>,
+        skip_reason: Option<&str>,
+    ) -> Result<i64> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO tasks (run_id, name, status, script_hash)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![run_id, task_name, TaskStatus::Skipped.as_str(), script_hash],
+                "INSERT INTO tasks (run_id, name, status, script_hash, skip_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    run_id,
+                    task_name,
+                    TaskStatus::Skipped.as_str(),
+                    script_hash,
+                    skip_reason
+                ],
             )?;
 
             Ok(conn.last_insert_rowid())
@@ -285,7 +301,7 @@ impl StateManager {
             let mut stmt = conn.prepare(
                 "SELECT id, run_id, name, status, script_hash, exit_code,
                         started_at, ended_at, duration_seconds,
-                        stdout_path, stderr_path, script_path
+                        stdout_path, stderr_path, script_path, skip_reason
                  FROM tasks
                  WHERE run_id = ?1
                  ORDER BY started_at ASC",
@@ -302,7 +318,7 @@ impl StateManager {
             let mut stmt = conn.prepare(
                 "SELECT id, run_id, name, status, script_hash, exit_code,
                         started_at, ended_at, duration_seconds,
-                        stdout_path, stderr_path, script_path
+                        stdout_path, stderr_path, script_path, skip_reason
                  FROM tasks
                  WHERE name = ?1
                  ORDER BY started_at DESC
@@ -358,6 +374,7 @@ impl StateManager {
             stdout_path: row.get::<_, Option<String>>(9)?.map(PathBuf::from),
             stderr_path: row.get::<_, Option<String>>(10)?.map(PathBuf::from),
             script_path: row.get::<_, Option<String>>(11)?.map(PathBuf::from),
+            skip_reason: row.get(12)?,
         })
     }
 
@@ -972,8 +989,14 @@ impl StateStore for StateManager {
         StateManager::record_task_complete(self, task_id, exit_code, status)
     }
 
-    fn record_task_skipped(&self, run_id: i64, task_name: &str, script_hash: Option<&str>) -> Result<i64> {
-        StateManager::record_task_skipped(self, run_id, task_name, script_hash)
+    fn record_task_skipped(
+        &self,
+        run_id: i64,
+        task_name: &str,
+        script_hash: Option<&str>,
+        skip_reason: Option<&str>,
+    ) -> Result<i64> {
+        StateManager::record_task_skipped(self, run_id, task_name, script_hash, skip_reason)
     }
 
     fn get_recent_runs(&self, limit: usize, project_filter: Option<&str>) -> Result<Vec<RunRecord>> {
@@ -1244,7 +1267,12 @@ mod tests {
         let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc123".to_string(), 1234567890);
         let run_id = manager.record_run_start(&metadata)?;
 
-        let task_id = manager.record_task_skipped(run_id, "test-task", Some("hash123"))?;
+        let task_id = manager.record_task_skipped(
+            run_id,
+            "test-task",
+            Some("hash123"),
+            Some("dep build failed; this task required when: success"),
+        )?;
         assert!(task_id > 0);
 
         let tasks = manager.get_run_tasks(run_id)?;

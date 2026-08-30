@@ -203,3 +203,144 @@ calling a phase green in this plan.
 env -u OTTO_HOME otto ci            -> exit 0, [ci] ✅ All CI checks passed!
 OTTO_HOME=/tmp/ottohome-final2 otto ci -> exit 0, [ci] ✅ All CI checks passed!
 ```
+
+## Phase 1: Silent-success criticals in the parse/schedule core
+
+### Design decisions
+
+- **`Parser::parse` returns `ParseOutcome`, not a 6-tuple, and never ends the
+  process** — `src/cli/parser.rs` (`ParseOutcome`, `RunPlan`), consumed by
+  `RuntimeConfig::from_parser` (`src/app.rs`) which returns `Startup::Run` or
+  `Startup::Exit(code)`, and by `main` (`src/main.rs`), which is now the only
+  place in the binary that ends the process from a parse decision. All 12
+  `std::process::exit` calls in `parser.rs` are gone;
+  `git grep -c 'process::exit' src/cli/parser.rs` reports no matches. Paths
+  that already print their own output (help, version, `--tasks`,
+  `--list-subtasks`, the malformed-ottofile epilogue) keep printing it and
+  return the code they used to exit with, so no stderr text moved.
+- **Unknown args are detected before partitioning, not inside it** —
+  `unconsumed_args()` + `unknown_task_error()` in `src/cli/parser.rs`, called
+  from `parse()`. `partitions()` stays a pure split and its existing tests are
+  untouched; the new function names the args `partitions()` would have dropped.
+  Suggestions come from `nearest_task_name()`, which wires the previously
+  unreferenced `levenshtein` dependency (edit distance <= 3 and strictly less
+  than the candidate's length, ties broken alphabetically for a stable
+  message). `otto buld` now says `unknown task 'buld'; did you mean 'build'?`.
+- **`is_builtin()` replaces the stale lowercase `"graph"` filters** — three
+  sites in `src/cli/parser.rs` (`parse_all_tasks` x2, `resolve_default_tasks`).
+  `BUILTIN_COMMANDS` are capitalized, so the old filter never matched anything
+  and `otto: tasks: ["*"]` expanded to include `Clean`, which is why a bare
+  `otto` in a project defining only build/test printed
+  `Querying database for old runs...` and exited 0.
+- **The scheduler's completion channel carries `TaskReport { name, exit_code,
+  error }`** — `src/executor/scheduler.rs`. Both bugs it closes are the same
+  bug: the name used to be recovered with
+  `error_str.split_whitespace().nth(1)` and the exit code by re-parsing the
+  message and falling back to 1. A spawn failure ("No such file or directory
+  (os error 2)") yielded the task name `such`, so the real task was never
+  removed from the active set and the run hung; `exit 7` was recorded as 1.
+- **Every task body has exactly one report site** —
+  `TaskScheduler::execute_task`. The body became one fallible expression
+  returning `Result<(), TaskFailure>`, so the semaphore acquire, the dependency
+  double-check, `create_dir_all`, the symlinks and `ActionProcessor::new`/
+  `process` all land at the same place instead of returning through a `?` that
+  sent nothing. `TaskFailure` carries the observed process exit code so the
+  database write is structural.
+- **`ActiveTasks` owns a `JoinSet` and reaps it** —
+  `src/executor/scheduler.rs`. `execute_all` selects between the report channel
+  and `reap_unreported()`, which resolves only when a body ends *without*
+  reporting; that case is logged and synthesized into a failure so a panicking
+  task cannot hang the run. Remaining handles are joined at the end of
+  `execute_all` rather than aborted by the `JoinSet` drop.
+- **Cycle detection at scheduler init reuses the `otto Graph` construction** —
+  `DagVisualizer::validate_acyclic` (`src/executor/graph.rs`), called from
+  `TaskScheduler::new`. daggy decides *whether* there is a cycle;
+  `find_cycle_path` supplies the readable path, because `WouldCycle` alone does
+  not tell an operator what to edit. `a -> b -> a` now exits 1 with
+  `dependency cycle detected: a -> b -> a`.
+- **`execute_all` refuses to report success for a run in which nothing ran** —
+  if `completed_set` and `failed_set` are both empty while `skipped_set` is
+  not, it returns an error. Up-to-date skips are unaffected: those land in
+  `completed_set`, so an entirely-cached run still exits 0.
+- **Skip provenance reaches the run record** — `persist_skip_reasons()` at the
+  end of `execute_all` gives `get_skip_reasons()` its first production caller
+  and writes each skipped task through `record_task_skipped`, which gained a
+  `skip_reason` parameter. Schema version 3 adds `tasks.skip_reason`.
+- **`-j` is parsed as `u64` with `range(1..)`** — `global_args()` in
+  `src/cli/parser.rs`, exactly as the doc specified. `-j 0` is now a clap usage
+  error instead of a launch loop that spins at ~100% CPU forever.
+
+### Deviations
+
+- **The doc lists four dead `"graph"` filters (`:602, :631, :839, :870`); only
+  three were filters.** `:870` was `task_names.push("graph")` in
+  `get_task_names`, a partition-boundary entry, not a filter. It was equally
+  dead (`otto graph` partitioned on a name no task has and then failed with
+  `Task 'graph' not found`), so it was removed too; `otto graph` now produces
+  `unknown task 'graph'; did you mean 'Graph'?`. Same intent, different
+  mechanism than the bullet described.
+- **`parse()`'s signature changed rather than gaining an out-parameter.** The
+  doc says "propagate, exit only in main" without naming a shape. The 6-tuple
+  became `RunPlan`; `RunPlan::into_parts()` exists so the ~25 existing call
+  sites that want one or two fields did not all have to be rewritten. Same
+  effect, correct seam.
+- **The spawn error is wrapped with the task name.** Not in the bullet, but
+  `Task pytask could not start python3: ...` is what makes the report readable
+  once the name is no longer being scraped out of that same string.
+- **`test_jobs_parameter_invalid` was inverted, not deleted.** It pinned the
+  old silent fallback to `num_cpus::get()` for `-j invalid`. It is now
+  `test_jobs_parameter_invalid_is_rejected` and asserts the rejection, with a
+  comment saying why it flipped.
+- **Two scheduler tests gained `setup_test_db`** —
+  `test_file_dependencies_timestamp_precision` and
+  `test_file_dependencies_empty_lists` built a `Workspace` without setting
+  `OTTO_HOME`, so they inherited whatever the previously-run `#[serial]` test
+  left it as. The MemFs workspace tests in `src/executor/workspace.rs` set it
+  to `/otto-home` and never restore it, so under
+  `OTTO_HOME=/tmp/otto-scratch-p1 otto ci` the first of them failed with
+  `Failed to create directory /otto-home: Permission denied`. Pre-existing
+  order-dependent coupling, surfaced by this phase's two new `#[serial]`
+  scheduler tests changing the interleaving; fixed at the two coupled tests
+  rather than by rewriting the MemFs suite.
+- **This phase was implemented on `02522ea`, not the assigned base
+  `6af8a51`.** HEAD had advanced by one docs-only commit
+  (`docs: remove internal repo names from the public repo`) before work
+  started.
+
+### Tradeoffs
+
+- **A v2-to-v3 migration inside Phase 1, vs. deferring skip persistence to
+  Phase 4.** Phase 4 owns migration integrity and calls the current mechanism
+  "non-idempotent with a crash window that permanently bricks the DB". Adding a
+  step through it raises exposure, so the new step is written the way Phase 4
+  will generalize: a `pragma_table_info` guard makes `migrate_v2_to_v3`
+  idempotent, and the step plus its `set_version` run in one
+  `unchecked_transaction`. Two tests pin it, including the
+  crash-between-ALTER-and-bump case. The v1-to-v2 step is left exactly as it
+  was; hardening it is Phase 4's bullet, not this one's.
+- **Persisting skip reasons at the end of `execute_all` rather than inside
+  `mark_skipped`.** Writing at skip time would order the row with the event but
+  would leave `get_skip_reasons()` with no production caller, which is the
+  literal defect the bullet names. The teardown write closes both.
+- **`unconsumed_args` only inspects the args before the first task name.**
+  Args after a task name belong to that task's clap parser, which now reports
+  its own unknown flags (`try_get_matches_from` at the former
+  `get_matches_from` site). Trying to second-guess them here would duplicate
+  clap and get it wrong.
+- **`-j 0`'s clap message reads `0 is not in 1..18446744073709551615`.** Ugly,
+  but it is what `value_parser!(u64).range(1..)` renders, and the doc named
+  that exact parser. Capping the upper bound at an invented number would be a
+  new constraint nobody asked for.
+
+### Open questions
+
+- **`otto: tasks:` naming a built-in explicitly is still honored.** The
+  wildcard `*` no longer expands to built-ins, but `otto: tasks: [Clean]`
+  resolves, because the built-ins are injected into `tasks` before default
+  resolution. That reads like an explicit operator choice rather than the
+  accident the bullet described, so it was left alone. Confirm that is the
+  wanted behavior.
+- **`get_skip_reasons()` returns a `HashMap<String, String>` of free text.**
+  Phase 2 introduces `SkipKind` as a typed provenance the scheduler can read.
+  When it lands, the `skip_reason` column should probably carry the kind
+  alongside the display text; this phase persists only the text.

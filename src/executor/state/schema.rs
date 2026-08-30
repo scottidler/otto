@@ -2,7 +2,7 @@ use eyre::Result;
 use rusqlite::Connection;
 
 /// SQL schema for the otto database
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Status of a run
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -129,6 +129,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             stdout_path TEXT,
             stderr_path TEXT,
             script_path TEXT,
+            skip_reason TEXT,
             FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         )",
         [],
@@ -147,6 +148,26 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name)", [])?;
 
     Ok(())
+}
+
+/// Migrate from schema version 2 to 3
+///
+/// Adds `skip_reason` to the tasks table so a skipped task carries *why* it was
+/// skipped, not just that it was. Idempotent: re-running after a crash between
+/// the ALTER and the version bump is a no-op rather than a hard error.
+pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
+    if column_exists(conn, "tasks", "skip_reason")? {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE tasks ADD COLUMN skip_reason TEXT", [])?;
+    Ok(())
+}
+
+/// Whether `table` already has `column`.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2")?;
+    let count: i64 = stmt.query_row(rusqlite::params![table, column], |row| row.get(0))?;
+    Ok(count > 0)
 }
 
 /// Migrate from schema version 1 to 2

@@ -3,7 +3,7 @@ use crate::cfg::param::Value;
 use crate::cli::commands::history::HistoryCommand;
 use crate::cli::commands::stats::StatsCommand;
 use crate::cli::parser::{Task, ottofile_base_dir};
-use crate::cli::{CleanCommand, ConvertCommand, Parser};
+use crate::cli::{CleanCommand, ConvertCommand, ParseOutcome, Parser};
 use crate::executor::{DagVisualizer, TaskScheduler, Workspace};
 use eyre::{Report, Result, eyre};
 use log::info;
@@ -195,20 +195,32 @@ pub struct RuntimeConfig {
     pub retention: RetentionSpec,
 }
 
+/// What `main` should do once the command line has been parsed.
+///
+/// `Exit` carries the code for an invocation that already wrote its output
+/// (help, version, `--tasks`, `--list-subtasks`) and must run nothing.
+pub enum Startup {
+    Run(Box<RuntimeConfig>),
+    Exit(i32),
+}
+
 impl RuntimeConfig {
     /// Build RuntimeConfig from parsed CLI arguments.
-    pub fn from_parser(parser: &mut Parser) -> Result<Self> {
-        let (tasks, hash, ottofile_path, jobs, tui_mode, no_prefix) = parser.parse()?;
+    pub fn from_parser(parser: &mut Parser) -> Result<Startup> {
+        let plan = match parser.parse()? {
+            ParseOutcome::Run(plan) => plan,
+            ParseOutcome::Exit(code) => return Ok(Startup::Exit(code)),
+        };
         let retention = parser.retention();
-        Ok(Self {
-            tasks,
-            hash,
-            ottofile_path,
-            jobs,
-            tui_mode,
-            no_prefix,
+        Ok(Startup::Run(Box::new(Self {
+            tasks: plan.tasks,
+            hash: plan.hash,
+            ottofile_path: plan.ottofile,
+            jobs: plan.jobs,
+            tui_mode: plan.tui_mode,
+            no_prefix: plan.no_prefix,
             retention,
-        })
+        })))
     }
 }
 
