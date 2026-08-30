@@ -2,7 +2,7 @@ use eyre::Result;
 use rusqlite::Connection;
 
 /// SQL schema for the otto database
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Status of a run
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -111,6 +111,27 @@ impl SkipKind {
     }
 }
 
+/// The `runs` table as of schema v5.
+///
+/// Shared by `init_schema` and the v4-to-v5 rebuild so a freshly created
+/// database and a migrated one cannot drift apart.
+const RUNS_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL,
+    timestamp INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    duration_seconds REAL,
+    size_bytes INTEGER,
+    ottofile_path TEXT,
+    cwd TEXT,
+    user TEXT,
+    hostname TEXT,
+    args TEXT,
+    ended_at INTEGER,
+    run_dir TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+)";
+
 /// Initialize the database schema
 pub fn init_schema(conn: &Connection) -> Result<()> {
     // Schema version table
@@ -136,25 +157,12 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         [],
     )?;
 
-    // Runs table
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS runs (
-            id INTEGER PRIMARY KEY,
-            project_id INTEGER NOT NULL,
-            timestamp INTEGER NOT NULL UNIQUE,
-            status TEXT NOT NULL,
-            duration_seconds REAL,
-            size_bytes INTEGER,
-            ottofile_path TEXT,
-            cwd TEXT,
-            user TEXT,
-            hostname TEXT,
-            args TEXT,
-            ended_at INTEGER,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-        )",
-        [],
-    )?;
+    // Runs table.
+    //
+    // `timestamp` is deliberately not UNIQUE: it has one-second resolution, so
+    // two runs started in the same second are ordinary, not a conflict. Runs are
+    // identified by `id`.
+    conn.execute(RUNS_TABLE_DDL, [])?;
 
     // Runs indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON runs(timestamp)", [])?;
@@ -233,14 +241,19 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 }
 
 /// Migrate from schema version 1 to 2
-/// Adds 'name' column to projects table
+///
+/// Adds `name` to the projects table and backfills it from each project's
+/// ottofile path. Idempotent, like every other step: a crash between the ALTER
+/// and the version bump used to leave a database that could never be opened
+/// again, because the retry died on a duplicate column.
 pub fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
-    // Add name column to projects table
-    conn.execute("ALTER TABLE projects ADD COLUMN name TEXT", [])?;
+    if !column_exists(conn, "projects", "name")? {
+        conn.execute("ALTER TABLE projects ADD COLUMN name TEXT", [])?;
+    }
 
     // Populate names from existing ottofile_path data
     // Extract directory name from path, or use hash as fallback
-    let mut stmt = conn.prepare("SELECT id, hash, ottofile_path FROM projects")?;
+    let mut stmt = conn.prepare("SELECT id, hash, ottofile_path FROM projects WHERE name IS NULL")?;
     let projects: Vec<(i64, String, Option<String>)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -269,6 +282,54 @@ pub fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    Ok(())
+}
+
+/// Migrate from schema version 4 to 5
+///
+/// Two changes to `runs`, both about identity:
+///
+/// - Drops `UNIQUE(timestamp)`. Timestamps have one-second resolution, so two
+///   runs started in the same second collided; the loser's run row and every
+///   task row that would have hung off it were simply never written.
+/// - Adds `run_dir`, the directory the run actually wrote into, so deleting a
+///   run no longer rebuilds a path from a naming convention it guessed wrong.
+///
+/// SQLite cannot drop a constraint in place, so the table is rebuilt. The
+/// caller must have foreign keys disabled and a transaction open. Idempotent:
+/// `run_dir` existing means a previous attempt already finished the rebuild.
+pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
+    if column_exists(conn, "runs", "run_dir")? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TABLE runs_v5 (
+            id INTEGER PRIMARY KEY,
+            project_id INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            duration_seconds REAL,
+            size_bytes INTEGER,
+            ottofile_path TEXT,
+            cwd TEXT,
+            user TEXT,
+            hostname TEXT,
+            args TEXT,
+            ended_at INTEGER,
+            run_dir TEXT,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+         );
+         INSERT INTO runs_v5 (id, project_id, timestamp, status, duration_seconds, size_bytes,
+                              ottofile_path, cwd, user, hostname, args, ended_at)
+              SELECT id, project_id, timestamp, status, duration_seconds, size_bytes,
+                     ottofile_path, cwd, user, hostname, args, ended_at
+                FROM runs;
+         DROP TABLE runs;
+         ALTER TABLE runs_v5 RENAME TO runs;
+         CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON runs(timestamp);
+         CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+         CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);",
+    )?;
     Ok(())
 }
 

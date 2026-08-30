@@ -6,10 +6,30 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use tempfile::TempDir;
 
+/// The project name every fixture in this file uses. Run roots are
+/// `<name>-<hash>`, which is what `Workspace` creates and what both cleanup
+/// backends now look for.
+const PROJECT: &str = "widget";
+
+/// The otto binary, with its environment pinned rather than inherited.
+///
+/// `HOME` and `OTTO_HOME` point at the scratch tree, and `OTTO_DB_PATH` is
+/// *removed*: the database derives from `OTTO_HOME`, so these tests must pass
+/// whether or not the developer running them has `OTTO_DB_PATH` exported. They
+/// used to fail outright when it was, because the child inherited it and read a
+/// database that knew nothing about the fixture.
+fn otto(home_dir: &std::path::Path, otto_home: &std::path::Path) -> assert_cmd::Command {
+    let mut cmd = cargo_bin_cmd!("otto");
+    cmd.env("HOME", home_dir)
+        .env("OTTO_HOME", otto_home)
+        .env_remove("OTTO_DB_PATH");
+    cmd
+}
+
 /// Helper to create a test run directory structure
 fn create_test_run(otto_home: &std::path::Path, project_hash: &str, timestamp: u64, status: &str) -> Result<()> {
     let run_dir = otto_home
-        .join(format!("otto-{}", project_hash))
+        .join(format!("{}-{}", PROJECT, project_hash))
         .join(timestamp.to_string())
         .join("tasks");
 
@@ -36,22 +56,29 @@ status: {}
 
 /// Helper to create a StateManager with test data
 fn setup_test_database(
-    db_path: &std::path::Path,
+    otto_home: &std::path::Path,
     project_hash: &str,
     runs: Vec<(u64, &str, u64)>, // (timestamp, status, size_bytes)
 ) -> Result<()> {
     use otto::executor::state::{RunMetadata, RunStatus, StateManager};
 
-    let manager = StateManager::with_db_path(db_path.to_path_buf())?;
+    let manager = StateManager::with_db_path(otto_home.join("otto.db"))?;
 
     for (timestamp, status, size_bytes) in runs {
+        // Record the run directory, exactly as a real run does, so DB-driven
+        // cleanup deletes the directory that is actually there.
         let metadata = RunMetadata::minimal(
             Some(PathBuf::from("/test/otto.yml")),
             project_hash.to_string(),
             timestamp,
+        )
+        .with_run_dir(
+            otto_home
+                .join(format!("{}-{}", PROJECT, project_hash))
+                .join(timestamp.to_string()),
         );
 
-        manager.record_run_start(&metadata)?;
+        let run_id = manager.record_run_start(&metadata)?;
 
         let run_status = match status {
             "success" => RunStatus::Success,
@@ -59,7 +86,7 @@ fn setup_test_database(
             _ => RunStatus::Running,
         };
 
-        manager.record_run_complete(timestamp, run_status, Some(size_bytes))?;
+        manager.record_run_complete(run_id, run_status, Some(size_bytes))?;
     }
 
     Ok(())
@@ -72,7 +99,6 @@ fn test_clean_with_keep_last_flag() -> Result<()> {
     let home_dir = temp_dir.path();
     let otto_home = home_dir.join(".otto");
     fs::create_dir_all(&otto_home)?;
-    let db_path = otto_home.join("otto.db");
 
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
 
@@ -81,22 +107,20 @@ fn test_clean_with_keep_last_flag() -> Result<()> {
     for i in 0..5 {
         let timestamp = now - ((40 + i) * 24 * 60 * 60);
         runs.push((timestamp, "success", 1024));
-        create_test_run(&otto_home, "abc123", timestamp, "success")?;
+        create_test_run(&otto_home, "abc12345", timestamp, "success")?;
     }
 
     // Setup database with test data
-    setup_test_database(&db_path, "abc123", runs)?;
+    setup_test_database(&otto_home, "abc12345", runs)?;
 
     // Run clean with --keep-last 2
-    let output = cargo_bin_cmd!("otto")
+    let output = otto(home_dir, &otto_home)
         .arg("Clean")
         .arg("--keep-days")
         .arg("30")
         .arg("--keep-last")
         .arg("2")
         .arg("--dry-run")
-        .env("HOME", home_dir)
-        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -118,35 +142,32 @@ fn test_clean_with_keep_failed_flag() -> Result<()> {
     let home_dir = temp_dir.path();
     let otto_home = home_dir.join(".otto");
     fs::create_dir_all(&otto_home)?;
-    let db_path = otto_home.join("otto.db");
 
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
 
     // Create successful run 40 days old
     let success_timestamp = now - (40 * 24 * 60 * 60);
-    create_test_run(&otto_home, "abc123", success_timestamp, "success")?;
+    create_test_run(&otto_home, "abc12345", success_timestamp, "success")?;
 
     // Create failed run 40 days old
     let failed_timestamp = now - (39 * 24 * 60 * 60);
-    create_test_run(&otto_home, "abc123", failed_timestamp, "failed")?;
+    create_test_run(&otto_home, "abc12345", failed_timestamp, "failed")?;
 
     // Setup database
     setup_test_database(
-        &db_path,
-        "abc123",
+        &otto_home,
+        "abc12345",
         vec![(success_timestamp, "success", 1024), (failed_timestamp, "failed", 2048)],
     )?;
 
     // Run clean: keep successful runs for 30 days, failed runs for 45 days
-    let output = cargo_bin_cmd!("otto")
+    let output = otto(home_dir, &otto_home)
         .arg("Clean")
         .arg("--keep-days")
         .arg("30")
         .arg("--keep-failed")
         .arg("45")
         .arg("--dry-run")
-        .env("HOME", home_dir)
-        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -174,21 +195,19 @@ fn test_clean_with_no_db_fallback() -> Result<()> {
 
     // Create old run (40 days old)
     let old_timestamp = now - (40 * 24 * 60 * 60);
-    create_test_run(&otto_home, "abc123", old_timestamp, "success")?;
+    create_test_run(&otto_home, "abc12345", old_timestamp, "success")?;
 
     // Create recent run (10 days old)
     let recent_timestamp = now - (10 * 24 * 60 * 60);
-    create_test_run(&otto_home, "abc123", recent_timestamp, "success")?;
+    create_test_run(&otto_home, "abc12345", recent_timestamp, "success")?;
 
     // Run clean with --no-db (filesystem fallback mode)
-    let output = cargo_bin_cmd!("otto")
+    let output = otto(home_dir, &otto_home)
         .arg("Clean")
         .arg("--keep-days")
         .arg("30")
         .arg("--no-db")
         .arg("--dry-run")
-        .env("HOME", home_dir)
-        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -210,37 +229,32 @@ fn test_clean_database_mode_vs_filesystem_mode() -> Result<()> {
     let home_dir = temp_dir.path();
     let otto_home = home_dir.join(".otto");
     fs::create_dir_all(&otto_home)?;
-    let db_path = otto_home.join("otto.db");
 
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
 
     let old_timestamp = now - (40 * 24 * 60 * 60);
-    create_test_run(&otto_home, "abc123", old_timestamp, "success")?;
+    create_test_run(&otto_home, "abc12345", old_timestamp, "success")?;
 
     // Setup database
-    setup_test_database(&db_path, "abc123", vec![(old_timestamp, "success", 1024)])?;
+    setup_test_database(&otto_home, "abc12345", vec![(old_timestamp, "success", 1024)])?;
 
     // Run with database
-    let db_output = cargo_bin_cmd!("otto")
+    let db_output = otto(home_dir, &otto_home)
         .arg("Clean")
         .arg("--keep-days")
         .arg("30")
         .arg("--dry-run")
-        .env("HOME", home_dir)
-        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let db_stdout = String::from_utf8_lossy(&db_output.stdout);
 
     // Run with --no-db (filesystem)
-    let fs_output = cargo_bin_cmd!("otto")
+    let fs_output = otto(home_dir, &otto_home)
         .arg("Clean")
         .arg("--keep-days")
         .arg("30")
         .arg("--no-db")
         .arg("--dry-run")
-        .env("HOME", home_dir)
-        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let fs_stdout = String::from_utf8_lossy(&fs_output.stdout);
@@ -274,27 +288,26 @@ fn test_clean_actually_deletes_with_database() -> Result<()> {
     let home_dir = temp_dir.path();
     let otto_home = home_dir.join(".otto");
     fs::create_dir_all(&otto_home)?;
-    let db_path = otto_home.join("otto.db");
 
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
 
     let old_timestamp = now - (40 * 24 * 60 * 60);
-    create_test_run(&otto_home, "abc123", old_timestamp, "success")?;
+    create_test_run(&otto_home, "abc12345", old_timestamp, "success")?;
 
     // Setup database
-    setup_test_database(&db_path, "abc123", vec![(old_timestamp, "success", 1024)])?;
+    setup_test_database(&otto_home, "abc12345", vec![(old_timestamp, "success", 1024)])?;
 
     // Verify run directory exists
-    let run_dir = otto_home.join("otto-abc123").join(old_timestamp.to_string());
+    let run_dir = otto_home
+        .join(format!("{}-{}", PROJECT, "abc12345"))
+        .join(old_timestamp.to_string());
     assert!(run_dir.exists(), "Run directory should exist before cleanup");
 
     // Run clean without --dry-run
-    let output = cargo_bin_cmd!("otto")
+    let output = otto(home_dir, &otto_home)
         .arg("Clean")
         .arg("--keep-days")
         .arg("30")
-        .env("HOME", home_dir)
-        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     assert!(output.status.success(), "Clean command should succeed");
@@ -304,7 +317,7 @@ fn test_clean_actually_deletes_with_database() -> Result<()> {
 
     // Verify database record was deleted
     use otto::executor::state::StateManager;
-    let manager = StateManager::with_db_path(db_path)?;
+    let manager = StateManager::with_db_path(otto_home.join("otto.db"))?;
     let runs = manager.get_recent_runs(10, None)?;
     assert_eq!(runs.len(), 0, "Database should have no runs after cleanup");
 
@@ -324,11 +337,11 @@ fn test_clean_keep_last_in_filesystem_mode() -> Result<()> {
     // Create 5 old runs
     for i in 0..5 {
         let timestamp = now - ((40 + i) * 24 * 60 * 60);
-        create_test_run(&otto_home, "abc123", timestamp, "success")?;
+        create_test_run(&otto_home, "abc12345", timestamp, "success")?;
     }
 
     // Run clean with --keep-last in filesystem mode
-    let output = cargo_bin_cmd!("otto")
+    let output = otto(home_dir, &otto_home)
         .arg("Clean")
         .arg("--keep-days")
         .arg("30")
@@ -336,8 +349,6 @@ fn test_clean_keep_last_in_filesystem_mode() -> Result<()> {
         .arg("2")
         .arg("--no-db")
         .arg("--dry-run")
-        .env("HOME", home_dir)
-        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -361,30 +372,27 @@ fn test_clean_with_project_filter_and_database() -> Result<()> {
     let home_dir = temp_dir.path();
     let otto_home = home_dir.join(".otto");
     fs::create_dir_all(&otto_home)?;
-    let db_path = otto_home.join("otto.db");
 
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
 
     let old_timestamp = now - (40 * 24 * 60 * 60);
 
     // Create old runs for two projects
-    create_test_run(&otto_home, "abc123", old_timestamp, "success")?;
-    create_test_run(&otto_home, "def456", old_timestamp + 1, "success")?;
+    create_test_run(&otto_home, "abc12345", old_timestamp, "success")?;
+    create_test_run(&otto_home, "def45678", old_timestamp + 1, "success")?;
 
     // Setup database for both projects
-    setup_test_database(&db_path, "abc123", vec![(old_timestamp, "success", 1024)])?;
-    setup_test_database(&db_path, "def456", vec![(old_timestamp + 1, "success", 2048)])?;
+    setup_test_database(&otto_home, "abc12345", vec![(old_timestamp, "success", 1024)])?;
+    setup_test_database(&otto_home, "def45678", vec![(old_timestamp + 1, "success", 2048)])?;
 
     // Run clean with project filter
-    let output = cargo_bin_cmd!("otto")
+    let output = otto(home_dir, &otto_home)
         .arg("Clean")
         .arg("--keep-days")
         .arg("30")
         .arg("--project-filter")
-        .arg("abc123")
+        .arg("abc12345")
         .arg("--dry-run")
-        .env("HOME", home_dir)
-        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -406,24 +414,21 @@ fn test_clean_graceful_fallback_when_database_corrupt() -> Result<()> {
     let home_dir = temp_dir.path();
     let otto_home = home_dir.join(".otto");
     fs::create_dir_all(&otto_home)?;
-    let db_path = otto_home.join("otto.db");
 
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
 
     let old_timestamp = now - (40 * 24 * 60 * 60);
-    create_test_run(&otto_home, "abc123", old_timestamp, "success")?;
+    create_test_run(&otto_home, "abc12345", old_timestamp, "success")?;
 
     // Create a corrupt database file (just write garbage)
-    fs::write(&db_path, "this is not a valid sqlite database")?;
+    fs::write(otto_home.join("otto.db"), "this is not a valid sqlite database")?;
 
     // Run clean - should fallback to filesystem scan
-    let output = cargo_bin_cmd!("otto")
+    let output = otto(home_dir, &otto_home)
         .arg("Clean")
         .arg("--keep-days")
         .arg("30")
         .arg("--dry-run")
-        .env("HOME", home_dir)
-        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);

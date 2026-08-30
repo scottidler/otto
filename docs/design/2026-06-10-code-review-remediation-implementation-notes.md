@@ -634,3 +634,108 @@ OTTO_HOME=/tmp/ottohome-final2 otto ci -> exit 0, [ci] ✅ All CI checks passed!
   reconstructs `otto-<hash>` rather than `<name>-<hash>` - both Phase 4 bullets.
   The fence is therefore correct relative to a root that is itself wrong; Phase 4
   fixing the root does not require touching the fence.
+
+## Phase 4: State and DB integrity
+
+### Design decisions
+
+- **`OTTO_DB_PATH` > `resolve_otto_home()/otto.db` > `$HOME/.otto/otto.db`** —
+  `DatabaseManager::default_db_path` (`src/executor/state/db.rs`) — the target
+  precedence from the doc. `OTTO_DB_PATH` is kept and demoted to an override of a
+  derived default rather than deleted; `OTTO_HOME` becomes the single knob that
+  moves run directories and the database together. Pinned by three tests in
+  `db.rs`: home-only, explicit-override, and neither set.
+- **New module `src/executor/layout.rs` owns the on-disk conventions** —
+  `resolve_otto_home`, `project_dir_name`, `run_root`, `run_dir`,
+  `parse_project_dir_name`. `resolve_otto_home` moved out of `pruning.rs` (four
+  call sites updated, no re-export shim left behind). `parse_project_dir_name`
+  accepts `<name>-<8 lowercase hex>` and is the single predicate for "is this a
+  project run root", replacing the `otto-` prefix test at `clean.rs` and
+  `pruning.rs` — that prefix matched 2 of 222 directories in the real `~/.otto`.
+- **The run directory is recorded, not reconstructed** — `runs.run_dir` (schema
+  v5), `RunMetadata::with_run_dir`, `Workspace::record_run_start_in_db` — the
+  doc's "record the run directory at run start". `delete_run` uses the recorded
+  path and falls back to a derived one only for pre-v5 rows.
+- **Runs are identified by `id`, not by timestamp** — schema v5 drops
+  `UNIQUE(runs.timestamp)` (table rebuild, foreign keys toggled around it because
+  `PRAGMA foreign_keys` is a no-op inside a transaction) and
+  `StateStore::record_run_complete` / `delete_run` now take a run id. Verified
+  live: two concurrent runs in the same second both persist with their own task
+  rows.
+- **One pure retention function** — `src/executor/state/retention.rs`
+  (`Retention::expired`) — used by `StateManager::find_old_runs`,
+  `MemoryStateStore::find_old_runs`, and `CleanCommand::execute_with_filesystem`.
+  It takes runs in any order and finds the `keep_last` newest by timestamp, so a
+  caller that sorts ascending cannot re-introduce the inversion. A parity test in
+  `ports/db.rs` runs six policies against the SQLite store and the in-memory fake
+  and asserts identical output.
+- **Blocking database calls go through `tokio::task::spawn_blocking`** —
+  `ports::record_blocking` — used at the five recording sites in `scheduler.rs`
+  and `workspace.rs`. The trait stays synchronous; only the call sites move.
+- **Cache pruning has a 15-minute mtime grace period** —
+  `pruning::written_recently` — a run that has written a cache entry but not yet
+  its symlink is indistinguishable from an orphan.
+
+### Deviations
+
+- **`keep_failed` in filesystem mode is applied as the longer cutoff for every
+  run, with a message, rather than per-status.** A directory scan cannot know a
+  run's status: it exists only in the database, and the real `run.yaml` is an
+  `ExecutionContext`, which has no status field. Same effect where it matters
+  (nothing the flag meant to protect is deleted), and it says so on stderr
+  instead of ignoring the flag silently, which is what it did before.
+- **`scan_for_old_runs` became `scan_runs(otto_home, now)` and returns every
+  run, not just old ones.** `--keep-last` means "keep the N newest runs"; a scan
+  that had already dropped the recent ones could not honour it. Same seam, and it
+  is what makes the filesystem path match the database path.
+- **The v1-to-v2 backfill only writes rows where `name IS NULL`.** The doc asked
+  for idempotency; re-running must also not clobber names an earlier pass wrote.
+- **`get_all_task_stats` reads `p.name` as `Option<String>`.** The doc scoped
+  this out as "a consequence of the migration bug", but the one-line fix removes
+  the split between it and `get_task_stats` outright.
+- **Test fixtures moved from `otto-<hash>` to `<name>-<8 hex>`.** Required by the
+  stricter run-root predicate, and they now mirror what `Workspace` actually
+  creates rather than a shape no run produces.
+
+### Tradeoffs
+
+- **Recording `run_dir` (schema v5) vs deriving the path from project name and
+  hash.** Deriving needs no migration but cannot be correct: `projects.hash` is a
+  hash of the ottofile's *contents* (`parser.rs:2571`) while the directory name
+  carries a hash of the project's *path* (`workspace.rs:117`). Recording the
+  directory is the only version that is right by construction.
+- **Rebuilding `runs` to drop `UNIQUE(timestamp)` vs living with the collision.**
+  SQLite cannot drop a constraint in place, so this is a table rebuild on every
+  existing database. Chosen because the collision silently discarded a whole run
+  and all of its task rows.
+- **Errors on unreadable stored values vs the old defaults.** An unknown status
+  read back as `Failed` and corrupt args read back as `None` made a damaged row
+  indistinguishable from a plausible one; `otto History` now reports instead.
+  Cost: a database corrupted by hand fails the query rather than degrading.
+- **`record_run_complete` on a missing id is an error, not a no-op.** It caught
+  six existing test fixtures that were passing timestamps, which is the point.
+
+### Open questions
+
+- **Two different values are both called "hash".** `parser.rs:2571` hashes the
+  ottofile's contents and that is what lands in `projects.hash`;
+  `workspace.rs:117` hashes the project's root path and that is what names the
+  run directory. Consequences: `Clean --project-filter <hash>` means different
+  things in database mode and filesystem mode, and a project gets a fresh
+  `projects` row every time its ottofile is edited (1252 project rows for ~222
+  directories in the real database). Recording `run_dir` sidesteps this for every
+  new row, but unifying the two would change project identity in every existing
+  database and is not in this phase's bullets.
+- **Schema v5 is not readable by an older otto.** Observed while verifying: the
+  installed `~/.cargo/bin/otto` (pre-phase) opened the migrated database, hit
+  "schema version 5 is newer than supported version 4", and degraded to no
+  history at all. The version check and the fallback both behave correctly, but
+  after this lands an un-upgraded binary silently stops recording. Worth a line
+  in the release notes.
+- **Integration tests that pin neither `OTTO_HOME` nor `OTTO_DB_PATH` still
+  write to the developer's real database.** `cleanup_integration_test.rs` is
+  fixed (it pins `OTTO_HOME` and removes `OTTO_DB_PATH`, and now passes with
+  `OTTO_DB_PATH` set to anything or unset), but a full `cargo test` with neither
+  variable set added 30 `.tmpXXXXXX-<hash>` projects to `~/.otto/otto.db`. That
+  is test hygiene across several files, not a Phase 4 bullet; it looks like Phase
+  11 material.

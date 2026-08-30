@@ -2,7 +2,9 @@ use eyre::{Context, Result};
 use rusqlite::Connection;
 use std::time::SystemTime;
 
-use super::schema::{SCHEMA_VERSION, init_schema, migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4};
+use super::schema::{
+    SCHEMA_VERSION, init_schema, migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5,
+};
 
 pub fn get_current_version(conn: &Connection) -> Result<i64> {
     let table_exists: bool = conn
@@ -55,14 +57,16 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         init_schema(conn).context("Failed to initialize schema")?;
         set_version(conn, SCHEMA_VERSION)?;
     } else if current_version < SCHEMA_VERSION {
-        // Run migrations in order
+        // Run migrations in order. Step and version bump go in one transaction:
+        // a crash between them leaves a database whose recorded version lies
+        // about its shape, and the retry then dies on a duplicate column.
         if current_version < 2 {
+            let tx = conn.unchecked_transaction()?;
             migrate_v1_to_v2(conn).context("Failed to migrate from v1 to v2")?;
             set_version(conn, 2)?;
+            tx.commit()?;
         }
         if current_version < 3 {
-            // Step and version bump in one transaction: a crash between them
-            // leaves a database whose recorded version lies about its shape.
             let tx = conn.unchecked_transaction()?;
             migrate_v2_to_v3(conn).context("Failed to migrate from v2 to v3")?;
             set_version(conn, 3)?;
@@ -74,7 +78,25 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             set_version(conn, 4)?;
             tx.commit()?;
         }
-        // Future migrations will go here (v4 to v5, etc.)
+        if current_version < 5 {
+            // The runs rebuild drops and recreates a table that `tasks`
+            // references, which needs foreign keys off; `PRAGMA foreign_keys` is
+            // a no-op inside a transaction, so it is toggled around one, and
+            // restored whether the step succeeds or fails.
+            conn.pragma_update(None, "foreign_keys", "OFF")
+                .context("Failed to disable foreign keys for the v4 to v5 rebuild")?;
+            let rebuilt = (|| -> Result<()> {
+                let tx = conn.unchecked_transaction()?;
+                migrate_v4_to_v5(conn).context("Failed to migrate from v4 to v5")?;
+                set_version(conn, 5)?;
+                tx.commit()?;
+                Ok(())
+            })();
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .context("Failed to re-enable foreign keys after the v4 to v5 rebuild")?;
+            rebuilt?;
+        }
+        // Future migrations will go here (v5 to v6, etc.)
     } else if current_version > SCHEMA_VERSION {
         return Err(eyre::eyre!(
             "Database schema version {} is newer than supported version {}. Please upgrade otto.",
@@ -138,10 +160,41 @@ mod tests {
         Ok(())
     }
 
-    /// A v2-shaped tasks table, i.e. the schema before `skip_reason` existed.
-    fn init_v2_tasks_table(conn: &Connection) -> Result<()> {
+    /// A v1-shaped database: `projects` has no `name`, `runs` still carries the
+    /// global `UNIQUE(timestamp)` and no `run_dir`, `tasks` has neither skip
+    /// column.
+    fn init_v1_schema(conn: &Connection) -> Result<()> {
         conn.execute(
             "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE projects (
+                id INTEGER PRIMARY KEY,
+                hash TEXT NOT NULL UNIQUE,
+                ottofile_path TEXT,
+                first_seen INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                run_count INTEGER DEFAULT 0
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE runs (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                duration_seconds REAL,
+                size_bytes INTEGER,
+                ottofile_path TEXT,
+                cwd TEXT,
+                user TEXT,
+                hostname TEXT,
+                args TEXT,
+                ended_at INTEGER,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )",
             [],
         )?;
         conn.execute(
@@ -157,12 +210,30 @@ mod tests {
                 duration_seconds REAL,
                 stdout_path TEXT,
                 stderr_path TEXT,
-                script_path TEXT
+                script_path TEXT,
+                FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
             )",
             [],
         )?;
+        set_version(conn, 1)?;
+        Ok(())
+    }
+
+    /// A v2-shaped database, i.e. the schema before `skip_reason` existed.
+    fn init_v2_tasks_table(conn: &Connection) -> Result<()> {
+        init_v1_schema(conn)?;
+        conn.execute("ALTER TABLE projects ADD COLUMN name TEXT", [])?;
         set_version(conn, 2)?;
         Ok(())
+    }
+
+    fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            [table, column],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     fn has_task_column(conn: &Connection, column: &str) -> Result<bool> {
@@ -255,9 +326,177 @@ mod tests {
 
         migrate(&conn)?;
 
-        assert_eq!(get_current_version(&conn)?, 4);
+        assert_eq!(get_current_version(&conn)?, SCHEMA_VERSION);
         assert!(has_skip_reason(&conn)?);
         assert!(has_skip_kind(&conn)?);
+        Ok(())
+    }
+
+    /// A v4-shaped database: both skip columns present, `runs` still v1-shaped.
+    fn init_v4_schema(conn: &Connection) -> Result<()> {
+        init_v3_tasks_table(conn)?;
+        conn.execute("ALTER TABLE tasks ADD COLUMN skip_kind TEXT", [])?;
+        set_version(conn, 4)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_migrate_v1_to_v2_adds_and_backfills_name() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        init_v1_schema(&conn)?;
+        assert!(!has_column(&conn, "projects", "name")?, "v1 has no name column");
+        conn.execute(
+            "INSERT INTO projects (hash, ottofile_path, first_seen, last_seen)
+             VALUES ('abc12345', '/home/u/repos/widget/otto.yml', 1, 1)",
+            [],
+        )?;
+
+        migrate(&conn)?;
+
+        assert_eq!(get_current_version(&conn)?, SCHEMA_VERSION);
+        let name: String = conn.query_row("SELECT name FROM projects WHERE hash = 'abc12345'", [], |r| r.get(0))?;
+        assert_eq!(name, "widget", "the name is backfilled from the ottofile's directory");
+        Ok(())
+    }
+
+    #[test]
+    fn test_migrate_v1_to_v2_survives_an_interrupted_run() -> Result<()> {
+        // The crash window that used to brick the database permanently: the
+        // ALTER committed, the version bump did not, and every later open died
+        // on `duplicate column name: name`.
+        let conn = Connection::open_in_memory()?;
+        init_v1_schema(&conn)?;
+        conn.execute("ALTER TABLE projects ADD COLUMN name TEXT", [])?;
+        conn.execute(
+            "INSERT INTO projects (hash, ottofile_path, first_seen, last_seen)
+             VALUES ('abc12345', '/home/u/repos/widget/otto.yml', 1, 1)",
+            [],
+        )?;
+
+        migrate(&conn)?;
+
+        assert_eq!(get_current_version(&conn)?, SCHEMA_VERSION);
+        let name: String = conn.query_row("SELECT name FROM projects WHERE hash = 'abc12345'", [], |r| r.get(0))?;
+        assert_eq!(name, "widget");
+        Ok(())
+    }
+
+    #[test]
+    fn test_migrate_v1_to_v2_does_not_clobber_a_backfilled_name() -> Result<()> {
+        // A resumed migration must leave names an earlier pass already wrote.
+        let conn = Connection::open_in_memory()?;
+        init_v1_schema(&conn)?;
+        conn.execute("ALTER TABLE projects ADD COLUMN name TEXT", [])?;
+        conn.execute(
+            "INSERT INTO projects (hash, name, first_seen, last_seen) VALUES ('abc12345', 'kept', 1, 1)",
+            [],
+        )?;
+
+        migrate(&conn)?;
+
+        let name: String = conn.query_row("SELECT name FROM projects WHERE hash = 'abc12345'", [], |r| r.get(0))?;
+        assert_eq!(name, "kept");
+        Ok(())
+    }
+
+    #[test]
+    fn test_migrate_v4_to_v5_drops_the_timestamp_uniqueness() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        init_v4_schema(&conn)?;
+        conn.execute(
+            "INSERT INTO projects (hash, name, first_seen, last_seen) VALUES ('abc12345', 'widget', 1, 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO runs (id, project_id, timestamp, status) VALUES (1, 1, 1700000000, 'success')",
+            [],
+        )?;
+        // Before the migration, a second run in the same second is rejected.
+        assert!(
+            conn.execute(
+                "INSERT INTO runs (project_id, timestamp, status) VALUES (1, 1700000000, 'success')",
+                [],
+            )
+            .is_err(),
+            "v4 still enforces UNIQUE(timestamp)"
+        );
+
+        migrate(&conn)?;
+
+        assert_eq!(get_current_version(&conn)?, SCHEMA_VERSION);
+        assert!(has_column(&conn, "runs", "run_dir")?, "v5 adds run_dir");
+        conn.execute(
+            "INSERT INTO runs (project_id, timestamp, status) VALUES (1, 1700000000, 'failed')",
+            [],
+        )?;
+        let same_second: i64 = conn.query_row("SELECT COUNT(*) FROM runs WHERE timestamp = 1700000000", [], |r| {
+            r.get(0)
+        })?;
+        assert_eq!(same_second, 2, "two runs may share a second after v5");
+        Ok(())
+    }
+
+    #[test]
+    fn test_migrate_v4_to_v5_preserves_rows_and_task_links() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        init_v4_schema(&conn)?;
+        conn.execute(
+            "INSERT INTO projects (hash, name, first_seen, last_seen) VALUES ('abc12345', 'widget', 1, 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO runs (id, project_id, timestamp, status, size_bytes) VALUES (7, 1, 1700000000, 'success', 42)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO tasks (run_id, name, status, exit_code) VALUES (7, 'build', 'completed', 0)",
+            [],
+        )?;
+
+        migrate(&conn)?;
+
+        let (id, size): (i64, i64) =
+            conn.query_row("SELECT id, size_bytes FROM runs", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        assert_eq!((id, size), (7, 42), "run rows survive the rebuild with their ids");
+        let joined: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tasks t JOIN runs r ON t.run_id = r.id WHERE t.name = 'build'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(joined, 1, "task rows still join to their run");
+        let fk_ok: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
+        assert_eq!(fk_ok, 0, "the rebuild leaves no dangling foreign keys");
+        Ok(())
+    }
+
+    #[test]
+    fn test_migrate_v4_to_v5_survives_an_interrupted_run() -> Result<()> {
+        // The rebuild landed but the version bump did not: re-running must not
+        // rebuild a second time or fail.
+        let conn = Connection::open_in_memory()?;
+        init_v4_schema(&conn)?;
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        migrate_v4_to_v5(&conn)?;
+
+        migrate(&conn)?;
+
+        assert_eq!(get_current_version(&conn)?, SCHEMA_VERSION);
+        assert!(has_column(&conn, "runs", "run_dir")?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_migrate_v1_reaches_v5_in_one_pass() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        init_v1_schema(&conn)?;
+
+        migrate(&conn)?;
+
+        assert_eq!(get_current_version(&conn)?, 5);
+        assert!(has_column(&conn, "projects", "name")?);
+        assert!(has_column(&conn, "tasks", "skip_reason")?);
+        assert!(has_column(&conn, "tasks", "skip_kind")?);
+        assert!(has_column(&conn, "runs", "run_dir")?);
         Ok(())
     }
 

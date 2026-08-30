@@ -31,6 +31,12 @@ pub struct RunMetadata {
     /// Command-line arguments (serialized as JSON string in DB)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
+
+    /// The directory this run writes into, recorded rather than reconstructed.
+    /// Cleanup used to rebuild it from a naming convention it got wrong, so it
+    /// deleted the database rows and left the directories on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_dir: Option<PathBuf>,
 }
 
 impl RunMetadata {
@@ -44,6 +50,7 @@ impl RunMetadata {
             user: None,
             hostname: None,
             args: None,
+            run_dir: None,
         }
     }
 
@@ -64,7 +71,14 @@ impl RunMetadata {
             user,
             hostname,
             args,
+            run_dir: None,
         }
+    }
+
+    /// Record the directory this run writes into.
+    pub fn with_run_dir(mut self, run_dir: PathBuf) -> Self {
+        self.run_dir = Some(run_dir);
+        self
     }
 
     /// Get current system metadata (user, hostname)
@@ -92,6 +106,18 @@ mod tests {
         assert_eq!(meta.user, None);
         assert_eq!(meta.hostname, None);
         assert_eq!(meta.args, None);
+        assert_eq!(meta.run_dir, None);
+    }
+
+    #[test]
+    fn test_with_run_dir_records_the_directory() {
+        let meta = RunMetadata::minimal(None, "abc12345".to_string(), 1234567890)
+            .with_run_dir(PathBuf::from("/home/u/.otto/widget-abc12345/1234567890"));
+
+        assert_eq!(
+            meta.run_dir,
+            Some(PathBuf::from("/home/u/.otto/widget-abc12345/1234567890"))
+        );
     }
 
     #[test]

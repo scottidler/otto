@@ -1,4 +1,5 @@
-use crate::ports::{FileSystem, RealFs, StateStore};
+use crate::executor::layout::{resolve_otto_home, run_root};
+use crate::ports::{FileSystem, RealFs, StateStore, record_blocking};
 use expanduser::expanduser;
 use eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
@@ -123,22 +124,20 @@ impl<F: FileSystem> Workspace<F> {
     pub async fn new_with_hash_and_fs(root: PathBuf, name: String, hash: String, fs: Arc<F>) -> Result<Self> {
         let time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
 
-        // Check for OTTO_HOME environment variable (for test isolation)
-        let home = if let Ok(otto_home) = std::env::var("OTTO_HOME") {
-            PathBuf::from(otto_home)
-        } else {
-            let home_dir = std::env::var("HOME").map_err(|e| eyre!("Failed to get HOME directory: {}", e))?;
-            PathBuf::from(home_dir).join(".otto")
-        };
+        let home = resolve_otto_home()?;
 
-        // Build computed paths - use project name and hash
-        let project = home.join(format!("{}-{}", name, hash));
+        // Build computed paths - one helper decides what a run root is called,
+        // so cleanup can find the directory this run creates.
+        let project = run_root(&home, &name, &hash);
         let cache = project.join(".cache");
         let run = project.join(time.to_string());
 
         // Try to create default StateManager for production use
         let state_store: Option<Arc<dyn StateStore>> =
             StateManager::try_new().map(|m| Arc::new(m) as Arc<dyn StateStore>);
+        if state_store.is_none() {
+            log::warn!("This run will not appear in otto History or otto Stats");
+        }
 
         Ok(Self {
             home,
@@ -313,35 +312,39 @@ impl<F: FileSystem> Workspace<F> {
             .map_err(|e| eyre!("Failed to write run.yaml: {}", e))?;
 
         // Also try to record in database (graceful degradation if DB unavailable)
-        self.record_run_start_in_db(&context);
+        self.record_run_start_in_db(&context).await;
 
         Ok(())
     }
 
-    fn record_run_start_in_db(&self, context: &ExecutionContext) {
-        if let Some(ref store) = self.state_store {
-            // Convert ExecutionContext to RunMetadata
-            let metadata = RunMetadata::full(
-                context.ottofile.clone(),
-                context.hash.clone(),
-                context.timestamp,
-                Some(context.cwd.clone()),
-                Some(context.user.clone()),
-                None, // hostname not in ExecutionContext yet
-                Some(context.args.clone()),
-            );
+    async fn record_run_start_in_db(&self, context: &ExecutionContext) {
+        let Some(store) = self.state_store.as_ref() else {
+            return;
+        };
 
-            // Try to record - log error but don't fail
-            match store.record_run_start(&metadata) {
-                Ok(run_id) => {
-                    // Store the run_id for task tracking
-                    if let Ok(mut db_run_id) = self.db_run_id.lock() {
-                        *db_run_id = Some(run_id);
-                    }
+        // Convert ExecutionContext to RunMetadata. The run directory is
+        // recorded, not left to be reconstructed later from a guess.
+        let metadata = RunMetadata::full(
+            context.ottofile.clone(),
+            context.hash.clone(),
+            context.timestamp,
+            Some(context.cwd.clone()),
+            Some(context.user.clone()),
+            None, // hostname not in ExecutionContext yet
+            Some(context.args.clone()),
+        )
+        .with_run_dir(self.run.clone());
+
+        // Try to record - log error but don't fail
+        match record_blocking(store, move |store| store.record_run_start(&metadata)).await {
+            Ok(run_id) => {
+                // Store the run_id for task tracking
+                if let Ok(mut db_run_id) = self.db_run_id.lock() {
+                    *db_run_id = Some(run_id);
                 }
-                Err(e) => {
-                    log::warn!("Failed to record run start in database: {}", e);
-                }
+            }
+            Err(e) => {
+                log::warn!("Failed to record run start in database: {}", e);
             }
         }
     }
@@ -351,21 +354,39 @@ impl<F: FileSystem> Workspace<F> {
         self.db_run_id.lock().ok().and_then(|guard| *guard)
     }
 
-    pub fn record_run_complete_in_db(&self, success: bool) {
-        if let Some(ref store) = self.state_store {
-            let status = if success {
-                super::state::RunStatus::Success
-            } else {
-                super::state::RunStatus::Failed
-            };
+    /// Mark this run finished in the database.
+    ///
+    /// Called from run teardown on both the plain and TUI paths. Before that it
+    /// had no production caller at all, so every run in the database stayed
+    /// `running` forever and `History`, `Stats`, and `Clean` all read from a
+    /// table where nothing had ever finished.
+    pub async fn record_run_complete_in_db(&self, success: bool) {
+        let Some(store) = self.state_store.as_ref() else {
+            return;
+        };
+        let Some(run_id) = self.db_run_id() else {
+            // No id means the run start was never recorded; there is nothing to
+            // complete, and saying so beats a silent return.
+            log::warn!("Run has no database id, so its completion was not recorded");
+            return;
+        };
 
-            // Try to calculate directory size
-            let size_bytes = Self::calculate_directory_size(&self.run).ok();
+        let status = if success {
+            super::state::RunStatus::Success
+        } else {
+            super::state::RunStatus::Failed
+        };
 
-            // Try to record - log error but don't fail
-            if let Err(e) = store.record_run_complete(self.time, status, size_bytes) {
-                log::warn!("Failed to record run completion in database: {}", e);
-            }
+        // Try to calculate directory size
+        let size_bytes = Self::calculate_directory_size(&self.run).ok();
+
+        // Try to record - log error but don't fail
+        if let Err(e) = record_blocking(store, move |store| {
+            store.record_run_complete(run_id, status, size_bytes)
+        })
+        .await
+        {
+            log::warn!("Failed to record run completion in database: {}", e);
         }
     }
 
@@ -1079,12 +1100,22 @@ mod tests {
         ws.save_execution_context(context).await?;
 
         // Now record completion
-        ws.record_run_complete_in_db(true);
+        ws.record_run_complete_in_db(true).await;
 
         // Verify the run was marked complete
         let runs = store.get_recent_runs(10, None)?;
         assert_eq!(runs.len(), 1);
-        // Note: MemoryStateStore may not update status in-place, but the call succeeded
+        assert_eq!(
+            runs[0].status,
+            crate::executor::state::RunStatus::Success,
+            "a finished run must not stay `running`"
+        );
+        assert!(runs[0].ended_at.is_some());
+        assert_eq!(
+            runs[0].run_dir,
+            Some(PathBuf::from("/otto-home/myproject-abc12345").join(ws.time.to_string())),
+            "the run records the directory it wrote into"
+        );
 
         Ok(())
     }

@@ -1311,8 +1311,14 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             return;
         };
         for (task_name, record) in records {
-            if let Err(e) = store.record_task_skipped(run_id, &task_name, None, Some(&record.detail), Some(record.kind))
-            {
+            let name = task_name.clone();
+            let detail = record.detail.clone();
+            let kind = record.kind;
+            let recorded = crate::ports::record_blocking(store, move |store| {
+                store.record_task_skipped(run_id, &name, None, Some(&detail), Some(kind))
+            })
+            .await;
+            if let Err(e) = recorded {
                 log::warn!("Failed to record skipped task {task_name} in database: {e}");
             }
         }
@@ -1471,27 +1477,33 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 };
 
                 // Record task start in database with paths (graceful degradation)
-                db_task_id = if let Some(run_id) = workspace.db_run_id() {
-                    if let Some(store) = workspace.state_store() {
-                        let stdout_path = tasks_dir.join(&task_name).join("stdout.log");
-                        let stderr_path = tasks_dir.join(&task_name).join("stderr.log");
+                db_task_id = if let (Some(run_id), Some(store)) = (workspace.db_run_id(), workspace.state_store()) {
+                    let stdout_path = tasks_dir.join(&task_name).join("stdout.log");
+                    let stderr_path = tasks_dir.join(&task_name).join("stderr.log");
+                    let name = task_name.clone();
+                    let script = script_path.clone();
 
-                        match store.record_task_start(
+                    // rusqlite is synchronous and holds a mutex across the
+                    // write, so it runs on the blocking pool rather than
+                    // parking a tokio worker mid-task.
+                    let recorded = crate::ports::record_blocking(store, move |store| {
+                        store.record_task_start(
                             run_id,
-                            &task_name,
+                            &name,
                             None, // TODO: Compute script hash in future phase
                             Some(&stdout_path),
                             Some(&stderr_path),
-                            Some(&script_path),
-                        ) {
-                            Ok(task_id) => Some(task_id),
-                            Err(e) => {
-                                log::warn!("Failed to record task start in database: {}", e);
-                                None
-                            }
+                            Some(&script),
+                        )
+                    })
+                    .await;
+
+                    match recorded {
+                        Ok(task_id) => Some(task_id),
+                        Err(e) => {
+                            log::warn!("Failed to record task start in database: {}", e);
+                            None
                         }
-                    } else {
-                        None
                     }
                 } else {
                     None
@@ -1699,13 +1711,15 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     // Record task completion in database (graceful degradation)
                     if let Some(task_id) = db_task_id
                         && let Some(store) = workspace.state_store()
-                        && let Err(e) = store.record_task_complete(
-                            task_id,
-                            exit_code.unwrap_or(0),
-                            super::state::TaskStatus::Completed,
-                        )
                     {
-                        log::warn!("Failed to record task completion in database: {}", e);
+                        let code = exit_code.unwrap_or(0);
+                        let recorded = crate::ports::record_blocking(store, move |store| {
+                            store.record_task_complete(task_id, code, super::state::TaskStatus::Completed)
+                        })
+                        .await;
+                        if let Err(e) = recorded {
+                            log::warn!("Failed to record task completion in database: {}", e);
+                        }
                     }
 
                     TaskReport::success(task_name.clone())
@@ -1720,12 +1734,17 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     if let Some(task_id) = db_task_id
                         && let Some(store) = workspace.state_store()
                     {
-                        // Ignore errors in graceful degradation
-                        let _ = store.record_task_complete(
-                            task_id,
-                            recorded.unwrap_or(1),
-                            super::state::TaskStatus::Failed,
-                        );
+                        let code = recorded.unwrap_or(1);
+                        // Degrading gracefully is not the same as saying
+                        // nothing: this used to be `let _ =`, so a failure to
+                        // record a failure vanished entirely.
+                        let stored = crate::ports::record_blocking(store, move |store| {
+                            store.record_task_complete(task_id, code, super::state::TaskStatus::Failed)
+                        })
+                        .await;
+                        if let Err(e) = stored {
+                            log::warn!("Failed to record task failure in database: {}", e);
+                        }
                     }
 
                     {
@@ -1850,14 +1869,18 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    /// Helper to set up a test-specific database path and workspace
+    /// Point this test's otto home at a scratch directory.
+    ///
+    /// `OTTO_DB_PATH` is deliberately cleared rather than set: the database now
+    /// derives from `OTTO_HOME`, so setting the home alone must be enough to
+    /// keep a test off the developer's real database. `OTTO_DB_PATH` still
+    /// overrides, and that override is pinned by its own test in `state/db.rs`.
     fn setup_test_db(temp_dir: &std::path::Path) {
-        let db_path = temp_dir.join("test_otto.db");
         let otto_home = temp_dir.join(".otto");
         // SAFETY: This is safe in tests because we control the execution environment
         // and tests are isolated. The env var is set before any StateManager is created.
         unsafe {
-            std::env::set_var("OTTO_DB_PATH", &db_path);
+            std::env::remove_var("OTTO_DB_PATH");
             std::env::set_var("OTTO_HOME", &otto_home);
         }
     }

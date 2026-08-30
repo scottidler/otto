@@ -6,8 +6,11 @@
 use eyre::Result;
 use std::path::PathBuf;
 
+use std::sync::Arc;
+
 use crate::executor::state::{
-    OverallStats, ProjectSummary, RunMetadata, RunRecord, RunStatus, SkipKind, TaskRecord, TaskStats, TaskStatus,
+    OverallStats, ProjectSummary, Retention, RunAge, RunMetadata, RunRecord, RunStatus, SkipKind, TaskRecord,
+    TaskStats, TaskStatus,
 };
 
 /// Abstraction for state storage operations
@@ -18,7 +21,9 @@ use crate::executor::state::{
 pub trait StateStore: Send + Sync {
     // Recording methods
     fn record_run_start(&self, metadata: &RunMetadata) -> Result<i64>;
-    fn record_run_complete(&self, timestamp: u64, status: RunStatus, size_bytes: Option<u64>) -> Result<()>;
+    /// Mark a run finished. Keyed on the run id returned by `record_run_start`,
+    /// not on its timestamp: two runs can share a second.
+    fn record_run_complete(&self, run_id: i64, status: RunStatus, size_bytes: Option<u64>) -> Result<()>;
     fn record_task_start(
         &self,
         run_id: i64,
@@ -61,7 +66,23 @@ pub trait StateStore: Send + Sync {
         keep_failed_days: Option<u64>,
         project_filter: Option<&str>,
     ) -> Result<Vec<RunRecord>>;
-    fn delete_run(&self, timestamp: u64, delete_filesystem: bool) -> Result<Option<RunRecord>>;
+    fn delete_run(&self, run_id: i64, delete_filesystem: bool) -> Result<Option<RunRecord>>;
+}
+
+/// Run one blocking `StateStore` call on tokio's blocking pool.
+///
+/// Every implementation of this trait is synchronous, and the SQLite one takes a
+/// mutex and does disk I/O while holding it. Called straight from an async task,
+/// it parks a tokio worker thread for the length of a database write.
+pub async fn record_blocking<T, F>(store: &Arc<dyn StateStore>, f: F) -> Result<T>
+where
+    F: FnOnce(&dyn StateStore) -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let store = Arc::clone(store);
+    tokio::task::spawn_blocking(move || f(store.as_ref()))
+        .await
+        .map_err(|e| eyre::eyre!("State-store task failed to run: {e}"))?
 }
 
 /// In-memory state store for testing
@@ -145,6 +166,7 @@ impl StateStore for MemoryStateStore {
             hostname: metadata.hostname.clone(),
             args: metadata.args.clone(),
             ended_at: None,
+            run_dir: metadata.run_dir.clone(),
         };
 
         self.runs.write().unwrap().push(run);
@@ -159,19 +181,23 @@ impl StateStore for MemoryStateStore {
         Ok(run_id)
     }
 
-    fn record_run_complete(&self, timestamp: u64, status: RunStatus, size_bytes: Option<u64>) -> Result<()> {
+    fn record_run_complete(&self, run_id: i64, status: RunStatus, size_bytes: Option<u64>) -> Result<()> {
         let ended_at = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
         let mut runs = self.runs.write().unwrap();
-        if let Some(run) = runs.iter_mut().find(|r| r.timestamp == timestamp) {
-            run.status = status;
-            run.size_bytes = size_bytes;
-            run.ended_at = Some(ended_at);
-            run.duration_seconds = Some((ended_at - run.timestamp) as f64);
-        }
+        let Some(run) = runs.iter_mut().find(|r| r.id == run_id) else {
+            // Same rule as the SQLite store: completing a run that is not there
+            // leaves it `running` forever, so it is an error, not a no-op.
+            return Err(eyre::eyre!("No run with id {run_id} to mark complete"));
+        };
+
+        run.status = status;
+        run.size_bytes = size_bytes;
+        run.ended_at = Some(ended_at);
+        run.duration_seconds = Some(ended_at.saturating_sub(run.timestamp) as f64);
 
         Ok(())
     }
@@ -250,7 +276,12 @@ impl StateStore for MemoryStateStore {
             status: TaskStatus::Skipped,
             script_hash: script_hash.map(String::from),
             exit_code: None,
-            started_at: None,
+            started_at: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            ),
             ended_at: None,
             duration_seconds: None,
             stdout_path: None,
@@ -442,13 +473,10 @@ impl StateStore for MemoryStateStore {
             .unwrap()
             .as_secs();
 
-        let cutoff_timestamp = now.saturating_sub(keep_days * 24 * 60 * 60);
-        let failed_cutoff_timestamp = keep_failed_days.map(|days| now.saturating_sub(days * 24 * 60 * 60));
-
         let runs = self.runs.read().unwrap();
         let projects = self.projects.read().unwrap();
 
-        let mut filtered_runs: Vec<RunRecord> = runs
+        let filtered_runs: Vec<RunRecord> = runs
             .iter()
             .filter(|r| {
                 project_filter.is_none_or(|hash| projects.iter().any(|p| p.id == r.project_id && p.hash == hash))
@@ -456,38 +484,33 @@ impl StateStore for MemoryStateStore {
             .cloned()
             .collect();
 
-        filtered_runs.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+        // The same pure function the SQLite store uses. This loop used to be a
+        // line-for-line copy of the one in `manager.rs`, which is a promise the
+        // two would drift.
+        let policy = Retention {
+            keep_days,
+            keep_last,
+            keep_failed_days,
+        };
+        let ages: Vec<RunAge> = filtered_runs.iter().map(RunAge::from).collect();
 
-        let keep_count = keep_last.unwrap_or(0);
-        let mut runs_to_delete = Vec::new();
-
-        for (idx, run) in filtered_runs.iter().enumerate() {
-            if idx < keep_count {
-                continue;
-            }
-
-            let cutoff = if matches!(run.status, RunStatus::Failed) {
-                failed_cutoff_timestamp.unwrap_or(cutoff_timestamp)
-            } else {
-                cutoff_timestamp
-            };
-
-            if run.timestamp < cutoff {
-                runs_to_delete.push(run.clone());
-            }
-        }
+        let mut runs_to_delete: Vec<RunRecord> = policy
+            .expired(&ages, now)
+            .into_iter()
+            .map(|idx| filtered_runs[idx].clone())
+            .collect();
 
         runs_to_delete.sort_by_key(|r| r.timestamp);
 
         Ok(runs_to_delete)
     }
 
-    fn delete_run(&self, timestamp: u64, _delete_filesystem: bool) -> Result<Option<RunRecord>> {
+    fn delete_run(&self, run_id: i64, _delete_filesystem: bool) -> Result<Option<RunRecord>> {
         let mut runs = self.runs.write().unwrap();
         let mut tasks = self.tasks.write().unwrap();
         let mut projects = self.projects.write().unwrap();
 
-        if let Some(idx) = runs.iter().position(|r| r.timestamp == timestamp) {
+        if let Some(idx) = runs.iter().position(|r| r.id == run_id) {
             let run = runs.remove(idx);
 
             // Remove associated tasks
@@ -513,6 +536,69 @@ mod tests {
         RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), hash.to_string(), timestamp)
     }
 
+    /// The in-memory fake and the SQLite store must agree about retention, or a
+    /// test that passes against the fake proves nothing about the real thing.
+    /// Their retention loops used to be duplicated line for line.
+    #[test]
+    fn memory_and_sqlite_stores_agree_about_retention() {
+        use crate::executor::state::StateManager;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sqlite = StateManager::with_db_path(temp_dir.path().join("parity.db")).unwrap();
+        let memory = MemoryStateStore::new();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Ten runs, 40 to 49 days old, alternating success and failure.
+        for i in 0..10u64 {
+            let metadata = create_test_metadata("abc12345", now - ((40 + i) * 86400));
+            let status = if i % 2 == 0 { RunStatus::Success } else { RunStatus::Failed };
+
+            let sqlite_id = sqlite.record_run_start(&metadata).unwrap();
+            sqlite.record_run_complete(sqlite_id, status.clone(), Some(1)).unwrap();
+            let memory_id = memory.record_run_start(&metadata).unwrap();
+            memory.record_run_complete(memory_id, status, Some(1)).unwrap();
+        }
+
+        for (keep_days, keep_last, keep_failed) in [
+            (30, None, None),
+            (30, Some(3), None),
+            (30, None, Some(45)),
+            (30, Some(2), Some(45)),
+            (0, Some(4), None),
+            (365, None, None),
+        ] {
+            let from_sqlite: Vec<u64> = sqlite
+                .find_old_runs(keep_days, keep_last, keep_failed, None)
+                .unwrap()
+                .iter()
+                .map(|r| r.timestamp)
+                .collect();
+            let from_memory: Vec<u64> = memory
+                .find_old_runs(keep_days, keep_last, keep_failed, None)
+                .unwrap()
+                .iter()
+                .map(|r| r.timestamp)
+                .collect();
+
+            assert_eq!(
+                from_sqlite, from_memory,
+                "backends disagree for keep_days={keep_days} keep_last={keep_last:?} keep_failed={keep_failed:?}"
+            );
+        }
+    }
+
+    /// Both backends refuse to complete a run that does not exist.
+    #[test]
+    fn memory_store_reports_completing_a_missing_run() {
+        let store = MemoryStateStore::new();
+        let err = store.record_run_complete(99, RunStatus::Success, None).unwrap_err();
+        assert!(err.to_string().contains("No run with id 99"), "{err}");
+    }
+
     #[test]
     fn test_memory_store_record_run_start() {
         let store = MemoryStateStore::new();
@@ -533,9 +619,9 @@ mod tests {
         let store = MemoryStateStore::new();
 
         let metadata = create_test_metadata("abc123", 1234567890);
-        store.record_run_start(&metadata).unwrap();
+        let run_id = store.record_run_start(&metadata).unwrap();
         store
-            .record_run_complete(1234567890, RunStatus::Success, Some(1024))
+            .record_run_complete(run_id, RunStatus::Success, Some(1024))
             .unwrap();
 
         let runs = store.get_recent_runs(10, None).unwrap();
@@ -627,15 +713,15 @@ mod tests {
         let store = MemoryStateStore::new();
 
         let metadata1 = create_test_metadata("abc123", 1234567890);
-        store.record_run_start(&metadata1).unwrap();
+        let run_id1 = store.record_run_start(&metadata1).unwrap();
         store
-            .record_run_complete(1234567890, RunStatus::Success, Some(1024))
+            .record_run_complete(run_id1, RunStatus::Success, Some(1024))
             .unwrap();
 
         let metadata2 = create_test_metadata("abc123", 1234567891);
-        store.record_run_start(&metadata2).unwrap();
+        let run_id2 = store.record_run_start(&metadata2).unwrap();
         store
-            .record_run_complete(1234567891, RunStatus::Failed, Some(2048))
+            .record_run_complete(run_id2, RunStatus::Failed, Some(2048))
             .unwrap();
 
         let stats = store.get_overall_stats().unwrap();
@@ -669,7 +755,7 @@ mod tests {
             .record_task_start(run_id, "build", None, None, None, None)
             .unwrap();
 
-        let deleted = store.delete_run(1234567890, false).unwrap();
+        let deleted = store.delete_run(run_id, false).unwrap();
         assert!(deleted.is_some());
 
         let runs = store.get_recent_runs(10, None).unwrap();
@@ -683,7 +769,7 @@ mod tests {
     fn test_memory_store_delete_nonexistent() {
         let store = MemoryStateStore::new();
 
-        let deleted = store.delete_run(9999999999, false).unwrap();
+        let deleted = store.delete_run(9999, false).unwrap();
         assert!(deleted.is_none());
     }
 
@@ -709,12 +795,12 @@ mod tests {
         let store = MemoryStateStore::new();
 
         let metadata1 = create_test_metadata("abc123", 1234567890);
-        store.record_run_start(&metadata1).unwrap();
-        store.record_run_complete(1234567890, RunStatus::Success, None).unwrap();
+        let run_id1 = store.record_run_start(&metadata1).unwrap();
+        store.record_run_complete(run_id1, RunStatus::Success, None).unwrap();
 
         let metadata2 = create_test_metadata("abc123", 1234567891);
-        store.record_run_start(&metadata2).unwrap();
-        store.record_run_complete(1234567891, RunStatus::Failed, None).unwrap();
+        let run_id2 = store.record_run_start(&metadata2).unwrap();
+        store.record_run_complete(run_id2, RunStatus::Failed, None).unwrap();
 
         let success_runs = store.get_runs_with_filters(Some(RunStatus::Success), None, 10).unwrap();
         assert_eq!(success_runs.len(), 1);

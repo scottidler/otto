@@ -804,14 +804,17 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
-    /// Helper to set up a test-specific database path and OTTO_HOME
+    /// Point this test's otto home at a scratch directory.
+    ///
+    /// `OTTO_DB_PATH` is deliberately cleared rather than set: the database now
+    /// derives from `OTTO_HOME`, and pinning both was what let the derived
+    /// default stay broken while these tests passed.
     fn setup_test_db(temp_dir: &std::path::Path) {
-        let db_path = temp_dir.join("test_otto.db");
         let otto_home = temp_dir.join(".otto");
         // SAFETY: This is safe in tests because we control the execution environment
         // and tests are isolated. The env var is set before any StateManager is created.
         unsafe {
-            std::env::set_var("OTTO_DB_PATH", &db_path);
+            std::env::remove_var("OTTO_DB_PATH");
             std::env::set_var("OTTO_HOME", &otto_home);
         }
     }

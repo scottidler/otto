@@ -342,15 +342,22 @@ pub async fn execute_with_terminal_output(
     // Convert parser tasks to executor tasks
     let executor_tasks: Vec<crate::executor::Task> = execution_tasks.into_iter().map(Into::into).collect();
 
-    let mut scheduler = TaskScheduler::new(executor_tasks, Arc::new(workspace), execution_context, jobs, false).await?;
+    // The scheduler takes ownership; teardown still needs the workspace to close
+    // out the run in the database.
+    let workspace = Arc::new(workspace);
+    let mut scheduler = TaskScheduler::new(executor_tasks, workspace.clone(), execution_context, jobs, false).await?;
     scheduler.set_no_prefix(no_prefix);
 
     // Execute all tasks, capturing result
     let result = scheduler.execute_all().await;
 
+    // Close the run out in the database before anything else reads it: prune
+    // included, since a run left `running` is a run `Clean` cannot age out.
+    workspace.record_run_complete_in_db(result.is_ok()).await;
+
     // Auto-prune runs even if tasks failed — failing CI jobs that never prune
     // are exactly the scenario that fills disks
-    if let Ok(otto_home) = crate::executor::pruning::resolve_otto_home() {
+    if let Ok(otto_home) = crate::executor::layout::resolve_otto_home() {
         crate::executor::pruning::auto_prune(&otto_home, &retention).await;
     }
 
@@ -423,9 +430,10 @@ pub async fn execute_with_tui(
     }
 
     // Start scheduler in background with TUI mode enabled
+    let workspace = Arc::new(workspace);
     let mut scheduler = TaskScheduler::new(
         executor_tasks,
-        Arc::new(workspace),
+        workspace.clone(),
         execution_context,
         jobs,
         true, // tui_mode = true
@@ -485,8 +493,11 @@ pub async fn execute_with_tui(
         Err(e) => Err(eyre::eyre!("Scheduler panicked: {}", e)),
     };
 
+    // Same teardown as the non-TUI path: a run that ended is a run marked ended.
+    workspace.record_run_complete_in_db(result.is_ok()).await;
+
     // Auto-prune runs even if tasks failed
-    if let Ok(otto_home) = crate::executor::pruning::resolve_otto_home() {
+    if let Ok(otto_home) = crate::executor::layout::resolve_otto_home() {
         crate::executor::pruning::auto_prune(&otto_home, &retention).await;
     }
 

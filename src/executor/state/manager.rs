@@ -5,8 +5,26 @@ use std::time::SystemTime;
 
 use super::db::DatabaseManager;
 use super::metadata::RunMetadata;
+use super::retention::{Retention, RunAge};
 use super::schema::{RunStatus, SkipKind, TaskStatus};
+use crate::executor::layout::{resolve_otto_home, run_root};
 use crate::ports::StateStore;
+
+/// Every column of `runs`, in the order [`StateManager::row_to_run_record`]
+/// reads them. One list, because a query that forgot a column used to hand the
+/// mapper the wrong field.
+const RUN_COLUMNS: &str = "r.id, r.project_id, r.timestamp, r.status, r.duration_seconds,
+     r.size_bytes, r.ottofile_path, r.cwd, r.user, r.hostname, r.args, r.ended_at, r.run_dir";
+
+/// Report a column whose stored value does not fit the type the code expects,
+/// instead of quietly substituting a default.
+fn bad_column(index: usize, detail: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, detail)),
+    )
+}
 
 /// State manager for recording and querying run/task state
 pub struct StateManager {
@@ -28,6 +46,9 @@ pub struct RunRecord {
     pub hostname: Option<String>,
     pub args: Option<Vec<String>>,
     pub ended_at: Option<u64>,
+    /// The directory this run wrote into, as recorded at run start. `None` for
+    /// rows written before schema v5, which fall back to a derived path.
+    pub run_dir: Option<PathBuf>,
 }
 
 /// A task record from the database
@@ -108,10 +129,20 @@ impl StateManager {
         Ok(Self { db })
     }
 
-    /// Try to create a StateManager, returning None if DB is unavailable
-    /// This enables graceful degradation
+    /// Try to create a StateManager, returning None if the database is
+    /// unavailable, so a run still executes without its history.
+    ///
+    /// Degrading is fine; degrading silently is not. This used to be
+    /// `Self::new().ok()`, which threw away the only explanation of why history,
+    /// stats, and DB-driven cleanup had all stopped working.
     pub fn try_new() -> Option<Self> {
-        Self::new().ok()
+        match Self::new() {
+            Ok(manager) => Some(manager),
+            Err(e) => {
+                log::warn!("State database unavailable, continuing without run history: {e:#}");
+                None
+            }
+        }
     }
 
     pub fn record_run_start(&self, metadata: &RunMetadata) -> Result<i64> {
@@ -130,8 +161,8 @@ impl StateManager {
             // Insert run record
             conn.execute(
                 "INSERT INTO runs (
-                    project_id, timestamp, status, ottofile_path, cwd, user, hostname, args
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    project_id, timestamp, status, ottofile_path, cwd, user, hostname, args, run_dir
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     project_id,
                     metadata.timestamp as i64,
@@ -141,6 +172,7 @@ impl StateManager {
                     metadata.user,
                     metadata.hostname,
                     args_json,
+                    metadata.run_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
                 ],
             )?;
 
@@ -157,28 +189,31 @@ impl StateManager {
         })
     }
 
-    /// Record the completion of a run
-    pub fn record_run_complete(&self, timestamp: u64, status: RunStatus, size_bytes: Option<u64>) -> Result<()> {
+    /// Record the completion of a run.
+    ///
+    /// Keyed on `run_id`, not on the timestamp: timestamps have one-second
+    /// resolution, so two runs started in the same second used to complete each
+    /// other. The duration is computed in SQL from the row's own start time.
+    pub fn record_run_complete(&self, run_id: i64, status: RunStatus, size_bytes: Option<u64>) -> Result<()> {
         let ended_at = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .context("Failed to get current time")?
             .as_secs();
 
-        let duration_seconds = ended_at.saturating_sub(timestamp) as f64;
-
         self.db.with_connection(|conn| {
-            conn.execute(
+            let updated = conn.execute(
                 "UPDATE runs
-                 SET status = ?1, duration_seconds = ?2, size_bytes = ?3, ended_at = ?4
-                 WHERE timestamp = ?5",
-                params![
-                    status.as_str(),
-                    duration_seconds,
-                    size_bytes.map(|s| s as i64),
-                    ended_at as i64,
-                    timestamp as i64,
-                ],
+                 SET status = ?1, size_bytes = ?2, ended_at = ?3,
+                     duration_seconds = MAX(?3 - timestamp, 0)
+                 WHERE id = ?4",
+                params![status.as_str(), size_bytes.map(|s| s as i64), ended_at as i64, run_id],
             )?;
+
+            // A completion for a run that is not there is a lost run, not a
+            // no-op: the row stays `running` forever and skews every stat.
+            if updated == 0 {
+                return Err(eyre::eyre!("No run with id {run_id} to mark complete"));
+            }
             Ok(())
         })
     }
@@ -227,20 +262,26 @@ impl StateManager {
             .as_secs();
 
         self.db.with_connection(|conn| {
-            let started_at: i64 =
+            // `started_at` is nullable in the schema, so it is read as one:
+            // reading it as `i64` turned any task without a start time into a
+            // hard error out of a completion path that must not fail.
+            let started_at: Option<i64> =
                 conn.query_row("SELECT started_at FROM tasks WHERE id = ?1", params![task_id], |row| {
                     row.get(0)
                 })?;
 
-            let duration_seconds = (ended_at as i64 - started_at) as f64;
+            let duration_seconds = started_at.map(|started| (ended_at as i64 - started) as f64);
 
-            conn.execute(
+            let updated = conn.execute(
                 "UPDATE tasks
                  SET status = ?1, exit_code = ?2, ended_at = ?3, duration_seconds = ?4
                  WHERE id = ?5",
                 params![status.as_str(), exit_code, ended_at as i64, duration_seconds, task_id],
             )?;
 
+            if updated == 0 {
+                return Err(eyre::eyre!("No task with id {task_id} to mark complete"));
+            }
             Ok(())
         })
     }
@@ -258,15 +299,24 @@ impl StateManager {
         skip_reason: Option<&str>,
         skip_kind: Option<SkipKind>,
     ) -> Result<i64> {
+        // A skip happens at a moment, and `get_run_tasks` orders by
+        // `started_at`: without one, every skipped task sorted ahead of the run
+        // it belongs to.
+        let started_at = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .context("Failed to get current time")?
+            .as_secs();
+
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO tasks (run_id, name, status, script_hash, skip_reason, skip_kind)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO tasks (run_id, name, status, script_hash, started_at, skip_reason, skip_kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     run_id,
                     task_name,
                     TaskStatus::Skipped.as_str(),
                     script_hash,
+                    started_at as i64,
                     skip_reason,
                     skip_kind.map(|k| k.as_str())
                 ],
@@ -279,23 +329,25 @@ impl StateManager {
     /// Get recent runs, optionally filtered by project hash
     pub fn get_recent_runs(&self, limit: usize, project_filter: Option<&str>) -> Result<Vec<RunRecord>> {
         self.db.with_connection(|conn| {
-            let query = if let Some(_project_hash) = project_filter {
-                "SELECT r.id, r.project_id, r.timestamp, r.status, r.duration_seconds,
-                            r.size_bytes, r.ottofile_path, r.cwd, r.user, r.hostname, r.args, r.ended_at
+            let query = if project_filter.is_some() {
+                format!(
+                    "SELECT {RUN_COLUMNS}
                      FROM runs r
                      JOIN projects p ON r.project_id = p.id
                      WHERE p.hash = ?1
                      ORDER BY r.timestamp DESC
                      LIMIT ?2"
+                )
             } else {
-                "SELECT r.id, r.project_id, r.timestamp, r.status, r.duration_seconds,
-                            r.size_bytes, r.ottofile_path, r.cwd, r.user, r.hostname, r.args, r.ended_at
+                format!(
+                    "SELECT {RUN_COLUMNS}
                      FROM runs r
                      ORDER BY r.timestamp DESC
                      LIMIT ?1"
+                )
             };
 
-            let mut stmt = conn.prepare(query)?;
+            let mut stmt = conn.prepare(&query)?;
 
             let rows = if let Some(project_hash) = project_filter {
                 stmt.query_map(params![project_hash, limit as i64], Self::row_to_run_record)?
@@ -344,12 +396,22 @@ impl StateManager {
     }
 
     /// Helper to convert a database row to a RunRecord
+    ///
+    /// Unreadable stored values are reported, not smoothed over: corrupt args
+    /// used to become `None` and an unknown status used to become `Failed`, so a
+    /// damaged row read back as a plausible, wrong one.
     fn row_to_run_record(row: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
         let args_json: Option<String> = row.get(10)?;
-        let args = args_json.and_then(|json| serde_json::from_str(&json).ok());
+        let args = args_json
+            .map(|json| {
+                serde_json::from_str::<Vec<String>>(&json)
+                    .map_err(|e| bad_column(10, format!("run args are not a JSON string list: {e}")))
+            })
+            .transpose()?;
 
         let status_str: String = row.get(3)?;
-        let status = RunStatus::parse(&status_str).unwrap_or(RunStatus::Failed);
+        let status =
+            RunStatus::parse(&status_str).ok_or_else(|| bad_column(3, format!("unknown run status {status_str:?}")))?;
 
         Ok(RunRecord {
             id: row.get(0)?,
@@ -364,13 +426,15 @@ impl StateManager {
             hostname: row.get(9)?,
             args,
             ended_at: row.get::<_, Option<i64>>(11)?.map(|t| t as u64),
+            run_dir: row.get::<_, Option<String>>(12)?.map(PathBuf::from),
         })
     }
 
     /// Helper to convert a database row to a TaskRecord
     fn row_to_task_record(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         let status_str: String = row.get(3)?;
-        let status = TaskStatus::parse(&status_str).unwrap_or(TaskStatus::Failed);
+        let status = TaskStatus::parse(&status_str)
+            .ok_or_else(|| bad_column(3, format!("unknown task status {status_str:?}")))?;
 
         Ok(TaskRecord {
             id: row.get(0)?,
@@ -411,15 +475,16 @@ impl StateManager {
 
             let total_tasks: u64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
 
-            let total_disk_usage: i64 = conn
-                .query_row("SELECT COALESCE(SUM(size_bytes), 0) FROM runs", [], |row| row.get(0))
-                .unwrap_or(0);
+            // These used to be `unwrap_or(0)` / `unwrap_or(0.0)`: a broken stats
+            // query reported a healthy zero instead of an error, so "no disk
+            // used" and "cannot read the database" looked identical.
+            let total_disk_usage: i64 =
+                conn.query_row("SELECT COALESCE(SUM(size_bytes), 0) FROM runs", [], |row| row.get(0))?;
 
-            let total_duration_seconds: f64 = conn
-                .query_row("SELECT COALESCE(SUM(duration_seconds), 0) FROM runs", [], |row| {
+            let total_duration_seconds: f64 =
+                conn.query_row("SELECT COALESCE(SUM(duration_seconds), 0) FROM runs", [], |row| {
                     row.get(0)
-                })
-                .unwrap_or(0.0);
+                })?;
 
             Ok(OverallStats {
                 total_runs,
@@ -444,12 +509,15 @@ impl StateManager {
 
             let projects = stmt
                 .query_map([], |row| {
+                    // `name` is nullable until the v1-to-v2 backfill has run, so
+                    // it falls back to the hash. The fallback used to re-read the
+                    // hash column and `unwrap()` it inside the mapper.
+                    let hash: String = row.get(1)?;
+                    let name: Option<String> = row.get(2)?;
                     Ok(ProjectSummary {
                         id: row.get(0)?,
-                        hash: row.get(1)?,
-                        name: row
-                            .get::<_, Option<String>>(2)?
-                            .unwrap_or_else(|| row.get::<_, String>(1).unwrap()),
+                        name: name.unwrap_or_else(|| hash.clone()),
+                        hash,
                         ottofile_path: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
                         run_count: row.get::<_, i64>(4)? as u64,
                         last_seen: row.get::<_, i64>(5)? as u64,
@@ -622,12 +690,17 @@ impl StateManager {
             };
 
             let mut stmt = conn.prepare(&query)?;
-            let task_projects: Vec<(String, i64, String, String)> = stmt
+            // `p.name` is nullable, so it is read as one and falls back to the
+            // hash, exactly as `get_task_stats` does. Reading it as `String`
+            // made this query error out on any project the v1-to-v2 backfill
+            // had not reached.
+            let task_projects: Vec<(String, i64, String, Option<String>)> = stmt
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
 
             let mut stats = Vec::new();
             for (task_name, project_id, project_hash, project_name) in task_projects {
+                let project_name = project_name.unwrap_or_else(|| project_hash.clone());
                 // Calculate stats for this task within this project
                 let total_executions: u64 = conn.query_row(
                     "SELECT COUNT(*)
@@ -749,11 +822,7 @@ impl StateManager {
         limit: usize,
     ) -> Result<Vec<RunRecord>> {
         self.db.with_connection(|conn| {
-            let mut query = String::from(
-                "SELECT r.id, r.project_id, r.timestamp, r.status, r.duration_seconds,
-                        r.size_bytes, r.ottofile_path, r.cwd, r.user, r.hostname, r.args, r.ended_at
-                 FROM runs r",
-            );
+            let mut query = format!("SELECT {RUN_COLUMNS} FROM runs r");
 
             let mut conditions = Vec::new();
             if project_filter.is_some() {
@@ -798,26 +867,19 @@ impl StateManager {
         keep_failed_days: Option<u64>,
         project_filter: Option<&str>,
     ) -> Result<Vec<RunRecord>> {
-        let cutoff_timestamp = SystemTime::now()
+        let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .context("Failed to get current time")?
-            .as_secs()
-            .saturating_sub(keep_days * 24 * 60 * 60);
+            .as_secs();
 
-        let failed_cutoff_timestamp = keep_failed_days.map(|days| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-                .saturating_sub(days * 24 * 60 * 60)
-        });
+        let policy = Retention {
+            keep_days,
+            keep_last,
+            keep_failed_days,
+        };
 
         self.db.with_connection(|conn| {
-            let mut query = String::from(
-                "SELECT r.id, r.project_id, r.timestamp, r.status, r.duration_seconds,
-                        r.size_bytes, r.ottofile_path, r.cwd, r.user, r.hostname, r.args, r.ended_at
-                 FROM runs r",
-            );
+            let mut query = format!("SELECT {RUN_COLUMNS} FROM runs r");
 
             if project_filter.is_some() {
                 query.push_str(" JOIN projects p ON r.project_id = p.id WHERE p.hash = ?1");
@@ -834,27 +896,17 @@ impl StateManager {
 
             let all_runs: Vec<RunRecord> = rows.collect::<Result<Vec<_>, _>>()?;
 
-            // Apply retention logic
-            let mut runs_to_delete = Vec::new();
-            let keep_count = keep_last.unwrap_or(0);
+            // Retention lives in one pure function shared with the in-memory
+            // store and the filesystem-scan fallback, because three private
+            // copies is how `--keep-last` came to mean opposite things in two
+            // of them.
+            let ages: Vec<RunAge> = all_runs.iter().map(RunAge::from).collect();
 
-            for (idx, run) in all_runs.iter().enumerate() {
-                // Always keep the N most recent runs if --keep-last is specified
-                if idx < keep_count {
-                    continue;
-                }
-
-                // Apply different cutoff for failed runs if specified
-                let cutoff = if matches!(run.status, RunStatus::Failed) {
-                    failed_cutoff_timestamp.unwrap_or(cutoff_timestamp)
-                } else {
-                    cutoff_timestamp
-                };
-
-                if run.timestamp < cutoff {
-                    runs_to_delete.push(run.clone());
-                }
-            }
+            let mut runs_to_delete: Vec<RunRecord> = policy
+                .expired(&ages, now)
+                .into_iter()
+                .map(|idx| all_runs[idx].clone())
+                .collect();
 
             runs_to_delete.sort_by_key(|r| r.timestamp);
 
@@ -862,83 +914,107 @@ impl StateManager {
         })
     }
 
-    pub fn delete_run(&self, timestamp: u64, delete_filesystem: bool) -> Result<Option<RunRecord>> {
-        let run = self.db.with_connection(|conn| {
+    /// Delete one run, by id, and optionally the directory it wrote into.
+    ///
+    /// Keyed on `id` rather than the timestamp so two runs from the same second
+    /// are two runs. The row deletion and the project's run-count adjustment are
+    /// one transaction; the directory is removed afterwards, because a failed
+    /// unlink must not roll a committed delete back into existence.
+    pub fn delete_run(&self, run_id: i64, delete_filesystem: bool) -> Result<Option<RunRecord>> {
+        let deleted = self.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+
+            let query = format!("SELECT {RUN_COLUMNS} FROM runs r WHERE r.id = ?1");
             let run: Option<RunRecord> = conn
-                .query_row(
-                    "SELECT r.id, r.project_id, r.timestamp, r.status, r.duration_seconds,
-                            r.size_bytes, r.ottofile_path, r.cwd, r.user, r.hostname, r.args, r.ended_at
-                     FROM runs r
-                     WHERE r.timestamp = ?1",
-                    params![timestamp as i64],
-                    Self::row_to_run_record,
-                )
+                .query_row(&query, params![run_id], Self::row_to_run_record)
                 .optional()?;
 
-            if let Some(ref run_record) = run {
-                // Delete all tasks for this run (CASCADE will handle this, but explicit is clearer)
-                conn.execute("DELETE FROM tasks WHERE run_id = ?1", params![run_record.id])?;
+            let Some(run_record) = run else {
+                return Ok(None);
+            };
 
-                conn.execute("DELETE FROM runs WHERE id = ?1", params![run_record.id])?;
+            let project: (String, String) = conn.query_row(
+                "SELECT hash, COALESCE(name, hash) FROM projects WHERE id = ?1",
+                params![run_record.project_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
 
-                conn.execute(
-                    "UPDATE projects SET run_count = run_count - 1 WHERE id = ?1",
-                    params![run_record.project_id],
-                )?;
-            }
+            // Explicit rather than relying on the CASCADE, which is only armed
+            // when foreign keys are on.
+            conn.execute("DELETE FROM tasks WHERE run_id = ?1", params![run_record.id])?;
+            conn.execute("DELETE FROM runs WHERE id = ?1", params![run_record.id])?;
 
-            Ok(run)
+            // `run_count - 1` on its own went negative whenever a run was
+            // deleted that the counter never counted.
+            conn.execute(
+                "UPDATE projects SET run_count = MAX(run_count - 1, 0) WHERE id = ?1",
+                params![run_record.project_id],
+            )?;
+
+            tx.commit()?;
+            Ok(Some((run_record, project)))
         })?;
 
-        // Optionally delete filesystem directory
-        if delete_filesystem && let Some(ref run_record) = run {
-            // Construct the path: ~/.otto/otto-<hash>/<timestamp>/
-            if let Some(home) = dirs::home_dir() {
-                // We need the project hash - query it
-                let project_hash = self.db.with_connection(|conn| {
-                    let hash = conn.query_row(
-                        "SELECT hash FROM projects WHERE id = ?1",
-                        params![run_record.project_id],
-                        |row| row.get::<_, String>(0),
-                    )?;
-                    Ok(hash)
-                })?;
+        let Some((run_record, (project_hash, project_name))) = deleted else {
+            return Ok(None);
+        };
 
-                let otto_root = home.join(".otto");
-                let run_dir = otto_root
-                    .join(format!("otto-{}", project_hash))
-                    .join(timestamp.to_string());
-
-                if std::fs::symlink_metadata(&run_dir).is_ok() {
-                    // Same fence as the filesystem-scan path in `clean`: never
-                    // delete through a symlink, never delete outside the otto
-                    // root. The DB path had no check at all, so a run directory
-                    // replaced by a link deleted the link's target instead.
-                    let canonical = crate::executor::pruning::ensure_deletable_under_root(&run_dir, &otto_root)
-                        .context("Refusing to delete run directory")?;
-                    std::fs::remove_dir_all(&canonical).context("Failed to delete run directory")?;
-                }
-            }
+        if delete_filesystem {
+            self.delete_run_directory(&run_record, &project_name, &project_hash)?;
         }
 
-        Ok(run)
+        Ok(Some(run_record))
+    }
+
+    /// Remove the directory a run wrote into.
+    ///
+    /// The path comes from the run row, which records it at run start. Cleanup
+    /// used to rebuild `otto-<hash>` under a hardcoded `$HOME/.otto`, which
+    /// matched neither the `<name>-<hash>` naming convention nor `OTTO_HOME`, so
+    /// it deleted the rows and left every directory behind.
+    ///
+    /// Rows written before schema v5 carry no directory, so one is derived from
+    /// the same helper `Workspace` builds with. That derivation is best-effort:
+    /// `projects.hash` is a hash of the ottofile's *contents* (`parser.rs`),
+    /// while the directory name carries a hash of the project's *path*
+    /// (`workspace.rs`), and for a pre-v5 row nothing recorded the latter. A
+    /// derivation that misses is reported rather than passed off as a delete.
+    fn delete_run_directory(&self, run: &RunRecord, project_name: &str, project_hash: &str) -> Result<()> {
+        let otto_home = resolve_otto_home().context("Cannot locate the otto home to delete a run directory")?;
+
+        let run_dir = match run.run_dir {
+            Some(ref dir) => dir.clone(),
+            None => run_root(&otto_home, project_name, project_hash).join(run.timestamp.to_string()),
+        };
+
+        if std::fs::symlink_metadata(&run_dir).is_err() {
+            // Reported, not skipped: a missing directory means the row and the
+            // disk had already drifted apart, which is the thing worth knowing.
+            log::warn!(
+                "Run {} had no directory at {}; deleted its database rows only",
+                run.timestamp,
+                run_dir.display()
+            );
+            return Ok(());
+        }
+
+        // Same fence as the filesystem-scan path in `clean`: never delete
+        // through a symlink, never delete outside the otto root. The DB path had
+        // no check at all, so a run directory replaced by a link deleted the
+        // link's target instead.
+        let canonical = crate::executor::pruning::ensure_deletable_under_root(&run_dir, &otto_home)
+            .context("Refusing to delete run directory")?;
+        std::fs::remove_dir_all(&canonical).context("Failed to delete run directory")?;
+        Ok(())
     }
 
     /// Ensure a project exists in the database, creating it if necessary
     /// Returns the project ID
+    ///
+    /// One upsert, not a SELECT followed by an INSERT: two otto runs starting
+    /// together both saw no project and both inserted, and the loser failed on
+    /// `hash`'s UNIQUE constraint, taking its whole run record with it.
     fn ensure_project(&self, conn: &rusqlite::Connection, hash: &str, ottofile_path: Option<&PathBuf>) -> Result<i64> {
-        // Try to find existing project
-        let existing: Option<i64> = conn
-            .query_row("SELECT id FROM projects WHERE hash = ?1", params![hash], |row| {
-                row.get(0)
-            })
-            .optional()
-            .context("Failed to query for existing project")?;
-
-        if let Some(id) = existing {
-            return Ok(id);
-        }
-
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .context("Failed to get current time")?
@@ -958,17 +1034,28 @@ impl StateManager {
 
         conn.execute(
             "INSERT INTO projects (hash, name, ottofile_path, first_seen, last_seen, run_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                  VALUES (?1, ?2, ?3, ?4, ?4, 0)
+             ON CONFLICT(hash) DO UPDATE SET
+                 name = CASE WHEN excluded.ottofile_path IS NOT NULL THEN excluded.name ELSE projects.name END,
+                 ottofile_path = COALESCE(excluded.ottofile_path, projects.ottofile_path),
+                 last_seen = excluded.last_seen",
             params![
                 hash,
                 name,
                 ottofile_path.map(|p| p.to_string_lossy().to_string()),
                 now as i64,
-                now as i64,
             ],
         )?;
 
-        Ok(conn.last_insert_rowid())
+        // `last_insert_rowid` is only the new project's id on the INSERT branch,
+        // so the id is read back by the key that is actually unique.
+        let id: i64 = conn
+            .query_row("SELECT id FROM projects WHERE hash = ?1", params![hash], |row| {
+                row.get(0)
+            })
+            .context("Failed to read back the project id")?;
+
+        Ok(id)
     }
 }
 
@@ -979,8 +1066,8 @@ impl StateStore for StateManager {
         StateManager::record_run_start(self, metadata)
     }
 
-    fn record_run_complete(&self, timestamp: u64, status: RunStatus, size_bytes: Option<u64>) -> Result<()> {
-        StateManager::record_run_complete(self, timestamp, status, size_bytes)
+    fn record_run_complete(&self, run_id: i64, status: RunStatus, size_bytes: Option<u64>) -> Result<()> {
+        StateManager::record_run_complete(self, run_id, status, size_bytes)
     }
 
     fn record_task_start(
@@ -1065,8 +1152,8 @@ impl StateStore for StateManager {
         StateManager::find_old_runs(self, keep_days, keep_last, keep_failed_days, project_filter)
     }
 
-    fn delete_run(&self, timestamp: u64, delete_filesystem: bool) -> Result<Option<RunRecord>> {
-        StateManager::delete_run(self, timestamp, delete_filesystem)
+    fn delete_run(&self, run_id: i64, delete_filesystem: bool) -> Result<Option<RunRecord>> {
+        StateManager::delete_run(self, run_id, delete_filesystem)
     }
 }
 
@@ -1084,43 +1171,251 @@ mod tests {
         Ok((manager, temp_dir))
     }
 
+    /// Run `f` with `OTTO_HOME` pointed at `otto_home`, restoring it afterwards.
+    fn with_otto_home<T>(otto_home: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let previous = std::env::var("OTTO_HOME").ok();
+        // SAFETY: single-threaded test body, serialized against every other
+        // test that reads the environment.
+        unsafe { std::env::set_var("OTTO_HOME", otto_home) };
+        let out = f();
+        unsafe {
+            match previous {
+                Some(home) => std::env::set_var("OTTO_HOME", home),
+                None => std::env::remove_var("OTTO_HOME"),
+            }
+        }
+        out
+    }
+
     /// The DB-driven delete had no symlink or containment check at all - it was
     /// the second half of the same defect as the filesystem scan, and the one
-    /// with no `is_dir()` in front of it. `HOME` is what it derives the run
-    /// directory from, hence the scratch home and `#[serial]`.
+    /// with no `is_dir()` in front of it.
     #[test]
     #[serial]
     fn delete_run_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
         let (manager, temp_dir) = create_test_manager()?;
 
-        let fake_home = temp_dir.path().join("fakehome");
-        let run_dir_parent = fake_home.join(".otto").join("otto-abc123");
-        std::fs::create_dir_all(&run_dir_parent)?;
+        let otto_home = temp_dir.path().join("otto-home");
+        let project = otto_home.join("widget-abc12345");
+        std::fs::create_dir_all(&project)?;
 
         let victim = temp_dir.path().join("victim");
         std::fs::create_dir_all(&victim)?;
         std::fs::write(victim.join("precious.txt"), "keep me")?;
-        std::os::unix::fs::symlink(&victim, run_dir_parent.join("1234567890"))?;
+        let run_dir = project.join("1234567890");
+        std::os::unix::fs::symlink(&victim, &run_dir)?;
 
-        let previous_home = std::env::var("HOME").ok();
-        // SAFETY: single-threaded test body, serialized against the other tests
-        // that read HOME.
-        unsafe { std::env::set_var("HOME", &fake_home) };
+        let metadata = RunMetadata::minimal(
+            Some(PathBuf::from("/test/otto.yml")),
+            "abc12345".to_string(),
+            1234567890,
+        )
+        .with_run_dir(run_dir);
+        let run_id = manager.record_run_start(&metadata)?;
 
-        let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc123".to_string(), 1234567890);
-        manager.record_run_start(&metadata)?;
-        let result = manager.delete_run(1234567890, true);
-
-        unsafe {
-            match previous_home {
-                Some(home) => std::env::set_var("HOME", home),
-                None => std::env::remove_var("HOME"),
-            }
-        }
+        let result = with_otto_home(&otto_home, || manager.delete_run(run_id, true));
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Refusing to delete run directory"), "{err}");
         assert!(victim.join("precious.txt").exists(), "the symlink target must survive");
+        Ok(())
+    }
+
+    /// The directory a run actually created is the directory cleanup removes.
+    /// Cleanup used to rebuild `$HOME/.otto/otto-<hash>`, which matched neither
+    /// the `<name>-<hash>` convention nor `OTTO_HOME`, so it deleted the rows
+    /// and left 220 of 222 real project directories orphaned.
+    #[test]
+    #[serial]
+    fn delete_run_removes_the_recorded_run_directory() -> Result<()> {
+        let (manager, temp_dir) = create_test_manager()?;
+
+        let otto_home = temp_dir.path().join("otto-home");
+        let run_dir = otto_home.join("widget-abc12345").join("1234567890");
+        std::fs::create_dir_all(run_dir.join("tasks"))?;
+
+        let metadata = RunMetadata::minimal(
+            Some(PathBuf::from("/test/otto.yml")),
+            "abc12345".to_string(),
+            1234567890,
+        )
+        .with_run_dir(run_dir.clone());
+        let run_id = manager.record_run_start(&metadata)?;
+
+        let deleted = with_otto_home(&otto_home, || manager.delete_run(run_id, true))?;
+
+        assert!(deleted.is_some(), "the run row is deleted");
+        assert!(!run_dir.exists(), "the run directory is deleted too");
+        Ok(())
+    }
+
+    /// Rows written before schema v5 carry no run directory, so the path is
+    /// derived - from `OTTO_HOME` and the project's own name, not from `$HOME`
+    /// and a hardcoded `otto-` prefix. The derivation can only work when the
+    /// recorded project hash is also the one in the directory name, which is
+    /// what this fixture arranges.
+    #[test]
+    #[serial]
+    fn delete_run_derives_the_directory_for_a_pre_v5_row() -> Result<()> {
+        let (manager, temp_dir) = create_test_manager()?;
+
+        let otto_home = temp_dir.path().join("otto-home");
+        // `ensure_project` names this project after the ottofile's directory.
+        let run_dir = otto_home.join("widget-abc12345").join("1234567890");
+        std::fs::create_dir_all(run_dir.join("tasks"))?;
+
+        let metadata = RunMetadata::minimal(
+            Some(PathBuf::from("/repos/widget/otto.yml")),
+            "abc12345".to_string(),
+            1234567890,
+        );
+        let run_id = manager.record_run_start(&metadata)?;
+        manager
+            .db
+            .with_connection(|conn| Ok(conn.execute("UPDATE runs SET run_dir = NULL", [])?))?;
+
+        with_otto_home(&otto_home, || manager.delete_run(run_id, true))?;
+
+        assert!(!run_dir.exists(), "the derived path finds the real directory");
+        Ok(())
+    }
+
+    /// Two runs in the same second are two runs. The global
+    /// `UNIQUE(runs.timestamp)` made the second one fail outright, taking every
+    /// task record that would have hung off it.
+    #[test]
+    fn two_runs_in_the_same_second_both_persist() -> Result<()> {
+        let (manager, _temp_dir) = create_test_manager()?;
+
+        let metadata = RunMetadata::minimal(
+            Some(PathBuf::from("/test/otto.yml")),
+            "abc12345".to_string(),
+            1700000000,
+        );
+        let first = manager.record_run_start(&metadata)?;
+        let second = manager.record_run_start(&metadata)?;
+        assert_ne!(first, second);
+
+        // Completion is keyed on the id, so one run does not close the other.
+        manager.record_run_complete(first, RunStatus::Success, Some(1))?;
+        manager.record_run_complete(second, RunStatus::Failed, Some(2))?;
+
+        let runs = manager.get_recent_runs(10, None)?;
+        assert_eq!(runs.len(), 2, "both runs survive");
+        let mut statuses: Vec<&str> = runs.iter().map(|r| r.status.as_str()).collect();
+        statuses.sort_unstable();
+        assert_eq!(statuses, vec!["failed", "success"]);
+        Ok(())
+    }
+
+    #[test]
+    fn record_run_complete_reports_a_run_that_is_not_there() -> Result<()> {
+        let (manager, _temp_dir) = create_test_manager()?;
+
+        let err = manager
+            .record_run_complete(4242, RunStatus::Success, None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("No run with id 4242"), "{err}");
+        Ok(())
+    }
+
+    /// A non-zero exit is stored as itself, not flattened to 1.
+    #[test]
+    fn a_task_exit_code_is_recorded_verbatim() -> Result<()> {
+        let (manager, _temp_dir) = create_test_manager()?;
+
+        let metadata = RunMetadata::minimal(
+            Some(PathBuf::from("/test/otto.yml")),
+            "abc12345".to_string(),
+            1700000000,
+        );
+        let run_id = manager.record_run_start(&metadata)?;
+        let task_id = manager.record_task_start(run_id, "boom", None, None, None, None)?;
+        manager.record_task_complete(task_id, 7, TaskStatus::Failed)?;
+
+        let tasks = manager.get_run_tasks(run_id)?;
+        assert_eq!(tasks[0].exit_code, Some(7));
+        assert_eq!(tasks[0].status, TaskStatus::Failed);
+        Ok(())
+    }
+
+    /// An unknown status in the database is reported, not silently read back as
+    /// `Failed`, which made a corrupt row indistinguishable from a failed run.
+    #[test]
+    fn an_unknown_run_status_is_an_error_not_a_failure() -> Result<()> {
+        let (manager, _temp_dir) = create_test_manager()?;
+
+        let metadata = RunMetadata::minimal(
+            Some(PathBuf::from("/test/otto.yml")),
+            "abc12345".to_string(),
+            1700000000,
+        );
+        manager.record_run_start(&metadata)?;
+        manager
+            .db
+            .with_connection(|conn| Ok(conn.execute("UPDATE runs SET status = 'wat'", [])?))?;
+
+        let err = manager.get_recent_runs(10, None).unwrap_err().to_string();
+        assert!(err.contains("Failed to fetch runs"), "{err}");
+        Ok(())
+    }
+
+    /// The SELECT-then-INSERT race is gone: recording the same project twice
+    /// upserts instead of colliding on the hash, and the second call keeps the
+    /// same id.
+    #[test]
+    fn ensure_project_is_idempotent() -> Result<()> {
+        let (manager, _temp_dir) = create_test_manager()?;
+
+        let metadata = RunMetadata::minimal(Some(PathBuf::from("/repos/widget/otto.yml")), "abc12345".into(), 1);
+        manager.record_run_start(&metadata)?;
+        manager.record_run_start(&metadata)?;
+
+        let projects = manager.get_all_projects()?;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "widget");
+        assert_eq!(projects[0].run_count, 2);
+        Ok(())
+    }
+
+    /// A project's run count is a count, so it never goes below zero even when
+    /// more runs are deleted than the counter ever saw.
+    #[test]
+    #[serial]
+    fn delete_run_never_drives_the_run_count_negative() -> Result<()> {
+        let (manager, temp_dir) = create_test_manager()?;
+        let otto_home = temp_dir.path().join("otto-home");
+        std::fs::create_dir_all(&otto_home)?;
+
+        let metadata = RunMetadata::minimal(Some(PathBuf::from("/repos/widget/otto.yml")), "abc12345".into(), 1);
+        let run_id = manager.record_run_start(&metadata)?;
+        manager
+            .db
+            .with_connection(|conn| Ok(conn.execute("UPDATE projects SET run_count = 0", [])?))?;
+
+        with_otto_home(&otto_home, || manager.delete_run(run_id, false))?;
+
+        let projects = manager.get_all_projects()?;
+        assert_eq!(projects[0].run_count, 0);
+        Ok(())
+    }
+
+    /// A skipped task carries a start time, so `get_run_tasks` - which orders by
+    /// `started_at` - does not sort every skip ahead of the run.
+    #[test]
+    fn a_skipped_task_records_when_it_was_skipped() -> Result<()> {
+        let (manager, _temp_dir) = create_test_manager()?;
+
+        let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc12345".into(), 1700000000);
+        let run_id = manager.record_run_start(&metadata)?;
+        manager.record_task_skipped(run_id, "gated", None, Some("dep failed"), Some(SkipKind::Unreachable))?;
+
+        let tasks = manager.get_run_tasks(run_id)?;
+        assert_eq!(tasks[0].status, TaskStatus::Skipped);
+        assert!(tasks[0].started_at.is_some(), "a skip happens at a moment");
+        assert_eq!(tasks[0].skip_kind, Some(SkipKind::Unreachable));
         Ok(())
     }
 
@@ -1142,8 +1437,8 @@ mod tests {
 
         let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc123".to_string(), 1234567890);
 
-        manager.record_run_start(&metadata)?;
-        manager.record_run_complete(1234567890, RunStatus::Success, Some(1024))?;
+        let run_id_1 = manager.record_run_start(&metadata)?;
+        manager.record_run_complete(run_id_1, RunStatus::Success, Some(1024))?;
 
         let runs = manager.get_recent_runs(1, None)?;
         assert_eq!(runs.len(), 1);
@@ -1461,16 +1756,16 @@ mod tests {
             "abc123".to_string(),
             old_timestamp,
         );
-        manager.record_run_start(&metadata1)?;
-        manager.record_run_complete(old_timestamp, RunStatus::Success, Some(1024))?;
+        let run_id_2 = manager.record_run_start(&metadata1)?;
+        manager.record_run_complete(run_id_2, RunStatus::Success, Some(1024))?;
 
         let metadata2 = RunMetadata::minimal(
             Some(PathBuf::from("/test/otto.yml")),
             "abc123".to_string(),
             recent_timestamp,
         );
-        manager.record_run_start(&metadata2)?;
-        manager.record_run_complete(recent_timestamp, RunStatus::Success, Some(2048))?;
+        let run_id_3 = manager.record_run_start(&metadata2)?;
+        manager.record_run_complete(run_id_3, RunStatus::Success, Some(2048))?;
 
         // Find runs older than 30 days
         let old_runs = manager.find_old_runs(30, None, None, None)?;
@@ -1490,8 +1785,8 @@ mod tests {
         for i in 0..5 {
             let timestamp = now - ((40 + i) * 24 * 60 * 60);
             let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc123".to_string(), timestamp);
-            manager.record_run_start(&metadata)?;
-            manager.record_run_complete(timestamp, RunStatus::Success, Some(1024))?;
+            let run_id_4 = manager.record_run_start(&metadata)?;
+            manager.record_run_complete(run_id_4, RunStatus::Success, Some(1024))?;
         }
 
         // Find old runs but keep the 2 most recent
@@ -1519,8 +1814,8 @@ mod tests {
             "abc123".to_string(),
             success_timestamp,
         );
-        manager.record_run_start(&metadata1)?;
-        manager.record_run_complete(success_timestamp, RunStatus::Success, Some(1024))?;
+        let run_id_5 = manager.record_run_start(&metadata1)?;
+        manager.record_run_complete(run_id_5, RunStatus::Success, Some(1024))?;
 
         let failed_timestamp = now - (39 * 24 * 60 * 60);
         let metadata2 = RunMetadata::minimal(
@@ -1528,8 +1823,8 @@ mod tests {
             "abc123".to_string(),
             failed_timestamp,
         );
-        manager.record_run_start(&metadata2)?;
-        manager.record_run_complete(failed_timestamp, RunStatus::Failed, Some(2048))?;
+        let run_id_6 = manager.record_run_start(&metadata2)?;
+        manager.record_run_complete(run_id_6, RunStatus::Failed, Some(2048))?;
 
         // Find runs older than 30 days, but keep failed runs for 45 days
         let old_runs = manager.find_old_runs(30, None, Some(45), None)?;
@@ -1554,16 +1849,16 @@ mod tests {
             "abc123".to_string(),
             old_timestamp,
         );
-        manager.record_run_start(&metadata1)?;
-        manager.record_run_complete(old_timestamp, RunStatus::Success, Some(1024))?;
+        let run_id_7 = manager.record_run_start(&metadata1)?;
+        manager.record_run_complete(run_id_7, RunStatus::Success, Some(1024))?;
 
         let metadata2 = RunMetadata::minimal(
             Some(PathBuf::from("/test/otto2.yml")),
             "def456".to_string(),
             old_timestamp + 1,
         );
-        manager.record_run_start(&metadata2)?;
-        manager.record_run_complete(old_timestamp + 1, RunStatus::Success, Some(2048))?;
+        let run_id_8 = manager.record_run_start(&metadata2)?;
+        manager.record_run_complete(run_id_8, RunStatus::Success, Some(2048))?;
 
         // Find old runs for specific project
         let old_runs = manager.find_old_runs(30, None, None, Some("abc123"))?;
@@ -1579,13 +1874,13 @@ mod tests {
         let (manager, _temp_dir) = create_test_manager()?;
 
         let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc123".to_string(), 1234567890);
-        manager.record_run_start(&metadata)?;
-        manager.record_run_complete(1234567890, RunStatus::Success, Some(1024))?;
+        let run_id_9 = manager.record_run_start(&metadata)?;
+        manager.record_run_complete(run_id_9, RunStatus::Success, Some(1024))?;
 
         let runs_before = manager.get_recent_runs(10, None)?;
         assert_eq!(runs_before.len(), 1);
 
-        let deleted = manager.delete_run(1234567890, false)?;
+        let deleted = manager.delete_run(run_id_9, false)?;
         assert!(deleted.is_some());
         assert_eq!(deleted.unwrap().timestamp, 1234567890);
 
@@ -1611,7 +1906,7 @@ mod tests {
         let tasks_before = manager.get_run_tasks(run_id)?;
         assert_eq!(tasks_before.len(), 2);
 
-        manager.delete_run(1234567890, false)?;
+        manager.delete_run(run_id, false)?;
 
         let tasks_after = manager.get_run_tasks(run_id)?;
         assert_eq!(tasks_after.len(), 0);
@@ -1623,16 +1918,17 @@ mod tests {
     fn test_delete_run_updates_project_count() -> Result<()> {
         let (manager, _temp_dir) = create_test_manager()?;
 
+        let mut run_ids = Vec::new();
         for i in 0..3 {
             let metadata = RunMetadata::minimal(
                 Some(PathBuf::from("/test/otto.yml")),
                 "abc123".to_string(),
                 1234567890 + i,
             );
-            manager.record_run_start(&metadata)?;
+            run_ids.push(manager.record_run_start(&metadata)?);
         }
 
-        manager.delete_run(1234567891, false)?;
+        manager.delete_run(run_ids[1], false)?;
 
         let runs = manager.get_recent_runs(10, Some("abc123"))?;
         assert_eq!(runs.len(), 2);
@@ -1645,7 +1941,7 @@ mod tests {
         let (manager, _temp_dir) = create_test_manager()?;
 
         // Try to delete a run that doesn't exist
-        let deleted = manager.delete_run(9999999999, false)?;
+        let deleted = manager.delete_run(9999, false)?;
         assert!(deleted.is_none());
 
         Ok(())
@@ -1674,8 +1970,8 @@ mod tests {
             "abc123".to_string(),
             recent_timestamp,
         );
-        manager.record_run_start(&metadata)?;
-        manager.record_run_complete(recent_timestamp, RunStatus::Success, Some(1024))?;
+        let run_id_10 = manager.record_run_start(&metadata)?;
+        manager.record_run_complete(run_id_10, RunStatus::Success, Some(1024))?;
 
         // Find runs older than 30 days (should find nothing)
         let old_runs = manager.find_old_runs(30, None, None, None)?;
@@ -1693,9 +1989,9 @@ mod tests {
         for i in 0..10 {
             let timestamp = now - ((40 + i) * 24 * 60 * 60);
             let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc123".to_string(), timestamp);
-            manager.record_run_start(&metadata)?;
+            let run_id = manager.record_run_start(&metadata)?;
             let status = if i % 2 == 0 { RunStatus::Success } else { RunStatus::Failed };
-            manager.record_run_complete(timestamp, status, Some(1024))?;
+            manager.record_run_complete(run_id, status, Some(1024))?;
         }
 
         // Keep 3 most recent, delete successful runs older than 30 days, keep failed runs for 50 days

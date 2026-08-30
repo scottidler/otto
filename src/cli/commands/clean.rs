@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::executor::layout::parse_project_dir_name;
 use crate::executor::pruning::ensure_deletable_under_root;
-use crate::executor::state::{RunMetadata, StateManager};
+use crate::executor::state::{Retention, RunAge, RunMetadata, StateManager};
 use crate::ports::StateStore;
 
 /// Clean old otto run directories
@@ -145,7 +146,7 @@ impl CleanCommand {
             let mut deleted_size = 0u64;
 
             for run in &runs_to_delete {
-                match store.delete_run(run.timestamp, true) {
+                match store.delete_run(run.id, true) {
                     Ok(Some(_)) => {
                         deleted_size += run.size_bytes.unwrap_or(0);
                         let date_time = self.format_timestamp(run.timestamp);
@@ -180,24 +181,48 @@ impl CleanCommand {
     async fn execute_with_filesystem(&self, otto_home: &Path) -> Result<()> {
         self.print(&format!("Scanning {} for old runs...", otto_home.display()));
 
-        let mut runs_to_delete = self.scan_for_old_runs(otto_home)?;
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+        let all_runs = self.scan_runs(otto_home, now)?;
 
-        if runs_to_delete.is_empty() {
+        if all_runs.is_empty() {
             self.print(&format!("No runs older than {} days found", self.keep_days));
             return Ok(());
         }
 
-        runs_to_delete.sort_by_key(|r| r.timestamp);
-
-        // Apply --keep-last logic if specified
-        if let Some(keep_last) = self.keep_last {
-            // Keep the N most recent runs
-            if runs_to_delete.len() > keep_last {
-                runs_to_delete = runs_to_delete.split_off(runs_to_delete.len() - keep_last);
-            } else {
-                runs_to_delete.clear();
+        // A directory scan cannot tell a failed run from a successful one - the
+        // status only exists in the database - so `--keep-failed` is applied as
+        // the longer of the two cutoffs for every run. That keeps more than
+        // asked rather than deleting something the flag meant to protect, and it
+        // says so instead of ignoring the flag, which is what it used to do.
+        let keep_days = match self.keep_failed {
+            Some(keep_failed) if keep_failed > self.keep_days => {
+                eprintln!(
+                    "  --keep-failed needs run status, which only the database has; \
+                     keeping every run for {keep_failed} days in filesystem mode"
+                );
+                keep_failed
             }
-        }
+            _ => self.keep_days,
+        };
+
+        // The same pure retention the database path uses. This was open-coded
+        // here as an ascending sort plus `split_off`, which returned the tail:
+        // `--keep-last 2` deleted the two newest runs and kept every older one.
+        let policy = Retention {
+            keep_days,
+            keep_last: self.keep_last,
+            keep_failed_days: None,
+        };
+        let ages: Vec<RunAge> = all_runs
+            .iter()
+            .map(|r| RunAge {
+                timestamp: r.timestamp,
+                failed: false,
+            })
+            .collect();
+
+        let mut runs_to_delete: Vec<&RunInfo> = policy.expired(&ages, now).into_iter().map(|i| &all_runs[i]).collect();
+        runs_to_delete.sort_by_key(|r| r.timestamp);
 
         if runs_to_delete.is_empty() {
             self.print("No runs to delete after applying retention policy");
@@ -274,10 +299,13 @@ impl CleanCommand {
         Ok(())
     }
 
-    fn scan_for_old_runs(&self, otto_home: &Path) -> Result<Vec<RunInfo>> {
-        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
-
-        let mut runs_to_delete = Vec::new();
+    /// Every run under `otto_home`, regardless of age.
+    ///
+    /// Retention is decided afterwards, over the whole list: `--keep-last`
+    /// means "keep the N newest runs", and a scan that had already dropped the
+    /// recent ones could not honour that.
+    fn scan_runs(&self, otto_home: &Path, now: u64) -> Result<Vec<RunInfo>> {
+        let mut runs = Vec::new();
 
         for entry in fs::read_dir(otto_home)? {
             let entry = entry?;
@@ -299,26 +327,27 @@ impl CleanCommand {
                 None => continue,
             };
 
-            // Skip otto.db and other non-project directories
-            if dir_name == "otto.db" || !dir_name.starts_with("otto-") {
+            // A run root is `<name>-<hash>`, which is what `Workspace` creates.
+            // This used to test for an `otto-` prefix and so skipped every
+            // project not named "otto" - 220 of 222 directories in a real
+            // `~/.otto`.
+            let Some((_, project_hash)) = parse_project_dir_name(dir_name) else {
                 continue;
-            }
+            };
 
-            // Apply project filter if specified
+            // Match the hash exactly, as the database path does. A substring
+            // match meant `--project-filter abc` also swept up `fabc1234`.
             if let Some(ref filter) = self.project_filter
-                && !dir_name.contains(filter)
+                && project_hash != filter
             {
                 continue;
             }
 
-            // Extract project hash from directory name (e.g., "otto-6b20a2e4" -> "6b20a2e4")
-            let project_hash = dir_name.strip_prefix("otto-").unwrap_or("unknown").to_string();
-
             // Scan timestamp directories within this project
-            runs_to_delete.extend(self.scan_project_runs(&path, &project_hash, now)?);
+            runs.extend(self.scan_project_runs(&path, project_hash, now)?);
         }
 
-        Ok(runs_to_delete)
+        Ok(runs)
     }
 
     fn scan_project_runs(&self, project_dir: &Path, project_hash: &str, now: u64) -> Result<Vec<RunInfo>> {
@@ -351,24 +380,20 @@ impl CleanCommand {
 
             // Try to parse as timestamp
             if let Ok(timestamp) = dir_name.parse::<u64>() {
-                let age_seconds = now.saturating_sub(timestamp);
-                let age_days = age_seconds / 86400;
+                let age_days = now.saturating_sub(timestamp) / 86400;
+                let size_bytes = Self::calculate_dir_size(&path)?;
 
-                if age_days > self.keep_days {
-                    let size_bytes = Self::calculate_dir_size(&path)?;
+                // Try to read ottofile path from run.yaml
+                let ottofile_path = self.read_ottofile_path(&path);
 
-                    // Try to read ottofile path from run.yaml
-                    let ottofile_path = self.read_ottofile_path(&path);
-
-                    runs.push(RunInfo {
-                        path,
-                        project_hash: project_hash.to_string(),
-                        timestamp,
-                        age_days,
-                        size_bytes,
-                        ottofile_path,
-                    });
-                }
+                runs.push(RunInfo {
+                    path,
+                    project_hash: project_hash.to_string(),
+                    timestamp,
+                    age_days,
+                    size_bytes,
+                    ottofile_path,
+                });
             }
         }
 
@@ -423,7 +448,7 @@ impl CleanCommand {
     }
 
     fn get_otto_home(&self) -> Result<PathBuf> {
-        crate::executor::pruning::resolve_otto_home()
+        crate::executor::layout::resolve_otto_home()
     }
 }
 
@@ -435,9 +460,11 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn create_test_run(base_dir: &Path, project: &str, timestamp: u64, size_kb: usize) -> Result<()> {
+    /// A run directory shaped exactly like one `Workspace` creates:
+    /// `<otto home>/<name>-<hash>/<timestamp>/tasks`.
+    fn create_test_run(base_dir: &Path, project_hash: &str, timestamp: u64, size_kb: usize) -> Result<()> {
         let run_dir = base_dir
-            .join(format!("otto-{}", project))
+            .join(crate::executor::layout::project_dir_name("widget", project_hash))
             .join(timestamp.to_string())
             .join("tasks");
         fs::create_dir_all(&run_dir)?;
@@ -462,7 +489,7 @@ mod tests {
             quiet: false,
         };
 
-        let runs = cmd.scan_for_old_runs(temp_dir.path())?;
+        let runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
         assert_eq!(runs.len(), 0);
         Ok(())
     }
@@ -476,11 +503,11 @@ mod tests {
         let otto_home = temp_dir.path().join(".otto");
         fs::create_dir_all(&otto_home)?;
 
-        let victim = temp_dir.path().join("otto-victim");
+        let victim = temp_dir.path().join("victim-project");
         fs::create_dir_all(victim.join("1000000000").join("tasks"))?;
         fs::write(victim.join("1000000000").join("tasks").join("data.log"), "precious")?;
 
-        std::os::unix::fs::symlink(&victim, otto_home.join("otto-deadbeef"))?;
+        std::os::unix::fs::symlink(&victim, otto_home.join("widget-deadbeef"))?;
 
         let cmd = CleanCommand {
             keep_days: 1,
@@ -499,7 +526,7 @@ mod tests {
             "the symlink target must survive"
         );
         assert!(
-            otto_home.join("otto-deadbeef").exists(),
+            otto_home.join("widget-deadbeef").exists(),
             "the link itself is left alone"
         );
         Ok(())
@@ -511,7 +538,7 @@ mod tests {
     async fn clean_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let otto_home = temp_dir.path().join(".otto");
-        let project = otto_home.join("otto-abc123");
+        let project = otto_home.join("widget-abc12345");
         fs::create_dir_all(&project)?;
 
         let victim = temp_dir.path().join("victim");
@@ -544,8 +571,8 @@ mod tests {
         let old_timestamp = now - (40 * 86400); // 40 days old
         let recent_timestamp = now - (10 * 86400); // 10 days old
 
-        create_test_run(temp_dir.path(), "abc123", old_timestamp, 100)?;
-        create_test_run(temp_dir.path(), "abc123", recent_timestamp, 50)?;
+        create_test_run(temp_dir.path(), "abc12345", old_timestamp, 100)?;
+        create_test_run(temp_dir.path(), "abc12345", recent_timestamp, 50)?;
 
         let cmd = CleanCommand {
             keep_days: 30,
@@ -556,20 +583,23 @@ mod tests {
             no_db: true,
             quiet: false,
         };
-        let runs = cmd.scan_for_old_runs(temp_dir.path())?;
+        // The scan reports every run; retention decides which ones expire, so
+        // `--keep-last` can see the recent runs it is supposed to protect.
+        let mut runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
+        runs.sort_by_key(|r| r.timestamp);
 
-        // Should only find the 40-day-old run
-        assert_eq!(runs.len(), 1);
+        assert_eq!(runs.len(), 2, "both runs are reported by the scan");
         assert!(runs[0].age_days >= 39 && runs[0].age_days <= 41);
+        assert!(runs[1].age_days >= 9 && runs[1].age_days <= 11);
         Ok(())
     }
 
     #[tokio::test]
     async fn test_calculate_dir_size() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        create_test_run(temp_dir.path(), "test", 1234567890, 100)?;
+        create_test_run(temp_dir.path(), "testhash", 1234567890, 100)?;
 
-        let run_dir = temp_dir.path().join("otto-test").join("1234567890");
+        let run_dir = temp_dir.path().join("widget-testhash").join("1234567890");
         let size = CleanCommand::calculate_dir_size(&run_dir)?;
 
         // Should be approximately 100KB (may vary slightly due to filesystem overhead)
@@ -584,23 +614,23 @@ mod tests {
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
         let old_timestamp = now - (40 * 86400);
 
-        create_test_run(temp_dir.path(), "abc123", old_timestamp, 100)?;
-        create_test_run(temp_dir.path(), "def456", old_timestamp, 100)?;
+        create_test_run(temp_dir.path(), "abc12345", old_timestamp, 100)?;
+        create_test_run(temp_dir.path(), "def45678", old_timestamp, 100)?;
 
         let cmd = CleanCommand {
             keep_days: 30,
             keep_last: None,
             keep_failed: None,
             dry_run: true,
-            project_filter: Some("abc123".to_string()),
+            project_filter: Some("abc12345".to_string()),
             no_db: true,
             quiet: false,
         };
-        let runs = cmd.scan_for_old_runs(temp_dir.path())?;
+        let runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
 
         // Should only find runs from abc123 project
         assert_eq!(runs.len(), 1);
-        assert!(runs[0].path.to_string_lossy().contains("abc123"));
+        assert!(runs[0].path.to_string_lossy().contains("abc12345"));
         Ok(())
     }
 
@@ -612,7 +642,7 @@ mod tests {
 
         let metadata = RunMetadata::minimal(
             Some(PathBuf::from("/path/to/otto.yml")),
-            "abc123".to_string(),
+            "abc12345".to_string(),
             1234567890,
         );
         let yaml_content = serde_yaml::to_string(&metadata)?;
@@ -660,7 +690,7 @@ mod tests {
         let run_dir = temp_dir.path().join("test_run");
         fs::create_dir_all(&run_dir)?;
 
-        let metadata = RunMetadata::minimal(None, "abc123".to_string(), 1234567890);
+        let metadata = RunMetadata::minimal(None, "abc12345".to_string(), 1234567890);
         let yaml_content = serde_yaml::to_string(&metadata)?;
         fs::write(run_dir.join("run.yaml"), yaml_content)?;
 
@@ -805,9 +835,9 @@ mod tests {
         let timestamp2 = now - (45 * 86400); // 45 days old
         let timestamp3 = now - (50 * 86400); // 50 days old
 
-        create_test_run(temp_dir.path(), "abc123", timestamp2, 100)?;
-        create_test_run(temp_dir.path(), "abc123", timestamp1, 100)?;
-        create_test_run(temp_dir.path(), "abc123", timestamp3, 100)?;
+        create_test_run(temp_dir.path(), "abc12345", timestamp2, 100)?;
+        create_test_run(temp_dir.path(), "abc12345", timestamp1, 100)?;
+        create_test_run(temp_dir.path(), "abc12345", timestamp3, 100)?;
 
         let cmd = CleanCommand {
             keep_days: 30,
@@ -818,7 +848,7 @@ mod tests {
             no_db: true,
             quiet: false,
         };
-        let mut runs = cmd.scan_for_old_runs(temp_dir.path())?;
+        let mut runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
 
         // Sort by timestamp
         runs.sort_by_key(|r| r.timestamp);
@@ -837,7 +867,7 @@ mod tests {
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
         let old_timestamp = now - (40 * 86400);
 
-        let project_dir = temp_dir.path().join("otto-abc123");
+        let project_dir = temp_dir.path().join("widget-abc12345");
         let run_dir = project_dir.join(old_timestamp.to_string());
         let tasks_dir = run_dir.join("tasks");
         fs::create_dir_all(&tasks_dir)?;
@@ -848,7 +878,7 @@ mod tests {
 
         let metadata = RunMetadata::minimal(
             Some(PathBuf::from("/test/project/otto.yml")),
-            "abc123".to_string(),
+            "abc12345".to_string(),
             old_timestamp,
         );
         let yaml_content = serde_yaml::to_string(&metadata)?;
@@ -863,10 +893,10 @@ mod tests {
             no_db: true,
             quiet: false,
         };
-        let runs = cmd.scan_for_old_runs(temp_dir.path())?;
+        let runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
 
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].project_hash, "abc123");
+        assert_eq!(runs[0].project_hash, "abc12345");
         assert_eq!(runs[0].timestamp, old_timestamp);
         assert_eq!(runs[0].ottofile_path, Some(PathBuf::from("/test/project/otto.yml")));
         assert!(runs[0].size_bytes >= 100 * 1024);
@@ -879,7 +909,7 @@ mod tests {
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
         let old_timestamp = now - (40 * 86400);
 
-        create_test_run(temp_dir.path(), "def456", old_timestamp, 100)?;
+        create_test_run(temp_dir.path(), "def45678", old_timestamp, 100)?;
 
         let cmd = CleanCommand {
             keep_days: 30,
@@ -890,11 +920,143 @@ mod tests {
             no_db: true,
             quiet: false,
         };
-        let runs = cmd.scan_for_old_runs(temp_dir.path())?;
+        let runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
 
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].project_hash, "def456");
+        assert_eq!(runs[0].project_hash, "def45678");
         assert_eq!(runs[0].ottofile_path, None);
+        Ok(())
+    }
+
+    /// `--keep-last 2` in filesystem mode keeps the two *newest* runs.
+    ///
+    /// It kept the two oldest: the candidate list was sorted ascending and then
+    /// `split_off(len - keep_last)` returned the tail, so the delete list *was*
+    /// the runs the flag was meant to protect. Every `keep_last` test in this
+    /// file was database-mode, which is why it shipped.
+    #[tokio::test]
+    async fn keep_last_in_filesystem_mode_keeps_the_newest_runs() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let otto_home = temp_dir.path().join(".otto");
+        fs::create_dir_all(&otto_home)?;
+        let now = now_timestamp();
+
+        // Five runs, 44 down to 40 days old, all past the 30-day cutoff.
+        let timestamps: Vec<u64> = (0..5).map(|i| now - ((44 - i) * 86400)).collect();
+        for ts in &timestamps {
+            create_test_run(&otto_home, "abc12345", *ts, 1)?;
+        }
+
+        let cmd = CleanCommand {
+            keep_days: 30,
+            keep_last: Some(2),
+            keep_failed: None,
+            dry_run: false,
+            project_filter: None,
+            no_db: true,
+            quiet: true,
+        };
+        cmd.execute_with_filesystem(&otto_home).await?;
+
+        let project = otto_home.join(crate::executor::layout::project_dir_name("widget", "abc12345"));
+        let survivors: Vec<u64> = {
+            let mut found: Vec<u64> = fs::read_dir(&project)?
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<u64>().ok()))
+                .collect();
+            found.sort_unstable();
+            found
+        };
+
+        assert_eq!(
+            survivors,
+            vec![timestamps[3], timestamps[4]],
+            "the two newest runs survive, not the two oldest"
+        );
+        Ok(())
+    }
+
+    /// `--keep-last` larger than the run count deletes nothing.
+    #[tokio::test]
+    async fn keep_last_larger_than_the_run_count_deletes_nothing() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let otto_home = temp_dir.path().join(".otto");
+        fs::create_dir_all(&otto_home)?;
+        let now = now_timestamp();
+
+        for i in 0..2u64 {
+            create_test_run(&otto_home, "abc12345", now - ((40 + i) * 86400), 1)?;
+        }
+
+        let cmd = CleanCommand {
+            keep_days: 30,
+            keep_last: Some(9),
+            keep_failed: None,
+            dry_run: false,
+            project_filter: None,
+            no_db: true,
+            quiet: true,
+        };
+        cmd.execute_with_filesystem(&otto_home).await?;
+
+        let project = otto_home.join(crate::executor::layout::project_dir_name("widget", "abc12345"));
+        assert_eq!(fs::read_dir(&project)?.count(), 2, "nothing is deleted");
+        Ok(())
+    }
+
+    /// The filesystem scan finds every project, not only ones named "otto".
+    /// It tested for an `otto-` prefix, which in a real `~/.otto` matched 2 of
+    /// 222 directories.
+    #[tokio::test]
+    async fn filesystem_scan_finds_projects_not_named_otto() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let now = now_timestamp();
+        let old = now - (40 * 86400);
+
+        create_test_run(temp_dir.path(), "abc12345", old, 1)?;
+        // A stray directory that is not a run root must be ignored.
+        fs::create_dir_all(temp_dir.path().join("notes"))?;
+
+        let cmd = CleanCommand {
+            keep_days: 30,
+            keep_last: None,
+            keep_failed: None,
+            dry_run: true,
+            project_filter: None,
+            no_db: true,
+            quiet: true,
+        };
+        let runs = cmd.scan_runs(temp_dir.path(), now)?;
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].project_hash, "abc12345");
+        Ok(())
+    }
+
+    /// The filesystem filter matches the hash exactly, as the database filter
+    /// does. A substring match swept up every project whose hash merely
+    /// contained the filter.
+    #[tokio::test]
+    async fn filesystem_project_filter_matches_the_hash_exactly() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let now = now_timestamp();
+        let old = now - (40 * 86400);
+
+        create_test_run(temp_dir.path(), "abc12345", old, 1)?;
+        create_test_run(temp_dir.path(), "abc12340", old + 1, 1)?;
+
+        let cmd = CleanCommand {
+            keep_days: 30,
+            keep_last: None,
+            keep_failed: None,
+            dry_run: true,
+            project_filter: Some("abc1234".to_string()),
+            no_db: true,
+            quiet: true,
+        };
+        let runs = cmd.scan_runs(temp_dir.path(), now)?;
+
+        assert!(runs.is_empty(), "a prefix is not a hash");
         Ok(())
     }
 
@@ -916,45 +1078,45 @@ mod tests {
         // Create old successful run (40 days old)
         let old_meta = RunMetadata::minimal(
             Some(PathBuf::from("/project1/otto.yml")),
-            "abc123".to_string(),
+            "abc12345".to_string(),
             now - (40 * 86400),
         );
-        store.record_run_start(&old_meta).unwrap();
+        let old_id = store.record_run_start(&old_meta).unwrap();
         store
-            .record_run_complete(now - (40 * 86400), RunStatus::Success, Some(100_000))
+            .record_run_complete(old_id, RunStatus::Success, Some(100_000))
             .unwrap();
 
         // Create old failed run (35 days old)
         let old_failed_meta = RunMetadata::minimal(
             Some(PathBuf::from("/project1/otto.yml")),
-            "abc123".to_string(),
+            "abc12345".to_string(),
             now - (35 * 86400),
         );
-        store.record_run_start(&old_failed_meta).unwrap();
+        let old_failed_id = store.record_run_start(&old_failed_meta).unwrap();
         store
-            .record_run_complete(now - (35 * 86400), RunStatus::Failed, Some(50_000))
+            .record_run_complete(old_failed_id, RunStatus::Failed, Some(50_000))
             .unwrap();
 
         // Create recent run (10 days old)
         let recent_meta = RunMetadata::minimal(
             Some(PathBuf::from("/project1/otto.yml")),
-            "abc123".to_string(),
+            "abc12345".to_string(),
             now - (10 * 86400),
         );
-        store.record_run_start(&recent_meta).unwrap();
+        let recent_id = store.record_run_start(&recent_meta).unwrap();
         store
-            .record_run_complete(now - (10 * 86400), RunStatus::Success, Some(75_000))
+            .record_run_complete(recent_id, RunStatus::Success, Some(75_000))
             .unwrap();
 
         // Create run from different project (45 days old)
         let other_project_meta = RunMetadata::minimal(
             Some(PathBuf::from("/project2/otto.yml")),
-            "def456".to_string(),
+            "def45678".to_string(),
             now - (45 * 86400),
         );
-        store.record_run_start(&other_project_meta).unwrap();
+        let other_id = store.record_run_start(&other_project_meta).unwrap();
         store
-            .record_run_complete(now - (45 * 86400), RunStatus::Success, Some(200_000))
+            .record_run_complete(other_id, RunStatus::Success, Some(200_000))
             .unwrap();
 
         Arc::new(store)
@@ -1041,7 +1203,7 @@ mod tests {
             keep_last: None,
             keep_failed: None,
             dry_run: false,
-            project_filter: Some("abc123".to_string()),
+            project_filter: Some("abc12345".to_string()),
             no_db: false,
             quiet: false,
         };
@@ -1129,7 +1291,7 @@ mod tests {
     async fn test_find_old_runs_with_project_filter() -> Result<()> {
         let store = create_store_with_runs();
 
-        let old_runs = store.find_old_runs(30, None, None, Some("abc123"))?;
+        let old_runs = store.find_old_runs(30, None, None, Some("abc12345"))?;
 
         // Should find 2 runs older than 30 days from abc123 project
         assert_eq!(old_runs.len(), 2);
@@ -1156,10 +1318,13 @@ mod tests {
 
         // Verify run exists
         let initial_runs = store.get_recent_runs(100, None)?;
-        assert!(initial_runs.iter().any(|r| r.timestamp == old_timestamp));
+        let target = initial_runs
+            .iter()
+            .find(|r| r.timestamp == old_timestamp)
+            .expect("the 40-day-old run is in the store");
 
-        // Delete it
-        let deleted = store.delete_run(old_timestamp, false)?;
+        // Delete it by id, which is what identifies a run.
+        let deleted = store.delete_run(target.id, false)?;
         assert!(deleted.is_some());
 
         // Verify it's gone
@@ -1172,7 +1337,7 @@ mod tests {
     async fn test_delete_nonexistent_run() -> Result<()> {
         let store = Arc::new(MemoryStateStore::new());
 
-        let deleted = store.delete_run(9999999999, false)?;
+        let deleted = store.delete_run(9999, false)?;
         assert!(deleted.is_none());
         Ok(())
     }

@@ -4,19 +4,15 @@ use eyre::Result;
 use log::warn;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-/// Resolve the otto home directory.
-///
-/// Uses `$OTTO_HOME` if set, otherwise `$HOME/.otto`.
-pub fn resolve_otto_home() -> Result<PathBuf> {
-    if let Ok(otto_home) = std::env::var("OTTO_HOME") {
-        Ok(PathBuf::from(otto_home))
-    } else {
-        let home = std::env::var("HOME").map_err(|e| eyre::eyre!("Failed to get HOME: {}", e))?;
-        Ok(PathBuf::from(home).join(".otto"))
-    }
-}
+use crate::executor::layout::parse_project_dir_name;
+
+/// How recently a cached script may have been touched and still be considered in
+/// use. A run that has written its cache entry but not yet its symlink looks
+/// exactly like an orphan, and deleting it out from under a concurrent run is
+/// how the cache prune broke builds.
+const CACHE_PRUNE_GRACE: Duration = Duration::from_secs(15 * 60);
 
 /// Decide whether `path` may be recursively deleted as part of cleaning `root`,
 /// returning the canonical path when it may.
@@ -128,8 +124,10 @@ fn prune_orphaned_cache(otto_home: &Path) -> Result<()> {
             Some(name) => name.to_string(),
             None => continue,
         };
-        // Only process otto project directories (otto-<hash>)
-        if !dir_name.starts_with("otto-") {
+        // Only process project run roots, which are `<name>-<hash>`. This used
+        // to test for an `otto-` prefix, which matches only projects that happen
+        // to be named "otto".
+        if parse_project_dir_name(&dir_name).is_none() {
             continue;
         }
 
@@ -183,6 +181,7 @@ fn prune_orphaned_cache(otto_home: &Path) -> Result<()> {
                 }
                 if let Some(filename) = cache_path.file_name().and_then(|n| n.to_str())
                     && !referenced.contains(filename)
+                    && !written_recently(&cache_path)
                 {
                     log::debug!("Removing orphaned cache entry: {}", cache_path.display());
                     let _ = fs::remove_file(&cache_path);
@@ -194,18 +193,23 @@ fn prune_orphaned_cache(otto_home: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether `path` was modified inside the grace period, i.e. whether a run in
+/// flight may still be about to reference it. Unreadable or future-dated times
+/// count as recent: the safe answer is "leave it alone".
+fn written_recently(path: &Path) -> bool {
+    let Ok(modified) = fs::metadata(path).and_then(|m| m.modified()) else {
+        return true;
+    };
+    match SystemTime::now().duration_since(modified) {
+        Ok(age) => age < CACHE_PRUNE_GRACE,
+        Err(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn test_resolve_otto_home_default() {
-        // When OTTO_HOME is not set, should use $HOME/.otto
-        // This test just verifies it doesn't panic
-        let home = resolve_otto_home();
-        assert!(home.is_ok());
-    }
 
     #[test]
     fn ensure_deletable_under_root_refuses_a_symlink() {
@@ -257,17 +261,76 @@ mod tests {
         assert!(canonical.starts_with(fs::canonicalize(&root).unwrap()));
     }
 
+    /// Build a project run root with a cached script and, optionally, a run
+    /// that symlinks to it.
+    fn cache_fixture(otto_home: &Path, cached: &str, referenced: bool) -> PathBuf {
+        let project = otto_home.join("widget-abc12345");
+        let cache = project.join(".cache");
+        fs::create_dir_all(&cache).unwrap();
+        let cache_entry = cache.join(cached);
+        fs::write(&cache_entry, "echo hi").unwrap();
+
+        if referenced {
+            let task = project.join("1700000000").join("tasks").join("build");
+            fs::create_dir_all(&task).unwrap();
+            std::os::unix::fs::symlink(PathBuf::from("../../../.cache").join(cached), task.join("script.sh")).unwrap();
+        }
+        cache_entry
+    }
+
+    /// Backdate `path` past the grace period.
+    fn age_out(path: &Path) {
+        let old = SystemTime::now() - CACHE_PRUNE_GRACE - Duration::from_secs(60);
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
+    }
+
     #[test]
-    fn test_resolve_otto_home_with_env() {
+    fn prune_orphaned_cache_removes_an_aged_unreferenced_entry() {
         let temp_dir = TempDir::new().unwrap();
-        unsafe {
-            std::env::set_var("OTTO_HOME", temp_dir.path());
-        }
-        let home = resolve_otto_home().unwrap();
-        assert_eq!(home, temp_dir.path());
-        unsafe {
-            std::env::remove_var("OTTO_HOME");
-        }
+        let entry = cache_fixture(temp_dir.path(), "aaaa.sh", false);
+        age_out(&entry);
+
+        prune_orphaned_cache(temp_dir.path()).unwrap();
+
+        assert!(!entry.exists(), "an old orphan is deleted");
+    }
+
+    #[test]
+    fn prune_orphaned_cache_spares_a_freshly_written_entry() {
+        // The concurrent-run race: a run has written its cache entry but not yet
+        // the symlink that references it, so it looks exactly like an orphan.
+        let temp_dir = TempDir::new().unwrap();
+        let entry = cache_fixture(temp_dir.path(), "bbbb.sh", false);
+
+        prune_orphaned_cache(temp_dir.path()).unwrap();
+
+        assert!(entry.exists(), "an entry inside the grace period must survive");
+    }
+
+    #[test]
+    fn prune_orphaned_cache_spares_a_referenced_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let entry = cache_fixture(temp_dir.path(), "cccc.sh", true);
+        age_out(&entry);
+
+        prune_orphaned_cache(temp_dir.path()).unwrap();
+
+        assert!(entry.exists(), "a referenced entry is not an orphan");
+    }
+
+    #[test]
+    fn prune_orphaned_cache_ignores_directories_that_are_not_run_roots() {
+        // The old `otto-` prefix test skipped every project not named "otto".
+        let temp_dir = TempDir::new().unwrap();
+        let stray = temp_dir.path().join("not-a-project").join(".cache");
+        fs::create_dir_all(&stray).unwrap();
+        let entry = stray.join("dddd.sh");
+        fs::write(&entry, "echo hi").unwrap();
+        age_out(&entry);
+
+        prune_orphaned_cache(temp_dir.path()).unwrap();
+
+        assert!(entry.exists(), "a directory that is not `<name>-<hash>` is left alone");
     }
 
     #[tokio::test]
@@ -345,7 +408,7 @@ mod tests {
     // =========================================================================
 
     fn setup_cache_test(temp_dir: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
-        let project_dir = temp_dir.path().join("otto-abc123");
+        let project_dir = temp_dir.path().join("widget-abc12345");
         let cache_dir = project_dir.join(".cache");
         let run_dir = project_dir.join("1234567890");
         let tasks_dir = run_dir.join("tasks").join("build");
@@ -353,9 +416,12 @@ mod tests {
         fs::create_dir_all(&cache_dir).unwrap();
         fs::create_dir_all(&tasks_dir).unwrap();
 
-        // Create cached scripts
+        // Create cached scripts, aged past the grace period so they are
+        // deletion candidates rather than possible in-flight writes.
         fs::write(cache_dir.join("aabb1122.sh"), "#!/bin/bash\necho hi").unwrap();
         fs::write(cache_dir.join("ccdd3344.sh"), "#!/bin/bash\necho orphan").unwrap();
+        age_out(&cache_dir.join("aabb1122.sh"));
+        age_out(&cache_dir.join("ccdd3344.sh"));
 
         // Create symlink from run to one cache entry
         #[cfg(unix)]
@@ -387,7 +453,7 @@ mod tests {
     #[test]
     fn test_prune_orphaned_cache_no_cache_dir() {
         let temp_dir = TempDir::new().unwrap();
-        let project_dir = temp_dir.path().join("otto-abc123");
+        let project_dir = temp_dir.path().join("widget-abc12345");
         fs::create_dir_all(&project_dir).unwrap();
         // No .cache dir — should be fine
         prune_orphaned_cache(temp_dir.path()).unwrap();
@@ -396,13 +462,15 @@ mod tests {
     #[test]
     fn test_prune_orphaned_cache_no_runs_deletes_all() {
         let temp_dir = TempDir::new().unwrap();
-        let project_dir = temp_dir.path().join("otto-abc123");
+        let project_dir = temp_dir.path().join("widget-abc12345");
         let cache_dir = project_dir.join(".cache");
         fs::create_dir_all(&cache_dir).unwrap();
 
         // Cache entries with no runs to reference them
         fs::write(cache_dir.join("aabb1122.sh"), "orphan1").unwrap();
         fs::write(cache_dir.join("ccdd3344.sh"), "orphan2").unwrap();
+        age_out(&cache_dir.join("aabb1122.sh"));
+        age_out(&cache_dir.join("ccdd3344.sh"));
 
         prune_orphaned_cache(temp_dir.path()).unwrap();
 

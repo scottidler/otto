@@ -378,7 +378,7 @@ mod tests {
         );
         let run_id1 = store.record_run_start(&metadata1).unwrap();
         store
-            .record_run_complete(1700000000, RunStatus::Success, Some(1024))
+            .record_run_complete(run_id1, RunStatus::Success, Some(1024))
             .unwrap();
 
         let task_id1 = store
@@ -399,7 +399,7 @@ mod tests {
         );
         let run_id2 = store.record_run_start(&metadata2).unwrap();
         store
-            .record_run_complete(1700001000, RunStatus::Failed, Some(2048))
+            .record_run_complete(run_id2, RunStatus::Failed, Some(2048))
             .unwrap();
 
         let task_id3 = store
@@ -415,7 +415,7 @@ mod tests {
         );
         let run_id3 = store.record_run_start(&metadata3).unwrap();
         store
-            .record_run_complete(1700002000, RunStatus::Success, Some(512))
+            .record_run_complete(run_id3, RunStatus::Success, Some(512))
             .unwrap();
 
         let task_id4 = store
@@ -584,7 +584,7 @@ mod tests {
         );
         let run_id = store.record_run_start(&metadata).unwrap();
         store
-            .record_run_complete(1700000000, RunStatus::Success, Some(1024))
+            .record_run_complete(run_id, RunStatus::Success, Some(1024))
             .unwrap();
 
         let task_id = store
