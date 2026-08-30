@@ -64,6 +64,17 @@ pub struct Task {
 }
 
 impl Task {
+    /// The parent task a foreach subtask belongs to, derived from its name.
+    ///
+    /// A subtask is named `<parent>:<item>`, so the parent is everything before the
+    /// first colon and a name without a colon has no parent. One definition, because
+    /// this rule was written out three times (twice here, once in the graph's test
+    /// fixture) and a fourth copy is how the rule drifts.
+    #[must_use]
+    pub fn derive_parent(name: &str) -> Option<String> {
+        name.split_once(':').map(|(parent, _)| parent.to_string())
+    }
+
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -119,12 +130,7 @@ impl Task {
             .map(|e| TaskEdge::new(e.task.clone(), e.when))
             .collect();
 
-        // Derive parent for subtasks (names with colons like "install:td")
-        let parent = if name.contains(':') {
-            name.split(':').next().map(|s| s.to_string())
-        } else {
-            None
-        };
+        let parent = Self::derive_parent(&name);
 
         // Resolve file globs from input to canonical paths using explicit cwd
         let file_deps = Self::resolve_file_globs(&task_spec.input, cwd);
@@ -230,12 +236,7 @@ impl Task {
 /// can't be silently dropped on one of the paths.
 impl From<crate::cli::parser::Task> for Task {
     fn from(parser_task: crate::cli::parser::Task) -> Self {
-        // Derive parent for subtasks (names with colons like "install:td")
-        let parent = if parser_task.name.contains(':') {
-            parser_task.name.split(':').next().map(|s| s.to_string())
-        } else {
-            None
-        };
+        let parent = Task::derive_parent(&parser_task.name);
         let mut task = Self::new(
             parser_task.name,
             parent,
@@ -267,6 +268,20 @@ mod tests {
     use crate::cfg::param::ParamSpecs;
     use serial_test::serial;
     use tempfile::TempDir;
+
+    /// One rule for deriving a foreach subtask's parent, and it holds for the shapes
+    /// the three former copies each had to get right independently.
+    #[test]
+    fn test_derive_parent() {
+        assert_eq!(Task::derive_parent("install:td"), Some("install".to_string()));
+        assert_eq!(Task::derive_parent("build"), None);
+        // Only the first colon splits: an item containing a colon stays with the item.
+        assert_eq!(Task::derive_parent("deploy:us:east"), Some("deploy".to_string()));
+        // A leading colon yields an empty parent rather than panicking or silently
+        // treating the name as parentless.
+        assert_eq!(Task::derive_parent(":orphan"), Some(String::new()));
+        assert_eq!(Task::derive_parent(""), None);
+    }
 
     fn make_task_spec(name: &str, before: Vec<String>, action: &str) -> TaskSpec {
         use crate::cfg::edge::EdgeSpec;

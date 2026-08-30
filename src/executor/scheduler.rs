@@ -20,6 +20,7 @@ use tokio::{
 
 use crate::ports::FileSystem;
 
+use super::state::SkipKind;
 use super::task::{Task, TaskEdge};
 use super::{
     action::{ActionProcessor, ProcessedAction},
@@ -31,6 +32,11 @@ use crate::cfg::edge::When;
 
 /// Timeout for output processing after task completion
 const OUTPUT_PROCESSING_TIMEOUT_SECS: u64 = 5;
+
+/// Capacity of the task-completion channel. Each started task sends exactly one
+/// report, and the drain loop consumes them as fast as they arrive, so this only
+/// has to absorb a burst of simultaneous finishes.
+const COMPLETION_CHANNEL_CAPACITY: usize = 32;
 
 /// Single line written into a `tty: true` task's stdout/stderr logs.
 ///
@@ -110,6 +116,47 @@ impl From<tokio::sync::AcquireError> for TaskFailure {
     }
 }
 
+/// A one-way cancellation signal for a run.
+///
+/// The flag makes a cancellation that arrives before anyone waits impossible to
+/// miss; the `Notify` wakes the drain loop that is parked on the report channel.
+/// Checking the flag alone would leave the loop asleep until the next task
+/// reported, which for a long-running child is exactly the wait being cancelled.
+#[derive(Debug, Default)]
+pub struct CancelSignal {
+    cancelled: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl CancelSignal {
+    /// Ask the run to stop. Idempotent.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Resolves once cancelled, and never resolves otherwise, so it can sit in a
+    /// `select!` arm.
+    async fn cancelled(&self) {
+        loop {
+            // Register before re-checking, or a cancel landing between the check
+            // and the await is lost.
+            let notified = self.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+            if self.is_cancelled() {
+                return;
+            }
+        }
+    }
+}
+
 /// The tasks currently running, with their join handles.
 ///
 /// Handles are reaped rather than dropped on the floor: a body that ends
@@ -173,6 +220,14 @@ impl ActiveTasks {
                 }
             }
         }
+    }
+
+    /// Abort every in-flight body. Each child process was spawned with
+    /// `kill_on_drop`, so dropping the body's future is what actually kills it.
+    fn abort_all(&mut self) {
+        self.joins.abort_all();
+        self.running.clear();
+        self.names.clear();
     }
 
     /// Join every remaining body, logging any that panicked.
@@ -260,32 +315,73 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
     lines.join("\n") + "\n"
 }
 
-/// Convert shell .env format back to JSON
-/// Reads key=value pairs and reconstructs JSON object
+/// Convert shell .env format back to JSON.
+///
+/// The inverse of `env_to_json`'s producer (`otto_serialize_output`, which emits
+/// `KEY='value'` and escapes an embedded quote as `'\''`). A value is quoted, so it
+/// may contain newlines: the record boundary is the closing quote, not the end of a
+/// physical line. Splitting on lines instead truncated every multiline value at its
+/// first newline and handed the consumer `'line1` - a leading quote and one line of
+/// what the task actually wrote - while the run exited 0.
 fn env_to_json(env_content: &str) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
+    /// Bash's literal-quote escape inside a single-quoted string: close, escaped
+    /// quote, reopen.
+    const QUOTE_ESCAPE: &[u8] = br"'\''";
 
-    for line in env_content.lines() {
-        let line = line.trim();
-        // Skip comments and empty lines
-        if line.is_empty() || line.starts_with('#') {
+    let mut map = serde_json::Map::new();
+    let bytes = env_content.as_bytes();
+    let mut pos = 0usize;
+
+    while pos < bytes.len() {
+        let line_end = env_content[pos..].find('\n').map_or(bytes.len(), |n| pos + n);
+        let line = &env_content[pos..line_end];
+        let trimmed = line.trim();
+
+        // Comments and blank lines exist only between records, never inside a value.
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            pos = line_end + 1;
             continue;
         }
 
-        // Parse key=value (handle single-quoted values)
-        if let Some(eq_pos) = line.find('=') {
-            let key = &line[..eq_pos];
-            let mut value = &line[eq_pos + 1..];
+        let Some(eq) = line.find('=') else {
+            pos = line_end + 1;
+            continue;
+        };
+        let key = line[..eq].trim().to_string();
+        let mut cursor = pos + eq + 1;
 
-            // Remove surrounding single quotes if present
-            if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
-                value = &value[1..value.len() - 1];
+        if bytes.get(cursor) == Some(&b'\'') {
+            cursor += 1;
+            let mut value = String::new();
+            let mut segment_start = cursor;
+            loop {
+                if cursor >= bytes.len() {
+                    // Unterminated quote: keep what the task wrote rather than
+                    // dropping it, and stop.
+                    value.push_str(&env_content[segment_start..]);
+                    break;
+                }
+                if bytes[cursor] != b'\'' {
+                    cursor += 1;
+                    continue;
+                }
+                value.push_str(&env_content[segment_start..cursor]);
+                if bytes[cursor..].starts_with(QUOTE_ESCAPE) {
+                    value.push('\'');
+                    cursor += QUOTE_ESCAPE.len();
+                    segment_start = cursor;
+                    continue;
+                }
+                // The closing quote.
+                cursor += 1;
+                break;
             }
-
-            // Unescape single quotes
-            let unescaped = value.replace("'\\''", "'");
-
-            map.insert(key.to_string(), serde_json::Value::String(unescaped));
+            map.insert(key, serde_json::Value::String(value));
+            pos = cursor;
+        } else {
+            // Unquoted: the value is the remainder of this physical line.
+            map.insert(key, serde_json::Value::String(line[eq + 1..].to_string()));
+            pos = line_end + 1;
         }
     }
 
@@ -301,8 +397,11 @@ pub enum TaskStatus {
     Running,
     /// Task completed successfully
     Completed,
-    /// Task was skipped due to up-to-date outputs or unreachable conditional edge
-    Skipped,
+    /// Task was skipped, carrying why: an up-to-date output set, a serial-group
+    /// predecessor that did not succeed, or an unreachable conditional edge.
+    /// Downstream `when:` classification branches on the kind, so it is part of
+    /// the status rather than a parallel lookup the two gates could disagree on.
+    Skipped(SkipKind),
     /// Task failed during execution
     Failed(String),
 }
@@ -319,18 +418,59 @@ enum EdgeState {
     Pending,
 }
 
+/// Names of tasks that reached a terminal Skipped state, keyed by why.
+///
+/// Only the skipped set is keyed: `completed_set` and `failed_set` need no
+/// reason distinguished, because "it ran and exited zero" and "it ran and
+/// exited non-zero" are each one thing.
+type SkippedSet = HashMap<String, SkipKind>;
+
+/// A skip as both halves of one fact: the kind the scheduler branches on and the
+/// sentence the operator reads. They are produced together so they cannot drift,
+/// and both are persisted to the run record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipRecord {
+    pub kind: SkipKind,
+    pub detail: String,
+}
+
+impl SkipRecord {
+    fn new(kind: SkipKind, detail: String) -> Self {
+        Self { kind, detail }
+    }
+}
+
 /// Evaluate a single dependency edge against the runtime sets.
-/// A Skipped source short-circuits every `when:` variant to Unreachable - the source
-/// reached a terminal state that is neither Completed nor Failed, so waiting longer
-/// cannot make the edge Satisfied.
+///
+/// A Skipped source is resolved against the edge's `when:` using its provenance,
+/// not short-circuited to Unreachable. The full contract, nine cells, pinned by
+/// `classify_edge_skip_provenance_matrix`:
+///
+/// | source `SkipKind`   | `when: success` | `when: failure` | `when: always` |
+/// |---------------------|-----------------|-----------------|----------------|
+/// | `UpToDate`          | Satisfied       | Unreachable     | Satisfied      |
+/// | `SerialPredecessor` | Unreachable     | Unreachable     | Satisfied      |
+/// | `Unreachable`       | Unreachable     | Unreachable     | Satisfied      |
+///
+/// `UpToDate` is success-like: the task's outputs are current, which is the
+/// outcome a `when: success` dependent is waiting for. `always` is satisfied by
+/// every terminal state, which is what makes cleanup reliable. The whole
+/// `failure` column is Unreachable because `when: failure` means the source task
+/// ran and its action exited non-zero; widening it would fan failure handlers
+/// across the entire downstream cone of any single failure.
 fn classify_edge(
     edge: &TaskEdge,
     completed: &std::collections::HashSet<String>,
     failed: &std::collections::HashSet<String>,
-    skipped: &std::collections::HashSet<String>,
+    skipped: &SkippedSet,
 ) -> EdgeState {
-    if skipped.contains(&edge.task) {
-        return EdgeState::Unreachable;
+    if let Some(kind) = skipped.get(&edge.task) {
+        return match edge.when {
+            When::Success if kind.is_success_like() => EdgeState::Satisfied,
+            When::Success => EdgeState::Unreachable,
+            When::Failure => EdgeState::Unreachable,
+            When::Always => EdgeState::Satisfied,
+        };
     }
     match edge.when {
         When::Success => {
@@ -407,23 +547,33 @@ impl SerialGroups {
     /// dependency edges are classified against.
     ///
     /// - no predecessor in the run set -> Satisfied (ordering never expands the run set)
-    /// - predecessor Completed or up-to-date-skipped (`completed_set`) -> Satisfied
-    /// - predecessor in any other terminal state -> Unreachable, so this member is
-    ///   skipped with a reason and the cascade propagates through the same rule
+    /// - predecessor Completed, or skipped as `UpToDate` -> Satisfied
+    /// - predecessor Failed, or skipped for any other reason -> Unreachable, so this
+    ///   member is skipped as `SerialPredecessor` and the cascade propagates through
+    ///   the same rule
     /// - otherwise the predecessor has not finished -> Pending
+    ///
+    /// The success-like treatment of `UpToDate` is the same rule `classify_edge`
+    /// applies; this gate reads the kind rather than deciding independently.
     fn classify(
         &self,
         task: &Task,
         completed: &std::collections::HashSet<String>,
         failed: &std::collections::HashSet<String>,
-        skipped: &std::collections::HashSet<String>,
+        skipped: &SkippedSet,
     ) -> EdgeState {
         match self.predecessor(task) {
             None => EdgeState::Satisfied,
             Some(pred) => {
-                if completed.contains(pred) {
+                if let Some(kind) = skipped.get(pred) {
+                    if kind.is_success_like() {
+                        EdgeState::Satisfied
+                    } else {
+                        EdgeState::Unreachable
+                    }
+                } else if completed.contains(pred) {
                     EdgeState::Satisfied
-                } else if failed.contains(pred) || skipped.contains(pred) {
+                } else if failed.contains(pred) {
                     EdgeState::Unreachable
                 } else {
                     EdgeState::Pending
@@ -440,7 +590,7 @@ fn classify_gates(
     serial_groups: &SerialGroups,
     completed: &std::collections::HashSet<String>,
     failed: &std::collections::HashSet<String>,
-    skipped: &std::collections::HashSet<String>,
+    skipped: &SkippedSet,
 ) -> Vec<EdgeState> {
     let mut states: Vec<EdgeState> = task
         .task_deps
@@ -451,17 +601,21 @@ fn classify_gates(
     states
 }
 
-/// Format a skip reason describing which edge or ordering gate made this task unreachable.
-fn skip_reason_for(
+/// Build the skip record for a task whose gates say it can never run: the typed
+/// kind plus the sentence naming which edge or ordering gate made it unreachable.
+///
+/// The kind is decided by which gate fired, so the text is a rendering of the kind
+/// rather than an independent guess at the same question.
+fn skip_record_for(
     task: &Task,
     serial_groups: &SerialGroups,
     completed: &std::collections::HashSet<String>,
     failed: &std::collections::HashSet<String>,
-    skipped: &std::collections::HashSet<String>,
-) -> String {
+    skipped: &SkippedSet,
+) -> SkipRecord {
     for edge in &task.task_deps {
         if matches!(classify_edge(edge, completed, failed, skipped), EdgeState::Unreachable) {
-            return if skipped.contains(&edge.task) {
+            let detail = if skipped.contains_key(&edge.task) {
                 format!("dep {} skipped; cascade", edge.task)
             } else {
                 match edge.when {
@@ -470,6 +624,7 @@ fn skip_reason_for(
                     When::Always => format!("dep {} unreachable", edge.task),
                 }
             };
+            return SkipRecord::new(SkipKind::Unreachable, detail);
         }
     }
     if matches!(
@@ -477,13 +632,14 @@ fn skip_reason_for(
         EdgeState::Unreachable
     ) && let Some(pred) = serial_groups.predecessor(task)
     {
-        return if failed.contains(pred) {
+        let detail = if failed.contains(pred) {
             format!("serial predecessor {pred} failed")
         } else {
             format!("serial predecessor {pred} skipped; cascade")
         };
+        return SkipRecord::new(SkipKind::SerialPredecessor, detail);
     }
-    "unreachable dependency".to_string()
+    SkipRecord::new(SkipKind::Unreachable, "unreachable dependency".to_string())
 }
 
 /// Task scheduler that manages concurrent execution
@@ -492,10 +648,10 @@ pub struct TaskScheduler<F: FileSystem = crate::ports::RealFs> {
     task_statuses: Arc<Mutex<HashMap<String, TaskStatus>>>,
     /// Task start times tracking (for duration calculation)
     task_start_times: Arc<Mutex<HashMap<String, std::time::Instant>>>,
-    /// Reason each skipped task was skipped, for tasks skipped by an unreachable
+    /// Why each skipped task was skipped, for tasks skipped by an unreachable
     /// dependency edge or a serial-group cascade. Up-to-date skips are not recorded
     /// here: they are successes, not gated-out tasks.
-    skip_reasons: Arc<Mutex<HashMap<String, String>>>,
+    skip_records: Arc<Mutex<HashMap<String, SkipRecord>>>,
     /// Semaphore for task limiting
     semaphore: Arc<Semaphore>,
     /// The permit count the semaphore was built with. A `tty: true` task acquires
@@ -520,6 +676,10 @@ pub struct TaskScheduler<F: FileSystem = crate::ports::RealFs> {
     message_tx: Option<tokio::sync::broadcast::Sender<TaskMessage>>,
     /// Pre-created TaskStreams for TUI mode (task_name -> TaskStreams)
     task_streams: Option<Arc<std::collections::HashMap<String, TaskStreams>>>,
+    /// Trip this to stop the run. The drain loop honors it; the TUI quit path is
+    /// what trips it, so closing the dashboard no longer strands the user waiting
+    /// on children with no way to cancel.
+    cancel: Arc<CancelSignal>,
 }
 
 impl<F: FileSystem + 'static> TaskScheduler<F> {
@@ -545,7 +705,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         Ok(Self {
             task_statuses,
             task_start_times,
-            skip_reasons: Arc::new(Mutex::new(HashMap::new())),
+            skip_records: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(max_parallel)),
             max_parallel,
             workspace,
@@ -555,7 +715,13 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             no_prefix: false,
             message_tx: None,
             task_streams: None,
+            cancel: Arc::new(CancelSignal::default()),
         })
+    }
+
+    /// A handle the caller can trip to cancel this run.
+    pub fn cancel_signal(&self) -> Arc<CancelSignal> {
+        self.cancel.clone()
     }
 
     pub fn set_message_channel(&mut self, tx: tokio::sync::broadcast::Sender<TaskMessage>) {
@@ -582,36 +748,37 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     }
 
     /// Convert internal TaskStatus to TUI TaskStatus
-    #[allow(dead_code)]
     fn to_tui_status(status: &TaskStatus) -> TuiTaskStatus {
         match status {
             TaskStatus::Pending => TuiTaskStatus::Pending,
             TaskStatus::Running => TuiTaskStatus::Running,
             TaskStatus::Completed => TuiTaskStatus::Completed,
-            TaskStatus::Skipped => TuiTaskStatus::Skipped,
+            TaskStatus::Skipped(_) => TuiTaskStatus::Skipped,
             TaskStatus::Failed(_) => TuiTaskStatus::Failed,
         }
     }
 
-    /// Record a task as Skipped with a user-visible reason.
+    /// Record a task as Skipped with its provenance and a user-visible reason.
     ///
     /// Every skip that is not an up-to-date skip goes through here: unreachable
-    /// dependency edges and serial-group cascades alike. The reason lands in
-    /// `skip_reasons`, the name lands in `skipped_set` so downstream gates classify
-    /// against it, and the terminal prints it so a skipped task is never silent.
-    async fn mark_skipped(&self, task: &Task, reason: String, skipped_set: &mut std::collections::HashSet<String>) {
-        info!("Skipping task {} ({reason})", task.name);
+    /// dependency edges and serial-group cascades alike. The record lands in
+    /// `skip_records`, the name and kind land in `skipped_set` so downstream gates
+    /// classify against the kind, and the terminal prints the detail so a skipped
+    /// task is never silent.
+    async fn mark_skipped(&self, task: &Task, record: SkipRecord, skipped_set: &mut SkippedSet) {
+        let SkipRecord { kind, detail } = &record;
+        info!("Skipping task {} ({detail})", task.name);
         if !self.tui_mode {
-            let msg = format!("{} skipped ({reason})\n", colorize_task_prefix(&task.name));
+            let msg = format!("{} skipped ({detail})\n", colorize_task_prefix(&task.name));
             print!("{msg}");
             io::stdout().flush().unwrap_or(());
         }
-        self.skip_reasons.lock().await.insert(task.name.clone(), reason);
-        skipped_set.insert(task.name.clone());
+        skipped_set.insert(task.name.clone(), *kind);
         {
             let mut statuses = self.task_statuses.lock().await;
-            statuses.insert(task.name.clone(), TaskStatus::Skipped);
+            statuses.insert(task.name.clone(), TaskStatus::Skipped(*kind));
         }
+        self.skip_records.lock().await.insert(task.name.clone(), record);
         self.broadcast_message(TaskMessage::Finished {
             task_name: task.name.clone(),
             status: TuiTaskStatus::Skipped,
@@ -634,7 +801,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         total_tasks: usize,
         serial_groups: &SerialGroups,
         failed_set: &std::collections::HashSet<String>,
-        skipped_set: &std::collections::HashSet<String>,
+        skipped_set: &mut SkippedSet,
     ) -> Result<()> {
         match self.needs_rebuild(&task).await {
             Ok(true) => {
@@ -672,9 +839,16 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     timestamp: std::time::SystemTime::now(),
                 });
 
-                let mut statuses = self.task_statuses.lock().await;
-                statuses.insert(task.name.clone(), TaskStatus::Skipped);
+                {
+                    let mut statuses = self.task_statuses.lock().await;
+                    statuses.insert(task.name.clone(), TaskStatus::Skipped(SkipKind::UpToDate));
+                }
+                // An up-to-date skip is success-like, so it lands in `completed_set`
+                // like any other success. It is also recorded in `skipped_set` with
+                // its kind, because it is still terminal-Skipped and the gates must
+                // be able to tell it apart from a gated-out skip.
                 completed_set.insert(task.name.clone());
+                skipped_set.insert(task.name.clone(), SkipKind::UpToDate);
                 *completed_tasks += 1;
 
                 blocked_tasks.retain(|blocked_task| {
@@ -722,8 +896,24 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         Ok(())
     }
 
+    /// Stop the run: kill the in-flight children and report the cancellation.
+    ///
+    /// The children are killed rather than waited on, which is the whole point of a
+    /// cancel: `kill_on_drop(true)` on every spawned command means aborting the task
+    /// bodies takes the processes with them.
+    async fn abandon_run(&self, active_tasks: &mut ActiveTasks) -> Result<()> {
+        let abandoned = active_tasks.len();
+        info!("Run cancelled; killing {abandoned} in-flight task(s)");
+        active_tasks.abort_all();
+        if !self.tui_mode {
+            eprintln!("otto: run cancelled; {abandoned} running task(s) killed");
+        }
+        self.persist_skip_records().await;
+        Err(eyre!("run cancelled; {abandoned} running task(s) were killed"))
+    }
+
     pub async fn execute_all(&self) -> Result<()> {
-        let (tx, mut rx) = mpsc::channel(32);
+        let (tx, mut rx) = mpsc::channel(COMPLETION_CHANNEL_CAPACITY);
 
         // Initialize task statuses and start times
         {
@@ -738,8 +928,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             }
         }
 
-        // Initialize in-degree count for all tasks
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
         let mut ready_queue = std::collections::VecDeque::new();
         let mut blocked_tasks = Vec::new();
 
@@ -747,8 +935,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let serial_groups = SerialGroups::new(&self.tasks);
 
         for task in &self.tasks {
-            in_degree.insert(task.name.clone(), task.task_deps.len());
-
             // Tasks with no dependencies AND no serial predecessor can be queued
             // immediately. A member waiting on a predecessor starts blocked so the
             // ready loop never has to spin on a gate that cannot yet be satisfied.
@@ -767,13 +953,17 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         // Track completed and failed tasks for dependency satisfaction checking.
         let mut completed_set = std::collections::HashSet::new();
         let mut failed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut skipped_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut skipped_set: SkippedSet = SkippedSet::new();
 
         // Record the first failure to surface as the run's error; conditional follow-ups
         // (when: failure / when: always) still get a chance to run.
         let mut final_error: Option<eyre::Report> = None;
 
         while completed_tasks < total_tasks {
+            if self.cancel.is_cancelled() {
+                return self.abandon_run(&mut active_tasks).await;
+            }
+
             // Start as many tasks as we can
             while active_tasks.len() < max_concurrent && !ready_queue.is_empty() {
                 let task = ready_queue.pop_front().unwrap();
@@ -783,19 +973,20 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
                     // Dep state contradicts this task's edge condition, or its serial
                     // predecessor reached a non-success terminal state -> Skip.
-                    let reason = skip_reason_for(&task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                    self.mark_skipped(&task, reason, &mut skipped_set).await;
+                    let record = skip_record_for(&task, &serial_groups, &completed_set, &failed_set, &skipped_set);
+                    self.mark_skipped(&task, record, &mut skipped_set).await;
                     completed_tasks += 1;
                     continue;
                 }
 
                 if !states.iter().all(|s| matches!(s, EdgeState::Satisfied)) {
-                    // Some dep is still Pending - put it back.
-                    ready_queue.push_back(task);
-
-                    if ready_queue.len() == 1 {
-                        break;
-                    }
+                    // Some gate is still Pending, so this task is blocked, not ready.
+                    // It goes to `blocked_tasks` and is swept back out when a gate
+                    // resolves. Re-queuing it instead made this loop's termination
+                    // depend on `ready_queue.len() == 1` - a guard that holds only
+                    // while the queue contains exactly this one task, and that any
+                    // future enqueue path would silently turn into a busy spin.
+                    blocked_tasks.push(task);
                     continue;
                 }
 
@@ -811,7 +1002,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     total_tasks,
                     &serial_groups,
                     &failed_set,
-                    &skipped_set,
+                    &mut skipped_set,
                 )
                 .await?;
             }
@@ -839,8 +1030,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     ready_queue.push_back(t);
                 }
                 for t in newly_skipped {
-                    let reason = skip_reason_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                    self.mark_skipped(&t, reason, &mut skipped_set).await;
+                    let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
+                    self.mark_skipped(&t, record, &mut skipped_set).await;
                     completed_tasks += 1;
                 }
                 if !progressed && ready_queue.is_empty() {
@@ -860,6 +1051,9 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     eyre!("Task {name} panicked"),
                     None,
                 )),
+                () = self.cancel.cancelled() => {
+                    return self.abandon_run(&mut active_tasks).await;
+                }
             };
 
             match received {
@@ -889,17 +1083,33 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         && t.is_virtual_parent
                     {
                         let statuses_guard = self.task_statuses.lock().await;
-                        let subtask_statuses: Vec<TaskStatus> = self
+                        let subtask_statuses: Vec<(String, TaskStatus)> = self
                             .tasks
                             .iter()
                             .filter(|st| st.parent.as_deref() == Some(t.name.as_str()))
-                            .filter_map(|st| statuses_guard.get(&st.name).cloned())
+                            .filter_map(|st| statuses_guard.get(&st.name).cloned().map(|s| (st.name.clone(), s)))
                             .collect();
                         drop(statuses_guard);
-                        if subtask_statuses.iter().any(|s| matches!(s, TaskStatus::Failed(_))) {
+                        // Skip provenance decides this, not the bare Skipped status:
+                        // a foreach whose subtasks were all up to date is a warm cache,
+                        // i.e. a success, and must not skip the parent (and with it
+                        // everything downstream). Only a gated-out subtask skips the
+                        // parent, and it propagates that subtask's kind.
+                        let gated_out = subtask_statuses.iter().find_map(|(name, s)| match s {
+                            TaskStatus::Skipped(kind) if !kind.is_success_like() => Some((name.clone(), *kind)),
+                            _ => None,
+                        });
+                        if subtask_statuses.iter().any(|(_, s)| matches!(s, TaskStatus::Failed(_))) {
                             TaskStatus::Failed("virtual parent: subtask failed".to_string())
-                        } else if subtask_statuses.iter().any(|s| matches!(s, TaskStatus::Skipped)) {
-                            TaskStatus::Skipped
+                        } else if let Some((subtask, kind)) = gated_out {
+                            // The parent did not pass through mark_skipped, so record its
+                            // reason here: a parent skipped by aggregation must be as
+                            // visible in the run record as one skipped by a gate.
+                            self.skip_records.lock().await.insert(
+                                completed_task.clone(),
+                                SkipRecord::new(kind, format!("subtask {subtask} skipped; nothing to aggregate")),
+                            );
+                            TaskStatus::Skipped(kind)
                         } else {
                             TaskStatus::Completed
                         }
@@ -914,7 +1124,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                                 format!("{} finished successfully\n", colorize_task_prefix(&completed_task))
                             }
                             TaskStatus::Failed(_) => format!("{} failed\n", colorize_task_prefix(&completed_task)),
-                            TaskStatus::Skipped => format!("{} skipped\n", colorize_task_prefix(&completed_task)),
+                            TaskStatus::Skipped(_) => format!("{} skipped\n", colorize_task_prefix(&completed_task)),
                             _ => format!("{} finished\n", colorize_task_prefix(&completed_task)),
                         };
                         print!("{msg}");
@@ -938,12 +1148,13 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         TaskStatus::Failed(_) => {
                             failed_set.insert(completed_task.clone());
                         }
-                        TaskStatus::Skipped => {
+                        TaskStatus::Skipped(kind) => {
                             // A virtual parent that aggregated to Skipped (subtasks Skipped
-                            // because their prerequisites failed) must enter skipped_set so
-                            // that downstream `when: failure` edges to this parent become
-                            // Unreachable rather than Pending forever.
-                            skipped_set.insert(completed_task.clone());
+                            // because their prerequisites failed) must enter skipped_set
+                            // carrying the kind it inherited, so downstream edges to this
+                            // parent classify against the same table every other gate uses
+                            // rather than sitting Pending forever.
+                            skipped_set.insert(completed_task.clone(), *kind);
                         }
                         _ => {}
                     }
@@ -973,17 +1184,9 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         ready_queue.push_back(t);
                     }
                     for t in newly_skipped {
-                        let reason = skip_reason_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        self.mark_skipped(&t, reason, &mut skipped_set).await;
+                        let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
+                        self.mark_skipped(&t, record, &mut skipped_set).await;
                         completed_tasks += 1;
-                    }
-
-                    for remaining_task in &blocked_tasks {
-                        if remaining_task.task_deps.iter().any(|d| d.task == completed_task)
-                            && let Some(degree) = in_degree.get_mut(&remaining_task.name)
-                        {
-                            *degree = degree.saturating_sub(1);
-                        }
                     }
                 }
                 Some(TaskReport {
@@ -1045,8 +1248,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         ready_queue.push_back(t);
                     }
                     for t in newly_skipped {
-                        let reason = skip_reason_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        self.mark_skipped(&t, reason, &mut skipped_set).await;
+                        let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
+                        self.mark_skipped(&t, record, &mut skipped_set).await;
                         completed_tasks += 1;
                     }
 
@@ -1066,8 +1269,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         // edges never resolved one way or another, likely because an upstream dep
         // failed and is unreachable for this task's when: condition).
         for task in blocked_tasks.drain(..) {
-            let reason = skip_reason_for(&task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-            self.mark_skipped(&task, reason, &mut skipped_set).await;
+            let record = skip_record_for(&task, &serial_groups, &completed_set, &failed_set, &skipped_set);
+            self.mark_skipped(&task, record, &mut skipped_set).await;
         }
 
         // Join every spawned body so a panic is logged rather than silently
@@ -1075,8 +1278,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         active_tasks.drain().await;
 
         // Persist skip provenance to the run record. Built and dropped before
-        // this: `get_skip_reasons()` had no caller in the whole tree.
-        self.persist_skip_reasons().await;
+        // this: the accessor had no caller in the whole tree.
+        self.persist_skip_records().await;
 
         if let Some(err) = final_error {
             return Err(err);
@@ -1094,18 +1297,22 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         Ok(())
     }
 
-    /// Write each skipped task and the reason it was skipped into the run
-    /// record, so `otto History` can say why a task did not run.
-    async fn persist_skip_reasons(&self) {
-        let reasons = self.get_skip_reasons().await;
-        if reasons.is_empty() {
+    /// Write each skipped task and why it was skipped into the run record, so
+    /// `otto History` can say why a task did not run.
+    ///
+    /// Both halves of the record are persisted: `skip_kind` for anything that
+    /// wants to filter by reason class, `skip_reason` for the operator.
+    async fn persist_skip_records(&self) {
+        let records = self.get_skip_records().await;
+        if records.is_empty() {
             return;
         }
         let (Some(run_id), Some(store)) = (self.workspace.db_run_id(), self.workspace.state_store()) else {
             return;
         };
-        for (task_name, reason) in reasons {
-            if let Err(e) = store.record_task_skipped(run_id, &task_name, None, Some(&reason)) {
+        for (task_name, record) in records {
+            if let Err(e) = store.record_task_skipped(run_id, &task_name, None, Some(&record.detail), Some(record.kind))
+            {
                 log::warn!("Failed to record skipped task {task_name} in database: {e}");
             }
         }
@@ -1173,16 +1380,22 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     let statuses = task_statuses.lock().await;
                     for dep in &task_deps {
                         let status = statuses.get(&dep.task);
+                        // Second gate on the same edge, and it must answer exactly what
+                        // `classify_edge` answered: same nine cells, asserted together by
+                        // `classify_edge_skip_provenance_matrix`. A disagreement here
+                        // aborts at spawn time a task the scheduler just admitted.
                         let satisfied = match (dep.when, status) {
-                            // when: success requires Completed (Skipped is treated as success-like
-                            // for back-compat with the up-to-date skip pathway).
+                            // when: success requires Completed, or a skip that is
+                            // success-like: an up-to-date source produced current outputs.
                             (When::Success, Some(TaskStatus::Completed)) => true,
-                            (When::Success, Some(TaskStatus::Skipped)) => true,
-                            // when: failure requires a Failed status on the source.
+                            (When::Success, Some(TaskStatus::Skipped(kind))) => kind.is_success_like(),
+                            // when: failure requires a Failed status on the source: it ran
+                            // and its action exited non-zero. No skip satisfies it.
                             (When::Failure, Some(TaskStatus::Failed(_))) => true,
-                            // when: always is satisfied by any terminal state.
+                            // when: always is satisfied by any terminal state, whatever the
+                            // skip kind, which is what makes cleanup reliable.
                             (When::Always, Some(TaskStatus::Completed)) => true,
-                            (When::Always, Some(TaskStatus::Skipped)) => true,
+                            (When::Always, Some(TaskStatus::Skipped(_))) => true,
                             (When::Always, Some(TaskStatus::Failed(_))) => true,
                             _ => false,
                         };
@@ -1294,7 +1507,21 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     .env("OTTO_TASK_DIR", task_dir.to_string_lossy().to_string())
                     .env("OTTO_WORKSPACE", workspace.root().to_string_lossy().to_string())
                     .env("OTTO_TASKS_DIR", tasks_dir.to_string_lossy().to_string())
-                    .env("OTTO_USER", &execution_context.user);
+                    .env("OTTO_USER", &execution_context.user)
+                    // The child dies with its task body. Without this, cancelling or
+                    // dropping the scheduler left orphaned processes holding the
+                    // workspace open.
+                    .kill_on_drop(true);
+
+                // Its own process group, so a signal aimed at otto does not race
+                // ahead of otto's own teardown and so the child's own children are
+                // reachable as a group. NOT for a `tty: true` task: that task owns
+                // the terminal, and a background process group reading from it gets
+                // SIGTTIN and stops.
+                #[cfg(unix)]
+                if !tty {
+                    cmd.process_group(0);
+                }
 
                 // Execute without timeout - runs until completion or failure
                 let result = async {
@@ -1521,10 +1748,11 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         self.task_statuses.lock().await.clone()
     }
 
-    /// Reasons for tasks skipped by an unreachable dependency edge or a serial-group
-    /// cascade, keyed by task name. Up-to-date skips are absent by design.
-    pub async fn get_skip_reasons(&self) -> HashMap<String, String> {
-        self.skip_reasons.lock().await.clone()
+    /// Why each task skipped by an unreachable dependency edge or a serial-group
+    /// cascade was skipped, keyed by task name. Up-to-date skips are absent by
+    /// design: they are successes, not gated-out tasks.
+    pub async fn get_skip_records(&self) -> HashMap<String, SkipRecord> {
+        self.skip_records.lock().await.clone()
     }
 
     pub async fn get_task_status(&self, task_name: &str) -> TaskStatus {
@@ -1632,6 +1860,135 @@ mod tests {
             std::env::set_var("OTTO_DB_PATH", &db_path);
             std::env::set_var("OTTO_HOME", &otto_home);
         }
+    }
+
+    /// A multiline value survives the round trip. It used to be truncated at the
+    /// first newline and handed back with a stray leading quote (`'line1`), while the
+    /// run exited 0.
+    #[test]
+    fn test_env_to_json_preserves_multiline_values() {
+        let content = "# header\n\nMULTI='line1\nline2\nline3'\nAFTER='tail'\n";
+        let json = env_to_json(content);
+
+        assert_eq!(
+            json["MULTI"],
+            serde_json::Value::String("line1\nline2\nline3".to_string())
+        );
+        assert_eq!(
+            json["AFTER"],
+            serde_json::Value::String("tail".to_string()),
+            "the record after a multiline value must still be parsed"
+        );
+        assert_eq!(json.as_object().map(|o| o.len()), Some(2));
+    }
+
+    /// `'\''` is bash's literal single quote inside a single-quoted string, not a
+    /// record terminator.
+    #[test]
+    fn test_env_to_json_unescapes_embedded_quotes() {
+        let content = "Q='it'\\''s here'\nNEXT='ok'\n";
+        let json = env_to_json(content);
+
+        assert_eq!(json["Q"], serde_json::Value::String("it's here".to_string()));
+        assert_eq!(json["NEXT"], serde_json::Value::String("ok".to_string()));
+    }
+
+    /// The producer and the parser are inverses, including for the values that used
+    /// to break the parser.
+    #[test]
+    fn test_json_to_env_round_trips_through_env_to_json() {
+        for value in [
+            "plain",
+            "line1\nline2",
+            "it's got a quote",
+            "# not a comment",
+            "trailing=equals=signs",
+            "",
+        ] {
+            let json = serde_json::json!({ "VALUE": value });
+            let env = json_to_env(&json, "task");
+            let back = env_to_json(&env);
+            assert_eq!(
+                back["OTTO_INPUT_TASK_VALUE"],
+                serde_json::Value::String(value.to_string()),
+                "round trip lost {value:?}"
+            );
+        }
+    }
+
+    /// Unterminated quote: keep what the task wrote rather than dropping the record.
+    #[test]
+    fn test_env_to_json_keeps_an_unterminated_value() {
+        let json = env_to_json("BROKEN='no closing quote\n");
+        assert_eq!(
+            json["BROKEN"],
+            serde_json::Value::String("no closing quote\n".to_string())
+        );
+    }
+
+    /// Cancelling stops the run instead of waiting for the children.
+    #[tokio::test]
+    #[serial]
+    async fn test_cancel_signal_stops_the_run() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let work_dir = PathBuf::from(temp_dir.path());
+        setup_test_db(&work_dir);
+
+        let tasks = vec![Task::new(
+            "sleeper".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "sleep 60".to_string(),
+        )];
+
+        let workspace = Workspace::new(work_dir).await?;
+        workspace.init().await?;
+        let scheduler = TaskScheduler::new(tasks, Arc::new(workspace), ExecutionContext::new(), 2, false).await?;
+        let cancel = scheduler.cancel_signal();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            cancel.cancel();
+        });
+
+        // The task sleeps for 60s; if cancellation did not work this times out.
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), scheduler.execute_all()).await?;
+        let err = outcome.expect_err("a cancelled run must not report success");
+        assert!(
+            format!("{err:#}").contains("cancelled"),
+            "the error must say the run was cancelled; got {err:#}"
+        );
+        Ok(())
+    }
+
+    /// Cancelling before the run starts stops it immediately: the flag is checked at
+    /// the top of the drain loop, not only in the `select!` arm.
+    #[tokio::test]
+    #[serial]
+    async fn test_cancel_before_start_is_not_lost() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let work_dir = PathBuf::from(temp_dir.path());
+        setup_test_db(&work_dir);
+
+        let workspace = Workspace::new(work_dir).await?;
+        workspace.init().await?;
+        let scheduler = TaskScheduler::new(
+            vec![plain_task("only", vec![])],
+            Arc::new(workspace),
+            ExecutionContext::new(),
+            2,
+            false,
+        )
+        .await?;
+        scheduler.cancel_signal().cancel();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), scheduler.execute_all()).await?;
+        assert!(outcome.is_err(), "a run cancelled before it started must not succeed");
+        Ok(())
     }
 
     fn plain_task(name: &str, deps: Vec<TaskEdge>) -> Task {
@@ -1744,26 +2101,48 @@ mod tests {
         let beta = &tasks[1];
 
         let empty = std::collections::HashSet::new();
+        let no_skips = SkippedSet::new();
         let one = |name: &str| std::collections::HashSet::from([name.to_string()]);
+        let skipped_as = |name: &str, kind: SkipKind| SkippedSet::from([(name.to_string(), kind)]);
 
         // Nothing terminal yet.
         assert!(matches!(
-            groups.classify(beta, &empty, &empty, &empty),
+            groups.classify(beta, &empty, &empty, &no_skips),
             EdgeState::Pending
         ));
-        // Completed, or up-to-date-skipped, both land in completed_set.
+        // Completed predecessor.
         assert!(matches!(
-            groups.classify(beta, &one("up:alpha"), &empty, &empty),
+            groups.classify(beta, &one("up:alpha"), &empty, &no_skips),
             EdgeState::Satisfied
         ));
         // Failed predecessor.
         assert!(matches!(
-            groups.classify(beta, &empty, &one("up:alpha"), &empty),
+            groups.classify(beta, &empty, &one("up:alpha"), &no_skips),
             EdgeState::Unreachable
+        ));
+        // An up-to-date predecessor is success-like and does not block its successor,
+        // even though it is terminal-Skipped.
+        assert!(matches!(
+            groups.classify(
+                beta,
+                &one("up:alpha"),
+                &empty,
+                &skipped_as("up:alpha", SkipKind::UpToDate)
+            ),
+            EdgeState::Satisfied
         ));
         // Skipped for any other reason, including an ordinary when: edge going unreachable.
         assert!(matches!(
-            groups.classify(beta, &empty, &empty, &one("up:alpha")),
+            groups.classify(beta, &empty, &empty, &skipped_as("up:alpha", SkipKind::Unreachable)),
+            EdgeState::Unreachable
+        ));
+        assert!(matches!(
+            groups.classify(
+                beta,
+                &empty,
+                &empty,
+                &skipped_as("up:alpha", SkipKind::SerialPredecessor)
+            ),
             EdgeState::Unreachable
         ));
         // A task with no group is never gated.
@@ -1778,7 +2157,7 @@ mod tests {
             "echo hi".to_string(),
         );
         assert!(matches!(
-            groups.classify(&plain, &empty, &empty, &empty),
+            groups.classify(&plain, &empty, &empty, &no_skips),
             EdgeState::Satisfied
         ));
     }
@@ -1793,39 +2172,132 @@ mod tests {
 
         let completed = std::collections::HashSet::from(["dep".to_string()]);
         let empty = std::collections::HashSet::new();
+        let no_skips = SkippedSet::new();
 
         // Dependency satisfied, ordering still pending -> not ready.
-        let states = classify_gates(&tasks[1], &groups, &completed, &empty, &empty);
+        let states = classify_gates(&tasks[1], &groups, &completed, &empty, &no_skips);
         assert_eq!(states.len(), 2);
         assert!(states.iter().any(|s| matches!(s, EdgeState::Pending)));
 
         // Both satisfied -> ready.
         let completed = std::collections::HashSet::from(["dep".to_string(), "up:alpha".to_string()]);
-        let states = classify_gates(&tasks[1], &groups, &completed, &empty, &empty);
+        let states = classify_gates(&tasks[1], &groups, &completed, &empty, &no_skips);
         assert!(states.iter().all(|s| matches!(s, EdgeState::Satisfied)));
     }
 
     #[test]
-    fn test_skip_reason_names_the_serial_predecessor() {
+    fn test_skip_record_names_the_serial_predecessor_and_carries_its_kind() {
         let tasks = vec![serial_member("up:alpha", "up", 0), serial_member("up:beta", "up", 1)];
         let groups = SerialGroups::new(&tasks);
         let empty = std::collections::HashSet::new();
+        let no_skips = SkippedSet::new();
 
         let failed = std::collections::HashSet::from(["up:alpha".to_string()]);
         assert_eq!(
-            skip_reason_for(&tasks[1], &groups, &empty, &failed, &empty),
-            "serial predecessor up:alpha failed"
+            skip_record_for(&tasks[1], &groups, &empty, &failed, &no_skips),
+            SkipRecord::new(
+                SkipKind::SerialPredecessor,
+                "serial predecessor up:alpha failed".to_string()
+            )
         );
 
-        let skipped = std::collections::HashSet::from(["up:alpha".to_string()]);
+        let skipped = SkippedSet::from([("up:alpha".to_string(), SkipKind::Unreachable)]);
         assert_eq!(
-            skip_reason_for(&tasks[1], &groups, &empty, &empty, &skipped),
-            "serial predecessor up:alpha skipped; cascade"
+            skip_record_for(&tasks[1], &groups, &empty, &empty, &skipped),
+            SkipRecord::new(
+                SkipKind::SerialPredecessor,
+                "serial predecessor up:alpha skipped; cascade".to_string()
+            )
         );
     }
 
+    /// An unreachable dependency edge is provenance `Unreachable`, not
+    /// `SerialPredecessor`: the kind names which gate fired.
+    #[test]
+    fn test_skip_record_for_an_unreachable_edge_is_kind_unreachable() {
+        let mut dependent = Task::new(
+            "dependent".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo hi".to_string(),
+        );
+        dependent.task_deps = vec![TaskEdge::success("src")];
+        let groups = SerialGroups::default();
+        let empty = std::collections::HashSet::new();
+        let failed = std::collections::HashSet::from(["src".to_string()]);
+
+        assert_eq!(
+            skip_record_for(&dependent, &groups, &empty, &failed, &SkippedSet::new()),
+            SkipRecord::new(
+                SkipKind::Unreachable,
+                "dep src failed; this task required when: success".to_string()
+            )
+        );
+    }
+
+    /// The `SkipKind` x `when:` contract, all nine cells, asserted explicitly rather
+    /// than left to whichever cells the other fixes happen to exercise.
+    ///
+    /// Both gates that read this contract are asserted against the same table:
+    /// `classify_edge` (the scheduler's admission gate) and the worker's dependency
+    /// double-check inside `execute_task`. They ran opposite policies before this
+    /// phase, and a disagreement aborts at spawn time a task the scheduler admitted.
+    #[test]
+    fn classify_edge_skip_provenance_matrix() {
+        use EdgeState::{Satisfied, Unreachable};
+
+        let cells = [
+            (SkipKind::UpToDate, When::Success, Satisfied),
+            (SkipKind::UpToDate, When::Failure, Unreachable),
+            (SkipKind::UpToDate, When::Always, Satisfied),
+            (SkipKind::SerialPredecessor, When::Success, Unreachable),
+            (SkipKind::SerialPredecessor, When::Failure, Unreachable),
+            (SkipKind::SerialPredecessor, When::Always, Satisfied),
+            (SkipKind::Unreachable, When::Success, Unreachable),
+            (SkipKind::Unreachable, When::Failure, Unreachable),
+            (SkipKind::Unreachable, When::Always, Satisfied),
+        ];
+        assert_eq!(cells.len(), 9, "the contract is a 3x3 table; every cell is asserted");
+
+        let completed = std::collections::HashSet::new();
+        let failed = std::collections::HashSet::new();
+
+        for (kind, when, expected) in cells {
+            let edge = TaskEdge::new("src".to_string(), when);
+            let skipped = SkippedSet::from([("src".to_string(), kind)]);
+
+            // Gate 1: the scheduler's edge classification.
+            assert_eq!(
+                classify_edge(&edge, &completed, &failed, &skipped),
+                expected,
+                "classify_edge: source skipped as {kind:?} against when: {when:?}"
+            );
+
+            // Gate 2: the worker's dependency double-check, which reads the kind off
+            // the source's TaskStatus rather than off the runtime sets.
+            let status = TaskStatus::Skipped(kind);
+            let double_check_satisfied = match (when, Some(&status)) {
+                (When::Success, Some(TaskStatus::Completed)) => true,
+                (When::Success, Some(TaskStatus::Skipped(k))) => k.is_success_like(),
+                (When::Failure, Some(TaskStatus::Failed(_))) => true,
+                (When::Always, Some(TaskStatus::Completed)) => true,
+                (When::Always, Some(TaskStatus::Skipped(_))) => true,
+                (When::Always, Some(TaskStatus::Failed(_))) => true,
+                _ => false,
+            };
+            assert_eq!(
+                double_check_satisfied,
+                expected == Satisfied,
+                "worker double-check disagrees with classify_edge: {kind:?} against when: {when:?}"
+            );
+        }
+    }
+
     #[tokio::test]
-    #[serial]
     #[serial]
     async fn test_task_execution() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -2618,8 +3090,8 @@ mod tests {
         let status = scheduler.get_task_status("skip_test").await;
         assert_eq!(
             status,
-            TaskStatus::Skipped,
-            "Task should be skipped when outputs are up to date"
+            TaskStatus::Skipped(SkipKind::UpToDate),
+            "Task should be skipped as up-to-date when outputs are current"
         );
 
         Ok(())
@@ -2856,7 +3328,7 @@ mod tests {
         let run_status = scheduler.get_task_status("run_task").await;
         let dep_status = scheduler.get_task_status("dependent_task").await;
 
-        assert_eq!(skip_status, TaskStatus::Skipped);
+        assert_eq!(skip_status, TaskStatus::Skipped(SkipKind::UpToDate));
         assert_eq!(run_status, TaskStatus::Completed);
         assert_eq!(dep_status, TaskStatus::Completed);
 

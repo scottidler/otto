@@ -8,6 +8,7 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 
 use otto::cfg::edge::When;
+use otto::executor::state::SkipKind;
 use otto::executor::task::TaskEdge;
 use otto::executor::{Task, TaskScheduler, TaskStatus, Workspace, workspace::ExecutionContext};
 
@@ -113,7 +114,7 @@ async fn test_when_success_dep_fails_dependent_skipped() -> Result<()> {
         TaskStatus::Failed(_) => {}
         other => panic!("expected dep Failed, got {:?}", other),
     }
-    assert_eq!(statuses["dependent"], TaskStatus::Skipped);
+    assert_eq!(statuses["dependent"], TaskStatus::Skipped(SkipKind::Unreachable));
     Ok(())
 }
 
@@ -152,7 +153,7 @@ async fn test_when_failure_dep_succeeds_dependent_skipped() -> Result<()> {
     timeout(Duration::from_secs(5), scheduler.execute_all()).await??;
     let statuses = scheduler.get_task_statuses().await;
     assert_eq!(statuses["dep"], TaskStatus::Completed);
-    assert_eq!(statuses["fixer"], TaskStatus::Skipped);
+    assert_eq!(statuses["fixer"], TaskStatus::Skipped(SkipKind::Unreachable));
     Ok(())
 }
 

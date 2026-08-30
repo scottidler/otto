@@ -14,6 +14,11 @@ use tokio::{
 
 use super::colors::colorize_task_prefix;
 
+/// Capacity of a task's output broadcast channel. Large because a chatty task can
+/// emit thousands of lines before a slow subscriber (the TUI) drains them, and a
+/// lagged broadcast subscriber loses messages rather than blocking the producer.
+const TASK_OUTPUT_CHANNEL_CAPACITY: usize = 10_000;
+
 /// Type of output stream
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OutputType {
@@ -164,8 +169,7 @@ impl TaskStreams {
         File::create(&stdout_file).await?;
         File::create(&stderr_file).await?;
 
-        // Larger buffer to handle tasks with lots of output without message loss
-        let (output_tx, _) = broadcast::channel(10000);
+        let (output_tx, _) = broadcast::channel(TASK_OUTPUT_CHANNEL_CAPACITY);
 
         Ok(Self {
             stdout_file,

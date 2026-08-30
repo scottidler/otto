@@ -14,6 +14,7 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 
 use otto::Parser;
+use otto::executor::state::SkipKind;
 use otto::executor::{Task, TaskScheduler, TaskStatus, Workspace, workspace::ExecutionContext};
 
 fn setup_test_env(temp_dir: &Path) {
@@ -217,12 +218,15 @@ tasks:
 /// Terminal-state matrix, failure arm: a failed predecessor skips the rest of the group
 /// with a visible reason, and the run still exits non-zero because of the failure.
 ///
-/// Parent aggregation is deliberately unchanged by this phase. The parent reaches
-/// Skipped, not Failed, because its `when: always` edge to a Skipped subtask is
-/// unreachable, so the aggregation override at the virtual-parent success arm never
-/// runs. That is identical to the behavior on main (verified at 10eb334) and the design
-/// doc's Phase 4 bullet says aggregation does not change; its criterion (c) wording
-/// "parent aggregates Failed" describes aggregation that never gets a chance to fire.
+/// INVERTED, deliberately, by Phase 2 of docs/design/2026-06-10-code-review-remediation.md.
+/// This test previously asserted `statuses["up"] == Skipped` and documented that
+/// aggregation "never gets a chance to fire": the parent's `when: always` edges to its
+/// Skipped subtasks short-circuited to Unreachable, so the parent was skipped before the
+/// aggregation override could run, and an `on-failure:` fixer attached to a serial group
+/// never fired. `when: always` is now satisfied by every terminal state including a skip,
+/// so the parent reaches aggregation and aggregates to Failed because a member failed.
+/// The same ottofile with `parallel: true` already behaved this way; serial and parallel
+/// foreach now agree.
 #[tokio::test]
 #[serial]
 async fn test_failed_predecessor_skips_remaining_group_members() -> Result<()> {
@@ -251,17 +255,21 @@ tasks:
 
     let statuses = scheduler.get_task_statuses().await;
     assert!(matches!(statuses["up:alpha"], TaskStatus::Failed(_)));
-    assert_eq!(statuses["up:beta"], TaskStatus::Skipped);
-    assert_eq!(statuses["up:gamma"], TaskStatus::Skipped);
-    assert_eq!(statuses["up"], TaskStatus::Skipped);
+    assert_eq!(statuses["up:beta"], TaskStatus::Skipped(SkipKind::SerialPredecessor));
+    assert_eq!(statuses["up:gamma"], TaskStatus::Skipped(SkipKind::SerialPredecessor));
+    assert!(
+        matches!(statuses["up"], TaskStatus::Failed(_)),
+        "the parent aggregates Failed when a member failed, serial exactly as parallel; got {:?}",
+        statuses["up"]
+    );
 
-    let reasons = scheduler.get_skip_reasons().await;
+    let records = scheduler.get_skip_records().await;
     assert_eq!(
-        reasons.get("up:beta").map(String::as_str),
+        records.get("up:beta").map(|r| r.detail.as_str()),
         Some("serial predecessor up:alpha failed")
     );
     assert_eq!(
-        reasons.get("up:gamma").map(String::as_str),
+        records.get("up:gamma").map(|r| r.detail.as_str()),
         Some("serial predecessor up:beta skipped; cascade")
     );
     Ok(())
@@ -312,17 +320,17 @@ tasks:
     for name in ["up:alpha", "up:beta", "up:gamma"] {
         assert_eq!(
             statuses[name],
-            TaskStatus::Skipped,
+            TaskStatus::Skipped(SkipKind::UpToDate),
             "{name} should be up-to-date skipped"
         );
     }
 
-    let reasons = scheduler.get_skip_reasons().await;
+    let records = scheduler.get_skip_records().await;
     for name in ["up:beta", "up:gamma"] {
         assert!(
-            !reasons.contains_key(name),
+            !records.contains_key(name),
             "{name} was gated out ({:?}) instead of being reached and found up to date",
-            reasons.get(name)
+            records.get(name)
         );
     }
     Ok(())
@@ -362,11 +370,11 @@ tasks:
 
     let statuses = scheduler.get_task_statuses().await;
     assert!(matches!(statuses["dep"], TaskStatus::Failed(_)));
-    let reasons = scheduler.get_skip_reasons().await;
+    let records = scheduler.get_skip_records().await;
     for name in ["up:alpha", "up:beta", "up:gamma", "up"] {
-        assert_eq!(statuses[name], TaskStatus::Skipped);
+        assert_eq!(statuses[name], TaskStatus::Skipped(SkipKind::Unreachable));
         assert!(
-            reasons.contains_key(name),
+            records.contains_key(name),
             "{name} must be skipped with a visible reason"
         );
     }
@@ -409,16 +417,16 @@ tasks:
 
     let statuses = scheduler.get_task_statuses().await;
     assert!(matches!(statuses["boom"], TaskStatus::Failed(_)));
-    assert_eq!(statuses["up:alpha"], TaskStatus::Skipped);
+    assert_eq!(statuses["up:alpha"], TaskStatus::Skipped(SkipKind::Unreachable));
 
-    let reasons = scheduler.get_skip_reasons().await;
+    let records = scheduler.get_skip_records().await;
     assert_eq!(
-        reasons.get("up:beta").map(String::as_str),
+        records.get("up:beta").map(|r| r.detail.as_str()),
         Some("serial predecessor up:alpha skipped; cascade"),
         "a predecessor skipped by an ordinary when: edge must cascade, not hang"
     );
     assert_eq!(
-        reasons.get("up:gamma").map(String::as_str),
+        records.get("up:gamma").map(|r| r.detail.as_str()),
         Some("serial predecessor up:beta skipped; cascade")
     );
     Ok(())

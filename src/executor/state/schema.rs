@@ -2,7 +2,7 @@ use eyre::Result;
 use rusqlite::Connection;
 
 /// SQL schema for the otto database
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Status of a run
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -61,6 +61,53 @@ impl TaskStatus {
             "skipped" => Some(TaskStatus::Skipped),
             _ => None,
         }
+    }
+}
+
+/// Why a task was skipped.
+///
+/// This is scheduling provenance, not decoration: `classify_edge` resolves a
+/// skipped dependency against the edge's `when:` using the kind, so the three
+/// variants are not interchangeable.
+///
+/// - `UpToDate` - the task's declared outputs were newer than its inputs, so it
+///   did not need to run. Success-like: it satisfies `when: success`.
+/// - `SerialPredecessor` - an earlier member of this task's serial foreach group
+///   failed or was skipped, so ordering can never release this member.
+/// - `Unreachable` - a dependency reached a terminal state that contradicts this
+///   task's `when:` condition.
+///
+/// `when: failure` is satisfied by none of them: it means the source task ran and
+/// its action exited non-zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+pub enum SkipKind {
+    UpToDate,
+    SerialPredecessor,
+    Unreachable,
+}
+
+impl SkipKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SkipKind::UpToDate => "up-to-date",
+            SkipKind::SerialPredecessor => "serial-predecessor",
+            SkipKind::Unreachable => "unreachable",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "up-to-date" => Some(SkipKind::UpToDate),
+            "serial-predecessor" => Some(SkipKind::SerialPredecessor),
+            "unreachable" => Some(SkipKind::Unreachable),
+            _ => None,
+        }
+    }
+
+    /// Whether a source skipped for this reason counts as a success for a
+    /// downstream `when: success` edge. Only an up-to-date skip does.
+    pub fn is_success_like(&self) -> bool {
+        matches!(self, SkipKind::UpToDate)
     }
 }
 
@@ -130,6 +177,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             stderr_path TEXT,
             script_path TEXT,
             skip_reason TEXT,
+            skip_kind TEXT,
             FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         )",
         [],
@@ -160,6 +208,20 @@ pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
         return Ok(());
     }
     conn.execute("ALTER TABLE tasks ADD COLUMN skip_reason TEXT", [])?;
+    Ok(())
+}
+
+/// Migrate from schema version 3 to 4
+///
+/// Adds `skip_kind` to the tasks table. v3's `skip_reason` is free text built for
+/// display ("dep a failed; this task required when: success"); `skip_kind` is the
+/// typed provenance the scheduler actually branches on, so history can be queried
+/// by reason class instead of by substring. Same idempotency guard as v2-to-v3.
+pub fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
+    if column_exists(conn, "tasks", "skip_kind")? {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE tasks ADD COLUMN skip_kind TEXT", [])?;
     Ok(())
 }
 

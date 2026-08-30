@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use super::db::DatabaseManager;
 use super::metadata::RunMetadata;
-use super::schema::{RunStatus, TaskStatus};
+use super::schema::{RunStatus, SkipKind, TaskStatus};
 use crate::ports::StateStore;
 
 /// State manager for recording and querying run/task state
@@ -45,10 +45,15 @@ pub struct TaskRecord {
     pub stdout_path: Option<PathBuf>,
     pub stderr_path: Option<PathBuf>,
     pub script_path: Option<PathBuf>,
-    /// Why this task was skipped, for skips caused by an unreachable
-    /// dependency edge or a serial-group cascade. `None` for every other status
-    /// and for an up-to-date skip, which is a success, not a gated-out task.
+    /// Human-readable detail naming the edge or ordering gate that skipped this
+    /// task, for skips caused by an unreachable dependency edge or a
+    /// serial-group cascade. `None` for every other status and for an
+    /// up-to-date skip, which is a success, not a gated-out task.
     pub skip_reason: Option<String>,
+    /// The typed provenance behind `skip_reason`. Same population rule; this is
+    /// the machine-readable half, so history can be filtered by reason class
+    /// instead of by substring.
+    pub skip_kind: Option<SkipKind>,
 }
 
 /// Overall system statistics
@@ -241,23 +246,29 @@ impl StateManager {
     }
 
     /// Record that a task was skipped, and why.
+    ///
+    /// `skip_kind` is the typed provenance the scheduler branched on and
+    /// `skip_reason` is the sentence it rendered for the operator; both come
+    /// from one `SkipRecord`, so they cannot disagree.
     pub fn record_task_skipped(
         &self,
         run_id: i64,
         task_name: &str,
         script_hash: Option<&str>,
         skip_reason: Option<&str>,
+        skip_kind: Option<SkipKind>,
     ) -> Result<i64> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO tasks (run_id, name, status, script_hash, skip_reason)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO tasks (run_id, name, status, script_hash, skip_reason, skip_kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     run_id,
                     task_name,
                     TaskStatus::Skipped.as_str(),
                     script_hash,
-                    skip_reason
+                    skip_reason,
+                    skip_kind.map(|k| k.as_str())
                 ],
             )?;
 
@@ -301,7 +312,7 @@ impl StateManager {
             let mut stmt = conn.prepare(
                 "SELECT id, run_id, name, status, script_hash, exit_code,
                         started_at, ended_at, duration_seconds,
-                        stdout_path, stderr_path, script_path, skip_reason
+                        stdout_path, stderr_path, script_path, skip_reason, skip_kind
                  FROM tasks
                  WHERE run_id = ?1
                  ORDER BY started_at ASC",
@@ -318,7 +329,7 @@ impl StateManager {
             let mut stmt = conn.prepare(
                 "SELECT id, run_id, name, status, script_hash, exit_code,
                         started_at, ended_at, duration_seconds,
-                        stdout_path, stderr_path, script_path, skip_reason
+                        stdout_path, stderr_path, script_path, skip_reason, skip_kind
                  FROM tasks
                  WHERE name = ?1
                  ORDER BY started_at DESC
@@ -375,6 +386,7 @@ impl StateManager {
             stderr_path: row.get::<_, Option<String>>(10)?.map(PathBuf::from),
             script_path: row.get::<_, Option<String>>(11)?.map(PathBuf::from),
             skip_reason: row.get(12)?,
+            skip_kind: row.get::<_, Option<String>>(13)?.as_deref().and_then(SkipKind::parse),
         })
     }
 
@@ -995,8 +1007,9 @@ impl StateStore for StateManager {
         task_name: &str,
         script_hash: Option<&str>,
         skip_reason: Option<&str>,
+        skip_kind: Option<SkipKind>,
     ) -> Result<i64> {
-        StateManager::record_task_skipped(self, run_id, task_name, script_hash, skip_reason)
+        StateManager::record_task_skipped(self, run_id, task_name, script_hash, skip_reason, skip_kind)
     }
 
     fn get_recent_runs(&self, limit: usize, project_filter: Option<&str>) -> Result<Vec<RunRecord>> {
@@ -1272,6 +1285,7 @@ mod tests {
             "test-task",
             Some("hash123"),
             Some("dep build failed; this task required when: success"),
+            Some(SkipKind::Unreachable),
         )?;
         assert!(task_id > 0);
 
@@ -1280,6 +1294,15 @@ mod tests {
         assert_eq!(tasks[0].name, "test-task");
         assert_eq!(tasks[0].status, TaskStatus::Skipped);
         assert_eq!(tasks[0].script_hash, Some("hash123".to_string()));
+        assert_eq!(
+            tasks[0].skip_reason.as_deref(),
+            Some("dep build failed; this task required when: success")
+        );
+        assert_eq!(
+            tasks[0].skip_kind,
+            Some(SkipKind::Unreachable),
+            "the typed kind round-trips through the tasks.skip_kind column"
+        );
 
         Ok(())
     }

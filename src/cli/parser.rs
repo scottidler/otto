@@ -19,6 +19,7 @@ use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
 
 use crate::cfg::config::{ConfigSpec, ParamSpec, TaskSpec, Value};
+use crate::cfg::edge::When;
 use crate::cfg::env as env_eval;
 use crate::cfg::param::ParamType;
 use crate::cfg::resolver::DynamicResolver;
@@ -1561,6 +1562,36 @@ impl Parser {
             }
         }
 
+        // Reject a task that holds both `when: success` and `when: failure` on the
+        // same source. One of the two can never be satisfied, whichever way the
+        // source ends, so the dependent is permanently skipped - and it used to be
+        // skipped silently, at exit 0. `when: always` is the way to express "either
+        // outcome". Names are sorted so the message is stable across HashMap order.
+        let mut conflicts: Vec<(String, String)> = Vec::new();
+        for (task_name, deps) in &task_deps {
+            for dep in deps {
+                if dep.when == When::Success
+                    && deps
+                        .iter()
+                        .any(|other| other.task == dep.task && other.when == When::Failure)
+                {
+                    conflicts.push((task_name.clone(), dep.task.clone()));
+                }
+            }
+        }
+        if !conflicts.is_empty() {
+            conflicts.sort();
+            let (task_name, dep_name) = &conflicts[0];
+            return Err(eyre!(
+                "Task '{}' depends on '{}' with both 'when: success' and 'when: failure'\n\
+                 Hint: those cannot both be satisfied, so '{}' could never run. Use 'when: always' \
+                 if it should run either way.",
+                task_name,
+                dep_name,
+                task_name
+            ));
+        }
+
         Ok(task_deps)
     }
 
@@ -1659,7 +1690,14 @@ impl Parser {
                 for (index, mut subtask) in subtasks.into_iter().enumerate() {
                     // Subtask inherits parent's original before dependencies
                     subtask.before = spec.before.clone();
+                    // Subtasks do not inherit the parent's downstream edges. `on-failure:`
+                    // is sugar for an `after:` edge and desugars *after* this expansion,
+                    // so it has to be cleared here too - otherwise every subtask grows its
+                    // own `when: failure` edge to the fixer, and the first subtask that
+                    // succeeds makes the fixer Unreachable. Only the parent, which
+                    // aggregates the group's outcome, triggers downstreams.
                     subtask.after = Vec::new();
+                    subtask.on_failure = Vec::new();
 
                     // Serial ordering is recorded as group membership, not as an edge.
                     if run_serial {
@@ -3950,6 +3988,80 @@ tasks:
         );
         assert!(!collected.contains("install"), "parent should NOT be collected");
         assert_eq!(collected.len(), 2);
+    }
+
+    fn edge_spec(task: &str, when: When) -> crate::cfg::edge::EdgeSpec {
+        crate::cfg::edge::EdgeSpec {
+            task: task.to_string(),
+            when,
+            from_sugar: false,
+            is_injected_sugar: false,
+        }
+    }
+
+    /// Paired `when: success` + `when: failure` on the same source can never both be
+    /// satisfied, so the dependent could never run. It used to be accepted and skipped
+    /// silently at exit 0; it is now rejected where dependencies are computed.
+    #[test]
+    fn test_paired_success_and_failure_edges_are_rejected() {
+        let mut task_specs = HashMap::new();
+        task_specs.insert(
+            "src".to_string(),
+            TaskSpec {
+                name: "src".to_string(),
+                action: "echo src".to_string(),
+                ..Default::default()
+            },
+        );
+        task_specs.insert(
+            "dep".to_string(),
+            TaskSpec {
+                name: "dep".to_string(),
+                action: "echo dep".to_string(),
+                before: vec![edge_spec("src", When::Success), edge_spec("src", When::Failure)],
+                ..Default::default()
+            },
+        );
+
+        let err = Parser::compute_task_deps_from_specs(&task_specs)
+            .expect_err("a dependent gated on both outcomes of one source must be rejected");
+        let message = format!("{err:#}");
+        assert!(message.contains("'dep'"), "must name the dependent: {message}");
+        assert!(message.contains("'src'"), "must name the source: {message}");
+        assert!(message.contains("when: always"), "must offer the fix: {message}");
+    }
+
+    /// The paired-edge check must not fire on the shapes that are legal: two edges to
+    /// different sources, or a `when: always` edge alongside a conditional one.
+    #[test]
+    fn test_distinct_sources_with_opposite_conditions_are_accepted() {
+        let mut task_specs = HashMap::new();
+        for name in ["one", "two"] {
+            task_specs.insert(
+                name.to_string(),
+                TaskSpec {
+                    name: name.to_string(),
+                    action: format!("echo {name}"),
+                    ..Default::default()
+                },
+            );
+        }
+        task_specs.insert(
+            "dep".to_string(),
+            TaskSpec {
+                name: "dep".to_string(),
+                action: "echo dep".to_string(),
+                before: vec![
+                    edge_spec("one", When::Success),
+                    edge_spec("two", When::Failure),
+                    edge_spec("one", When::Always),
+                ],
+                ..Default::default()
+            },
+        );
+
+        let deps = Parser::compute_task_deps_from_specs(&task_specs).expect("distinct sources are legal");
+        assert_eq!(deps["dep"].len(), 3);
     }
 
     #[test]

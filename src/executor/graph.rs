@@ -1,4 +1,5 @@
 use eyre::{Result, eyre};
+use log::debug;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::Path;
@@ -235,8 +236,16 @@ impl DagVisualizer {
             let current_index = daggy::NodeIndex::new(node_index);
 
             for dep in &task.task_deps {
-                if let Some(&dep_index) = task_indices.get(&dep.task) {
-                    edges_to_add.push((dep_index, current_index, task.name.clone()));
+                match task_indices.get(&dep.task) {
+                    Some(&dep_index) => edges_to_add.push((dep_index, current_index, task.name.clone())),
+                    // Legitimate: `collect_transitive_deps` can hand the scheduler a
+                    // task whose dep is outside the run set. Dropping the edge is
+                    // right; dropping it without a trace is what made a missing
+                    // dependency indistinguishable from a satisfied one.
+                    None => debug!(
+                        "Task {}: dependency {} is not in the task set; edge omitted from the DAG",
+                        task.name, dep.task
+                    ),
                 }
             }
         }
@@ -871,12 +880,7 @@ mod tests {
     }
 
     fn create_test_task(name: &str, deps: Vec<&str>) -> Task {
-        // Derive parent for subtasks (names with colons)
-        let parent = if name.contains(':') {
-            name.split(':').next().map(|s| s.to_string())
-        } else {
-            None
-        };
+        let parent = Task::derive_parent(name);
         Task::new(
             name.to_string(),
             parent,

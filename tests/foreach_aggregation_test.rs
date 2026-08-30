@@ -9,6 +9,7 @@ use tokio::time::timeout;
 
 use otto::Parser;
 use otto::cfg::edge::When;
+use otto::executor::state::SkipKind;
 use otto::executor::task::TaskEdge;
 use otto::executor::{Task, TaskScheduler, TaskStatus, Workspace, workspace::ExecutionContext};
 
@@ -254,11 +255,11 @@ tasks:
         TaskStatus::Failed(_) => {}
         other => panic!("expected preflight Failed, got {:?}", other),
     }
-    assert_eq!(statuses["install:a"], TaskStatus::Skipped);
-    assert_eq!(statuses["install:b"], TaskStatus::Skipped);
-    assert_eq!(statuses["install"], TaskStatus::Skipped);
+    assert_eq!(statuses["install:a"], TaskStatus::Skipped(SkipKind::Unreachable));
+    assert_eq!(statuses["install:b"], TaskStatus::Skipped(SkipKind::Unreachable));
+    assert_eq!(statuses["install"], TaskStatus::Skipped(SkipKind::Unreachable));
     // fixer's when: failure on install is Unreachable (install was Skipped, not Failed).
-    assert_eq!(statuses["fixer"], TaskStatus::Skipped);
+    assert_eq!(statuses["fixer"], TaskStatus::Skipped(SkipKind::Unreachable));
     Ok(())
 }
 

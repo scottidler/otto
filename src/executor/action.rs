@@ -349,31 +349,24 @@ otto_deserialize_input() {
         local prefix="OTTO_INPUT_${task_upper}_"
         local prefix_len=${#prefix}
 
-        # Also populate OTTO_INPUT array for backward compatibility
-        while IFS= read -r line; do
-            # Skip comments and empty lines
-            [[ "$line" =~ ^#.*$ ]] && continue
-            [[ -z "$line" ]] && continue
-
-            # Parse KEY='value' format using parameter expansion (locale-safe)
-            if [[ "$line" == *"='"*"'" ]]; then
-                local var_name="${line%%=*}"
-                local value="${line#*=\'}"
-                value="${value%\'}"
-
-                # Unescape single quotes
-                value="${value//\'\\\'\'/\'}"
-
-                # Check if variable starts with our expected prefix
-                if [[ "$var_name" == "${prefix}"* ]]; then
-                    # Extract key by stripping the prefix
-                    local key="${var_name:$prefix_len}"
-                    # Convert back to lowercase with underscores
-                    key=$(echo "$key" | tr '[:upper:]' '[:lower:]')
-                    OTTO_INPUT+=("${task_name}.${key}=${value}")
-                fi
-            fi
-        done < "$env_file"
+        # Also populate OTTO_INPUT array for backward compatibility.
+        #
+        # Read the values back out of the shell, not out of the file: the `source`
+        # above already parsed it, quotes, escapes, embedded newlines and all.
+        # Re-parsing the text here with a line-based loop was a second parser that
+        # disagreed with the first, and it silently dropped every value containing
+        # a newline - the record spans lines, so no single line matched KEY='value'.
+        local var_name key
+        while IFS= read -r var_name; do
+            case "$var_name" in
+                "${prefix}"*) ;;
+                *) continue ;;
+            esac
+            # Strip the prefix and convert back to lowercase with underscores
+            key="${var_name:$prefix_len}"
+            key=$(echo "$key" | tr '[:upper:]' '[:lower:]')
+            OTTO_INPUT+=("${task_name}.${key}=${!var_name}")
+        done < <(compgen -v)
     fi
 }
 

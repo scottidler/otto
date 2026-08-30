@@ -7,7 +7,7 @@ use eyre::Result;
 use std::path::PathBuf;
 
 use crate::executor::state::{
-    OverallStats, ProjectSummary, RunMetadata, RunRecord, RunStatus, TaskRecord, TaskStats, TaskStatus,
+    OverallStats, ProjectSummary, RunMetadata, RunRecord, RunStatus, SkipKind, TaskRecord, TaskStats, TaskStatus,
 };
 
 /// Abstraction for state storage operations
@@ -35,6 +35,7 @@ pub trait StateStore: Send + Sync {
         task_name: &str,
         script_hash: Option<&str>,
         skip_reason: Option<&str>,
+        skip_kind: Option<SkipKind>,
     ) -> Result<i64>;
 
     // Query methods
@@ -205,6 +206,7 @@ impl StateStore for MemoryStateStore {
             stderr_path: stderr_path.cloned(),
             script_path: script_path.cloned(),
             skip_reason: None,
+            skip_kind: None,
         };
 
         self.tasks.write().unwrap().push(task);
@@ -237,6 +239,7 @@ impl StateStore for MemoryStateStore {
         task_name: &str,
         script_hash: Option<&str>,
         skip_reason: Option<&str>,
+        skip_kind: Option<SkipKind>,
     ) -> Result<i64> {
         let task_id = self.next_task_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
@@ -254,6 +257,7 @@ impl StateStore for MemoryStateStore {
             stderr_path: None,
             script_path: None,
             skip_reason: skip_reason.map(String::from),
+            skip_kind,
         };
 
         self.tasks.write().unwrap().push(task);
@@ -583,7 +587,13 @@ mod tests {
         let run_id = store.record_run_start(&metadata).unwrap();
 
         let task_id = store
-            .record_task_skipped(run_id, "build", Some("hash123"), Some("dep fetch skipped; cascade"))
+            .record_task_skipped(
+                run_id,
+                "build",
+                Some("hash123"),
+                Some("dep fetch skipped; cascade"),
+                Some(SkipKind::Unreachable),
+            )
             .unwrap();
 
         assert!(task_id > 0);
@@ -591,6 +601,7 @@ mod tests {
         let tasks = store.get_run_tasks(run_id).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].status, TaskStatus::Skipped);
+        assert_eq!(tasks[0].skip_kind, Some(SkipKind::Unreachable));
     }
 
     #[test]

@@ -12,6 +12,11 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Capacity of the TUI's task-message broadcast channel. Sized for the scheduler's
+/// status traffic (start/finish/status-change per task), not for task output, which
+/// has its own per-task channel.
+const TUI_MESSAGE_CHANNEL_CAPACITY: usize = 1_000;
+
 // ============================================================================
 // Pure Functions - Parameter Extraction
 // ============================================================================
@@ -406,7 +411,8 @@ pub async fn execute_with_tui(
     let mut app = TuiApp::new();
 
     // Create message broadcast channel for status updates (larger buffer for fast tasks)
-    let (message_tx, _) = tokio::sync::broadcast::channel::<crate::executor::output::TaskMessage>(1000);
+    let (message_tx, _) =
+        tokio::sync::broadcast::channel::<crate::executor::output::TaskMessage>(TUI_MESSAGE_CHANNEL_CAPACITY);
 
     for task in &executor_tasks {
         if let Some(streams) = task_streams_map.get(&task.name) {
@@ -437,6 +443,9 @@ pub async fn execute_with_tui(
         app.layout_mut().render(f, f.area());
     })?;
 
+    // Taken before the scheduler moves into the spawned task: quitting the TUI has
+    // to be able to stop the run, not just stop watching it.
+    let cancel = scheduler.cancel_signal();
     let scheduler_handle = tokio::spawn(async move { scheduler.execute_all().await });
 
     let ctrl_c_pressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -460,6 +469,14 @@ pub async fn execute_with_tui(
 
     // Handle TUI errors
     tui_result.map_err(|e| eyre::eyre!("TUI error: {}", e))?;
+
+    // The dashboard is gone, so nothing is watching the run any more. Cancel it and
+    // say so. Before this, quitting left the user staring at a bare prompt while
+    // children they could no longer see ran to completion, with no way to stop them.
+    if !scheduler_handle.is_finished() {
+        eprintln!("otto: dashboard closed, cancelling the run...");
+        cancel.cancel();
+    }
 
     // Wait for scheduler to complete
     let result = match scheduler_handle.await {

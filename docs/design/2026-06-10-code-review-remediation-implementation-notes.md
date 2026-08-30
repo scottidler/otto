@@ -344,3 +344,161 @@ OTTO_HOME=/tmp/ottohome-final2 otto ci -> exit 0, [ci] ✅ All CI checks passed!
   Phase 2 introduces `SkipKind` as a typed provenance the scheduler can read.
   When it lands, the `skip_reason` column should probably carry the kind
   alongside the display text; this phase persists only the text.
+
+## Phase 2: Conditional-deps and foreach semantics
+
+### Design decisions
+
+- **`SkipKind` lives in `src/executor/state/schema.rs`, next to `RunStatus` and
+  the persistence `TaskStatus`**, with the same `as_str`/`parse` shape. It is
+  read by the scheduler *and* written to the database, and `src/ports/db.rs`
+  already imports its status types from `executor::state`, so putting it there
+  gives both consumers the type with no new coupling and no third parallel
+  enum.
+- **`TaskStatus::Skipped` carries the kind: `Skipped(SkipKind)`** —
+  `src/executor/scheduler.rs`. The doc's Architecture section asks for exactly
+  this, and it is what makes the two gates agree: the worker's dependency
+  double-check inside `execute_task` reads the source's status out of
+  `task_statuses`, not out of `skipped_set` (which is a local in `execute_all`).
+  Keeping the kind in a separate shared map would have put the provenance in
+  two places and let them drift, which is the defect this phase exists to close.
+- **`skipped_set` is `HashMap<String, SkipKind>` (`SkippedSet`); `completed_set`
+  and `failed_set` are unchanged**, per the doc: they are the only ones whose
+  members need a reason distinguished, because "ran and exited zero" and "ran
+  and exited non-zero" are each one thing.
+- **The up-to-date skip writes to both `completed_set` and `skipped_set`** —
+  `try_start_ready_task`. It is success-like, so it belongs in `completed_set`
+  as before; it is also terminal-Skipped, so the gates need its kind. Landing in
+  both keeps the "nothing ran" guard from Phase 1 correct: an entirely-cached
+  run still has a non-empty `completed_set`.
+- **`skip_reason_for` became `skip_record_for`, returning `SkipRecord { kind,
+  detail }`** — one function decides which gate fired, and the sentence is a
+  rendering of that decision rather than a second guess at the same question.
+  `skip_records` replaces `skip_reasons`, and `get_skip_records()` replaces
+  `get_skip_reasons()` so the typed half is reachable by its one production
+  caller (the run-record write) instead of being reconstructed.
+- **A virtual parent skipped by *aggregation* now records its own skip reason** —
+  the routing arm in `execute_all`. Inverting `classify_edge` moved the parent
+  from "skipped by a gate" (which went through `mark_skipped` and therefore had
+  a reason) to "skipped by aggregation" (which did not). Without this, a
+  foreach parent whose subtasks were all gated out would have gone from visible
+  to silent, and `tests/serial_foreach_test.rs`'s
+  `test_failing_dependency_skips_group_visibly_and_exits_non_zero` would have
+  failed for a real reason.
+- **`tasks.skip_kind` (schema v4) carries the typed kind alongside v3's
+  `skip_reason` free text** — `src/executor/state/schema.rs`,
+  `migrations.rs`, `manager.rs`, `ports/db.rs`. This resolves Phase 1's open
+  question. Both columns are written from one `SkipRecord`, so they cannot
+  disagree; the kind is what a query filters on, the reason is what an operator
+  reads. The step is written the way Phase 4 specifies: a `pragma_table_info`
+  guard makes `migrate_v3_to_v4` idempotent, and the ALTER plus its
+  `set_version` run in one `unchecked_transaction`. Three tests pin it,
+  including the crash-window case and a v2 database reaching v4 in one pass.
+- **`otto_deserialize_input`'s hand-rolled `.env` re-parse is gone** —
+  `src/executor/action.rs`. The generated bash sourced the file (bash's own
+  parser, which handles multiline quoted values correctly) and then re-parsed
+  the same text with a line-based loop to build the `OTTO_INPUT` array. Two
+  parsers, and the second one dropped every record containing a newline. The
+  loop now enumerates the already-sourced variables with `compgen -v` and reads
+  their values by indirect expansion, so there is one parser.
+- **`CancelSignal` is a flag plus a `Notify`** — `src/executor/scheduler.rs`.
+  The flag makes a cancel that arrives before anyone waits impossible to miss;
+  the notify wakes a drain loop parked on the report channel, which is the
+  common case (a long-running child is exactly the wait being cancelled). The
+  TUI quit path trips it (`src/app.rs`) and says so on stderr.
+- **`process_group(0)` is applied to every child except a `tty: true` task.** A
+  process in a background process group that reads from the terminal gets
+  SIGTTIN and stops, and owning the terminal is the entire point of `tty:
+  true`.
+
+### Deviations
+
+- **The phase touched six sites, not the five the doc enumerates.** The sixth is
+  `apply_on_failure_sugar`'s interaction with foreach expansion
+  (`src/cli/parser.rs`): `on-failure:` desugars *after* foreach expansion, and
+  subtasks inherited the parent's `on_failure` field, so each subtask grew its
+  own `when: failure` edge to the fixer and the first subtask to succeed made
+  the fixer Unreachable. The phase's own success criterion ("a serial foreach
+  with a mid-chain failure runs its `on-failure:` fixer") cannot pass otherwise.
+  Verified against the binary that this is pre-existing and orthogonal to the
+  aggregation fix: with `parallel: true`, which the doc says already ran the
+  fixer, the `on-failure:` form printed `[fixer] skipped (dep step:c succeeded;
+  this task required when: failure)`. The doc's reproduction line shows the
+  fixer's edge going to `step` (the parent), i.e. the `after:` form, which is
+  why the bullet did not name this. Fixed by clearing `subtask.on_failure`
+  where `subtask.after` is already cleared, under the comment that was already
+  there ("only the parent triggers downstreams").
+- **`tests/serial_foreach_test.rs:216-266` is inverted, as the doc directs.**
+  `statuses["up"]` now asserts `Failed(_)` rather than `Skipped`, and the
+  doc-comment explaining why aggregation "never gets a chance to fire" is
+  replaced by one explaining why it now does. This is the one deliberate
+  behavior change to a shipped test.
+- **`tests/foreach_aggregation_test.rs` changed shape but not meaning.** The doc
+  says it "stays as-is". Adding a payload to `TaskStatus::Skipped` makes
+  `assert_eq!(x, TaskStatus::Skipped)` fail to compile, so four assertions
+  became `TaskStatus::Skipped(SkipKind::Unreachable)` - a strictly stronger
+  assertion of the same fact. Nothing was inverted or removed: `:204` and `:260`
+  still pin "Skipped is not Failure", and both still pass. The same mechanical
+  update applies to `tests/conditional_deps_test.rs` (2),
+  `tests/on_failure_sugar_test.rs` (1), and the non-inverted assertions in
+  `tests/serial_foreach_test.rs`.
+- **Three call sites in `tests/serial_foreach_test.rs` outside the inverted test
+  moved from `get_skip_reasons()` to `get_skip_records()`**, because the
+  accessor was renamed rather than duplicated. Keeping a `get_skip_reasons()`
+  projection would have recreated Phase 1's actual defect: an accessor with no
+  production caller.
+- **The graph's silent edge-drop got a `debug!`, not a `debug_assert!`.** The
+  bullet says "silent edge-drop `debug_assert`". A dependency outside the run
+  set is legitimate here and the repo has a test saying so
+  (`test_validate_acyclic_ignores_dependencies_outside_the_task_set`), so a
+  `debug_assert!` would panic in dev builds on valid input. The edge is still
+  dropped, it is just no longer dropped without a trace.
+- **`env_to_json` parses quoted values rather than escaping newlines on write.**
+  The bullet offers both. Parsing was chosen because the writer is generated
+  bash (`otto_serialize_output`), and changing the on-disk `.env` escaping would
+  land in the generators Phase 3 owns, on both sides of a cross-language format
+  contract.
+
+### Tradeoffs
+
+- **`TaskStatus::Skipped(SkipKind)` vs. a separate shared provenance map.** The
+  payload costs mechanical churn in six test files. The separate map costs a
+  second source of truth read by a gate that the first gate cannot see, which
+  is the exact shape of the bug being fixed (two gates, opposite answers). The
+  churn was accepted.
+- **A v3-to-v4 migration inside Phase 2, vs. deferring `skip_kind` to Phase 4.**
+  Same tradeoff Phase 1 recorded and the same resolution: Phase 4 owns migration
+  integrity, so the new step is written the way Phase 4 will generalize
+  (pragma-guarded, step plus version bump in one transaction, crash-window
+  test). The v1-to-v2 step is still untouched; hardening it is Phase 4's bullet.
+- **Cancelling kills children rather than draining them.** Quitting the TUI now
+  ends the run instead of silently finishing it. That is what the bullet asks
+  for ("a cancel signal the drain loop honors, wired to the TUI quit path"), and
+  the alternative is the status quo the bullet calls out: the user stranded
+  waiting on work they can no longer see. It is announced on stderr rather than
+  done quietly.
+- **The paired-edge check runs over every task in the ottofile, not only the run
+  set.** A conflicting pair in a task nobody requested still fails the load.
+  Fail-closed was chosen over fail-late: the alternative is an ottofile that
+  works until someone runs the one task that was always impossible.
+- **`compgen -v` ties the input deserializer to bash.** The generated script
+  already declares `#!/bin/bash`, uses arrays and `set -euo pipefail`, so no
+  portability was on the table; the python generator has its own deserializer.
+
+### Open questions
+
+- **`when: always` on a source that never reached a terminal state is still
+  Pending, not Satisfied.** That is correct for a running task, and the
+  post-loop reconciliation marks anything still blocked as Skipped, so nothing
+  hangs. Worth confirming that a `when: always` cleanup attached to a task that
+  was never scheduled at all (not in the run set) should stay skipped rather
+  than run.
+- **The bash `otto_get_input` key is `<task>.<key>` lowercased, while
+  `otto_set_output` takes the key verbatim.** So a producer writing `MULTI` is
+  read back as `producer.multi`. That asymmetry is pre-existing and undocumented
+  in `docs/`; it cost a probe to discover. Not in this phase's scope, but it is
+  a documentation gap on the flagship data-passing feature.
+- **A cancelled run returns `Err`, so `otto` exits non-zero when the user quits
+  the TUI.** That reads right (the run did not complete), but it means quitting
+  a dashboard on a healthy run yields a non-zero exit. Confirm that is wanted
+  rather than a distinct exit code or a zero exit.

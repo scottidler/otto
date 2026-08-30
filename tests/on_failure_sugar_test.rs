@@ -7,6 +7,7 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 
 use otto::Parser;
+use otto::executor::state::SkipKind;
 use otto::executor::{Task, TaskScheduler, TaskStatus, Workspace, workspace::ExecutionContext};
 
 fn setup_test_db(temp_dir: &std::path::Path) -> PathBuf {
@@ -131,7 +132,7 @@ tasks:
 
     let statuses = scheduler.get_task_statuses().await;
     assert_eq!(statuses["fmt-check"], TaskStatus::Completed);
-    assert_eq!(statuses["fmt-fix"], TaskStatus::Skipped);
+    assert_eq!(statuses["fmt-fix"], TaskStatus::Skipped(SkipKind::Unreachable));
     Ok(())
 }
 
