@@ -60,3 +60,35 @@ otto --tasks
 
 A clean JSON task listing (rather than an `unknown field '...'` error) means
 the fix landed correctly.
+
+
+## Second wave: `otto.home` and `otto.verbosity` removed
+
+The remediation plan's Phase 10 resolved the inert `otto:` keys, per its
+mandate that each one be "either wired to real behavior or deleted from the
+schema" — accepted-and-ignored-but-documented being the worst of the three
+states. `jobs`, `name`, and `about` were wired. **`home` and `verbosity` were
+deleted**, having zero readers, zero writers, and zero committed usage;
+`home` also duplicated `$OTTO_HOME`, which is now the single knob for both the
+run tree and the database.
+
+**This is a breaking change for any ottofile that sets them**, because
+`deny_unknown_fields` turns an unrecognized `otto:` key into a config-load
+error rather than a silent no-op. Observed:
+
+```
+$ otto build          # ottofile with `otto: home: ~/.otto-custom`
+otto: unknown field `home`, expected one of `name`, `about`, `api`, `jobs`,
+`tasks`, `envs`, `retention` at line 3 column 3
+exit 1
+```
+
+**The fix is deletion, and it costs nothing.** Neither key has ever done
+anything: no code read either value in any released version, so removing the
+line cannot change how any task runs. This is the same shape as the
+`tasks.dev.timeout` case above — an already-inert key whose removal is purely
+cosmetic — not the `envs:` case, where moving the block changes behavior.
+
+If you were setting `home:` because you wanted otto's state somewhere else,
+that is what `OTTO_HOME` is for, and as of the state-integrity work it moves
+the run directories **and** the database together.
