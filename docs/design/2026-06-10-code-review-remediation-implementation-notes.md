@@ -60,17 +60,17 @@ one section per phase.
   `permissions: contents: read`; the caller job in `release-and-publish.yml`
   also sets `permissions: contents: read` explicitly rather than inheriting
   Release's `contents: write` / `packages: write`.
-- **Tatari fixtures replaced with generically-named synthetic equivalents.**
-  `makefiles/{auth-svc,devs,pre-commit-hooks,media-planning-service}/`
+- **Internal service fixtures replaced with generically-named synthetic equivalents.**
+  `makefiles/{four internal service directories}/`
   (Makefile + otto.yml each) were deleted and replaced with
   `makefiles/{python-poetry-service,go-build-project,python-pre-commit,
   docker-compose-service}/`, each carrying the same converter-relevant shape
   (poetry/pytest/mypy, `$(shell find ...)` + `$(shell git describe ...)` Go
   build flags, `$(shell cat ~/.config/...)` nested shell substitution, Docker
-  Compose + AWS S3 shell commands) but with every Tatari-specific name
+  Compose + AWS S3 shell commands) but with every internal-specific name
   (service names, S3 bucket names, Python package names) replaced by generic
   `example-*` equivalents. `docs/list-of-all-makefiles` (6964 lines of
-  absolute developer paths under `tatari-tv/`) was deleted outright with no
+  absolute developer paths under a private org) was deleted outright with no
   replacement — nothing referenced it outside this design doc.
   `tests/makefile_converter_test.rs` and `tests/examples_integration_test.rs`
   were repointed and their test/assertion names updated to match.
@@ -91,10 +91,10 @@ one section per phase.
 - **`ls makefiles/` success criterion verified more strongly than the bullet
   literally required.** The bullet's fix targets Makefile *content*
   (`cargo clippy` invocation, service Makefiles) but the doc's own success
-  criteria line also requires "`ls makefiles/` contains no Tatari service
+  criteria line also requires "`ls makefiles/` contains no internal service
   name" — that requires renaming the *directories*, not just gutting their
-  contents, since the directory names themselves (`auth-svc`,
-  `media-planning-service`) are the real, disclosed service names. Both the
+  contents, since the directory names themselves were the real, disclosed
+  service names. Both the
   Makefile and its companion `otto.yml` (which encoded Tatari-specific
   business logic: S3 bucket names, service names, poetry package names) were
   replaced, not just the Makefile.

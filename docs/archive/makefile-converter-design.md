@@ -311,7 +311,7 @@ impl ConvertCommand {
 
 > **What actually shipped (2026-08-30), replacing this section's original
 > plan wholesale:** the directory structure, per-fixture `.yml` files, and
-> `test_tatari_tv_makefiles` sketched below were never built; `tests/fixtures/`
+> `test_private_org_makefiles` sketched below were never built; `tests/fixtures/`
 > does not exist. The real suite is `tests/makefile_converter_test.rs`,
 > against fixtures at `makefiles/<name>/Makefile` (repo-root, not under
 > `tests/`), each with a committed `expected.yml` compared as a `ConfigSpec`
