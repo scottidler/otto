@@ -162,20 +162,53 @@ fn a_builtin_routes_from_behind_a_global_flag() {
     cmd.assert().success().stdout(predicate::str::contains("bash: echo hi"));
 }
 
+/// A builtin reaches the dispatch on the TUI path, not just the terminal one.
+///
+/// This test used to use `Convert` under `assert_cmd`, and pinned neither half
+/// of what it claimed. `main.rs` intercepts `Convert` before `app.rs` is ever
+/// reached, and `assert_cmd` gives the child no pty, so `--tui` falls back to
+/// the terminal path at the `is_terminal()` check. Deleting the TUI-path
+/// dispatch entirely left it green.
+///
+/// Two changes make it real. `Graph` is the only builtin that actually reaches
+/// the TUI dispatch, and the command runs under `script`, which allocates a
+/// pty, so `--tui` is honored instead of diverted.
 #[test]
 fn a_builtin_routes_from_behind_the_tui_flag() {
-    // The TUI path dispatches the same builtin table as the terminal path, so
-    // this converts rather than printing "No tasks to execute".
     let temp = fixture();
-    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
-    cmd.current_dir(temp.path())
-        .args(["--tui", "Convert"])
-        .write_stdin("all:\n\techo hi\n");
+    let home = temp.path().join("otto-home");
+    let ottofile = temp.path().join("otto.yml");
+    write(
+        &ottofile,
+        "otto:\n  api: 1\n  tasks: [build]\ntasks:\n  build:\n    bash: echo built\n",
+    );
 
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("bash: echo hi"))
-        .stdout(predicate::str::contains("No tasks to execute").not());
+    let mut cmd = std::process::Command::new("script");
+    cmd.args([
+        "-q",
+        "-e",
+        "-c",
+        &format!("{} -o {} --tui Graph", common::OTTO_BIN, ottofile.display()),
+        "/dev/null",
+    ]);
+    let output = common::isolate(&mut cmd, &home)
+        .current_dir(temp.path())
+        .output()
+        .expect("script should run otto under a pty");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Otto Task DAG"),
+        "Graph must dispatch on the TUI path, not be swallowed by it; got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("No tasks to execute"),
+        "the exact regression this pins: {stdout}"
+    );
+    assert!(
+        !stdout.contains("--tui requires a TTY"),
+        "the pty must be real, or this test is exercising the terminal path again: {stdout}"
+    );
 }
 
 #[test]

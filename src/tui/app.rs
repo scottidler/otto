@@ -21,7 +21,6 @@ pub struct TuiApp {
     tick_rate: Duration,
     fullscreen_mode: bool,
     shutdown_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    cancel_requested: bool,
 }
 
 impl Default for TuiApp {
@@ -39,14 +38,7 @@ impl TuiApp {
             tick_rate: Duration::from_millis(TUI_TICK_RATE_MS),
             fullscreen_mode: false,
             shutdown_flag: None,
-            cancel_requested: false,
         }
-    }
-
-    /// True when the user asked for the run to stop, not just for the
-    /// dashboard to close (Ctrl+C, or a Ctrl+C delivered as a signal).
-    pub fn cancel_requested(&self) -> bool {
-        self.cancel_requested
     }
 
     /// Names of the tasks still running when the dashboard closed.
@@ -110,7 +102,6 @@ impl TuiApp {
                 && flag.load(std::sync::atomic::Ordering::SeqCst)
             {
                 self.should_quit = true;
-                self.cancel_requested = true;
             }
 
             if self.should_quit {
@@ -170,10 +161,18 @@ impl TuiApp {
         // kernel never turns it into SIGINT either).
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
-            self.cancel_requested = true;
             return;
         }
 
+        // `q`, Esc and Ctrl+C all do the same thing, and that is deliberate.
+        // There used to be a `cancel_requested` flag distinguishing "stop the
+        // run" from "stop watching it", with two tests asserting the
+        // difference - but no production code ever read it: `execute_with_tui`
+        // (`app.rs`) cancels unconditionally once the dashboard closes,
+        // because nothing is watching the run any more and leaving invisible
+        // children running is the bug that change fixed. The flag asserted a
+        // distinction production does not make, so it is gone rather than
+        // left to imply one.
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.should_quit = true;
