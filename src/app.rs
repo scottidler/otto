@@ -713,19 +713,22 @@ pub async fn execute_upgrade_from_task(task: &Task) -> Result<(), Report> {
 
     let params = extract_upgrade_params(&task.values);
 
-    let upgrade_cmd = UpgradeCommand {
-        dry_run: params.dry_run,
-        version: params.version,
-        list_versions: params.list_versions,
-        rollback: params.rollback,
-        force: params.force,
-        no_backup: params.no_backup,
-        backup_dir: None,
-        // `#[arg(env = "GITHUB_TOKEN")]` only fires when clap parses the args;
-        // constructing the command directly has to read the env itself, or the
-        // task route silently loses the token and rate-limits.
-        github_token: env::var("GITHUB_TOKEN").ok(),
-    };
+    // Field-by-field on a default, not a struct literal: `releases_url` and
+    // `install_target` are private to cli/commands/upgrade.rs so that nothing
+    // outside it - including this task route - can redirect where otto downloads
+    // and installs a binary from.
+    let mut upgrade_cmd = UpgradeCommand::default();
+    upgrade_cmd.dry_run = params.dry_run;
+    upgrade_cmd.version = params.version;
+    upgrade_cmd.list_versions = params.list_versions;
+    upgrade_cmd.rollback = params.rollback;
+    upgrade_cmd.force = params.force;
+    upgrade_cmd.no_backup = params.no_backup;
+    // `#[arg(env = "GITHUB_TOKEN")]` only fires when clap parses the args;
+    // constructing the command directly has to read the env itself, or the
+    // task route silently loses the token and rate-limits.
+    upgrade_cmd.github_token = env::var("GITHUB_TOKEN").ok();
+
     upgrade_cmd.execute().await?;
 
     Ok(())

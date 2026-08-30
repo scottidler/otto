@@ -116,6 +116,8 @@ fn command() -> UpgradeCommand {
         no_backup: false,
         backup_dir: None,
         github_token: None,
+        releases_url: None,
+        install_target: None,
     }
 }
 
@@ -500,6 +502,8 @@ fn test_backup_dir_default() {
         no_backup: false,
         backup_dir: None,
         github_token: None,
+        releases_url: None,
+        install_target: None,
     };
 
     let backup_dir = cmd.get_backup_dir().unwrap();
@@ -518,6 +522,8 @@ fn test_backup_dir_custom() {
         no_backup: false,
         backup_dir: Some(custom_path.clone()),
         github_token: None,
+        releases_url: None,
+        install_target: None,
     };
 
     let backup_dir = cmd.get_backup_dir().unwrap();
@@ -609,4 +615,171 @@ async fn fetch_releases_rejects_a_json_object_where_an_array_was_expected() {
         .expect_err("a JSON object where an array was expected must be an error, not a panic");
 
     assert!(!err.to_string().is_empty());
+}
+
+/// Build the releases JSON GitHub would return for one published version.
+fn releases_json(version: &str, platform: &str, download_base: &str) -> Vec<u8> {
+    format!(
+        r#"[{{"tag_name":"v{version}","name":"v{version}","published_at":"2026-01-01T00:00:00Z",
+            "assets":[{{"name":"otto-v{version}-{platform}.tar.gz",
+                        "browser_download_url":"{download_base}/otto.tar.gz"}}]}}]"#
+    )
+    .into_bytes()
+}
+
+/// Two stubs, because the asset URL inside the releases JSON is absolute and the
+/// stub's port is not known until it is bound: one host serves the archive and
+/// its checksum, the other serves the release metadata pointing at the first.
+/// `digest_override` replaces the published checksum, for the mismatch case.
+fn spawn_fixture_release(scratch: &Path, version: &str, digest_override: Option<String>) -> String {
+    let platform = PlatformInfo::detect().expect("detect platform").platform_str;
+    let tarball = fixture_tarball(scratch, version);
+    let digest = digest_override.unwrap_or_else(|| sha256_hex(&tarball));
+
+    let mut download_routes = HashMap::new();
+    download_routes.insert("/otto.tar.gz".to_string(), Route::Body(tarball));
+    download_routes.insert(
+        "/otto.tar.gz.sha256".to_string(),
+        Route::Body(format!("{digest}  otto.tar.gz\n").into_bytes()),
+    );
+    let download_base = spawn_stub(download_routes);
+
+    let mut meta_routes = HashMap::new();
+    meta_routes.insert(
+        "/releases".to_string(),
+        Route::Body(releases_json(version, &platform, &download_base)),
+    );
+    let meta_base = spawn_stub(meta_routes);
+
+    format!("{meta_base}/releases")
+}
+
+/// Write a stand-in "installed otto" that reports `version`.
+fn installed_binary(dir: &Path, version: &str) -> PathBuf {
+    let target = dir.join("bin").join("otto");
+    fs::create_dir_all(target.parent().expect("bin parent")).expect("create bin dir");
+    fs::write(&target, format!("#!/bin/sh\necho \"otto {version}\"\n")).expect("write installed binary");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).expect("chmod installed binary");
+    target
+}
+
+/// `UpgradeCommand::execute()` itself installs a fixture release.
+///
+/// The phase's success criterion is "`otto Upgrade` completes an install
+/// end-to-end against a fixture release". The test that claimed it hand-composed
+/// `download_and_verify` + `install_from_archive`, skipping `current_version`,
+/// the already-on-target and downgrade short-circuits, `find_asset` and
+/// `create_backup` - it asserted its own transcription of the command body
+/// rather than the command. Found by the batched audit, batch 6 of 14.
+#[tokio::test]
+async fn execute_installs_a_fixture_release_end_to_end() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let releases_url = spawn_fixture_release(scratch.path(), "9.9.9", None);
+    let target = installed_binary(scratch.path(), "0.0.1");
+    assert_eq!(run_version(&target), "otto 0.0.1");
+
+    command()
+        .with_fixture(releases_url, &target)
+        .tap_no_backup()
+        .execute()
+        .await
+        .expect("execute() must complete the install");
+
+    assert_eq!(
+        run_version(&target),
+        "otto 9.9.9",
+        "execute() must have replaced the installed binary"
+    );
+
+    let leftovers: Vec<String> = fs::read_dir(target.parent().expect("bin parent"))
+        .expect("read bin dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n != "otto")
+        .collect();
+    assert!(leftovers.is_empty(), "staging debris left behind: {leftovers:?}");
+}
+
+/// `execute()` refuses to install a release whose checksum does not match, and
+/// leaves the installed binary untouched.
+#[tokio::test]
+async fn execute_aborts_on_a_checksum_mismatch_without_touching_the_binary() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    // Well-formed digest, wrong tarball.
+    let releases_url = spawn_fixture_release(scratch.path(), "9.9.9", Some("a".repeat(64)));
+    let target = installed_binary(scratch.path(), "0.0.1");
+
+    let err = command()
+        .with_fixture(releases_url, &target)
+        .tap_no_backup()
+        .execute()
+        .await
+        .expect_err("a checksum mismatch must abort");
+
+    assert!(
+        err.to_string().contains("Checksum mismatch"),
+        "the error must name the mismatch, got: {err}"
+    );
+    assert_eq!(
+        run_version(&target),
+        "otto 0.0.1",
+        "the installed binary must survive a checksum mismatch"
+    );
+}
+
+/// `execute()` with `--rollback` restores the previous binary.
+///
+/// The doc's rollback criterion says rollback "is asserted, not assumed" because
+/// this phase changes rollback behavior. The test that claimed it hand-copied
+/// `execute_rollback`'s three steps, so a reorder that rolled back onto itself
+/// would not have turned it red. Found by the batched audit, batch 6 of 14.
+#[tokio::test]
+async fn execute_rollback_restores_the_previous_binary_end_to_end() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let target = installed_binary(scratch.path(), "9.9.9");
+
+    // A backup of the version we want back.
+    let backup_dir = scratch.path().join("backups");
+    fs::create_dir_all(&backup_dir).expect("create backup dir");
+    let backup = backup_dir.join("otto-0.0.1-1700000000.backup");
+    fs::write(&backup, "#!/bin/sh\necho \"otto 0.0.1\"\n").expect("write backup");
+    fs::set_permissions(&backup, fs::Permissions::from_mode(0o755)).expect("chmod backup");
+
+    assert_eq!(run_version(&target), "otto 9.9.9");
+
+    let mut cmd = command()
+        .with_fixture("http://127.0.0.1:1/unused", &target)
+        .tap_no_backup();
+    cmd.rollback = true;
+    cmd.backup_dir = Some(backup_dir);
+    cmd.execute().await.expect("rollback must succeed");
+
+    assert_eq!(
+        run_version(&target),
+        "otto 0.0.1",
+        "execute(--rollback) must restore the backed-up binary"
+    );
+}
+
+/// Rolling back with no backups present must fail loudly and leave the binary
+/// alone, rather than reporting success having done nothing.
+#[tokio::test]
+async fn execute_rollback_with_no_backups_fails_and_leaves_the_binary() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let target = installed_binary(scratch.path(), "9.9.9");
+    let backup_dir = scratch.path().join("backups");
+    fs::create_dir_all(&backup_dir).expect("create backup dir");
+
+    let mut cmd = command()
+        .with_fixture("http://127.0.0.1:1/unused", &target)
+        .tap_no_backup();
+    cmd.rollback = true;
+    cmd.backup_dir = Some(backup_dir);
+    let err = cmd.execute().await.expect_err("rollback with no backups must fail");
+
+    assert!(
+        err.to_string().contains("No backups found"),
+        "the error must say there is nothing to roll back to, got: {err}"
+    );
+    assert_eq!(run_version(&target), "otto 9.9.9", "the binary must be untouched");
 }

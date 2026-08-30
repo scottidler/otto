@@ -168,7 +168,7 @@ fn install_binary(source: &Path, target: &Path) -> Result<()> {
 }
 
 /// Upgrade Otto to a newer version
-#[derive(Debug, clap::Parser)]
+#[derive(Debug, Default, clap::Parser)]
 #[command(name = "Upgrade")]
 pub struct UpgradeCommand {
     /// Show what would be done without doing it
@@ -202,6 +202,23 @@ pub struct UpgradeCommand {
     /// GitHub token for API access (avoids rate limits)
     #[arg(long, env = "GITHUB_TOKEN")]
     pub github_token: Option<String>,
+
+    /// Where to look for releases. `None` means [`RELEASES_URL`].
+    ///
+    /// `#[arg(skip)]` and no `env =` on purpose, and it must stay that way: a
+    /// user-settable releases URL turns `otto Upgrade` into "download and
+    /// execute a binary from wherever this string points". The only writer is
+    /// [`UpgradeCommand::with_releases_url`], which is `#[cfg(test)]`.
+    #[arg(skip)]
+    releases_url: Option<String>,
+
+    /// Which file to replace. `None` means `env::current_exe()`.
+    ///
+    /// Same rule as above, plus a practical one: a test that drove the real
+    /// `execute_upgrade` without this would overwrite the test binary that is
+    /// running it.
+    #[arg(skip)]
+    install_target: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -258,6 +275,41 @@ struct BackupInfo {
 }
 
 impl UpgradeCommand {
+    /// The releases endpoint this invocation should use.
+    fn releases_url(&self) -> &str {
+        self.releases_url.as_deref().unwrap_or(RELEASES_URL)
+    }
+
+    /// The binary this invocation should replace.
+    fn install_target(&self) -> Result<PathBuf> {
+        match &self.install_target {
+            Some(path) => Ok(path.clone()),
+            None => Ok(env::current_exe()?),
+        }
+    }
+
+    /// Point this command at a fixture release server and a scratch binary.
+    ///
+    /// Test-only, so that `execute()` itself can be driven end to end. Without
+    /// it the only reachable path was to hand-compose `download_and_verify` plus
+    /// `install_from_archive` in the test, which skipped `current_version`, the
+    /// already-on-target and downgrade short-circuits, `find_asset` and
+    /// `create_backup` - the test asserted its own transcription of the command
+    /// body rather than the command.
+    /// Skip the backup step, so a fixture test asserts on the install alone.
+    #[cfg(test)]
+    fn tap_no_backup(mut self) -> Self {
+        self.no_backup = true;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_fixture(mut self, releases_url: impl Into<String>, install_target: impl Into<PathBuf>) -> Self {
+        self.releases_url = Some(releases_url.into());
+        self.install_target = Some(install_target.into());
+        self
+    }
+
     pub async fn execute(&self) -> Result<()> {
         if self.rollback {
             return self.execute_rollback().await;
@@ -283,7 +335,7 @@ impl UpgradeCommand {
 
         // 3. Fetch releases (one client, reused for metadata and download)
         let client = build_http_client(CONNECT_TIMEOUT, READ_TIMEOUT)?;
-        let releases = self.fetch_releases(&client, RELEASES_URL).await?;
+        let releases = self.fetch_releases(&client, self.releases_url()).await?;
 
         // 4. Determine target version
         let target_version = if let Some(ref v) = self.version {
@@ -338,7 +390,7 @@ impl UpgradeCommand {
         println!("Download complete!");
 
         // 7. Create backup
-        let current_exe = env::current_exe()?;
+        let current_exe = self.install_target()?;
         if !self.no_backup {
             let backup_path = self.create_backup(&current_exe)?;
             println!("Backup created: {}", backup_path.display());
@@ -376,7 +428,7 @@ impl UpgradeCommand {
         }
 
         // Create backup of current version first
-        let current_exe = env::current_exe()?;
+        let current_exe = self.install_target()?;
         if !self.no_backup {
             let backup_path = self.create_backup(&current_exe)?;
             println!("Safety backup created: {}", backup_path.display());
@@ -397,7 +449,7 @@ impl UpgradeCommand {
         println!("Fetching available versions...");
 
         let client = build_http_client(CONNECT_TIMEOUT, READ_TIMEOUT)?;
-        let releases = self.fetch_releases(&client, RELEASES_URL).await?;
+        let releases = self.fetch_releases(&client, self.releases_url()).await?;
 
         println!("\nAvailable versions:");
         for (i, release) in releases.iter().enumerate() {
@@ -428,7 +480,7 @@ impl UpgradeCommand {
         println!("  3. Extract new binary from archive");
         println!("  4. Verify new binary works");
 
-        let current_exe = env::current_exe()?;
+        let current_exe = self.install_target()?;
         println!("  5. Replace {}", current_exe.display());
 
         println!("\nRun without --dry-run to perform upgrade.");
