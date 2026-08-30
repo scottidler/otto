@@ -162,6 +162,74 @@ ignored, key.
 Phase 6): both parsed and serialized but had zero readers outside
 `cfg/param.rs` itself.
 
+## Variable interpolation in `envs`, `input`, and `output`
+
+Otto expands variable references in these values *before* the shell ever sees
+them. Three forms are recognised, in one left-to-right pass, and substituted
+text is never rescanned:
+
+| Form | Meaning |
+|---|---|
+| `${NAME}` | The value of `NAME`, from `tasks.<name>.envs` layered over `otto.envs`. Braces are required when the next character could continue the name. |
+| `$NAME` | The same, where `NAME` runs to the first character that is not a letter, digit, or `_`. |
+| `$$` | **A literal `$`.** Consumed by otto, emitted as one dollar sign. |
+
+An unresolved `${NAME}` is an error naming the variable, not an empty string:
+
+```
+Environment variable 'NAME' not found
+```
+
+### `$$`: putting a literal dollar sign in a value
+
+`$$` is the only way to get a `$` through to the shell without otto trying to
+resolve it first. Without it, there is no way to write a value containing a
+dollar sign that bash will not then read as a variable or as its own PID.
+
+```yaml
+otto:
+  api: 1
+  envs:
+    PRICE: "$$4.99"          # the task sees the five characters $4.99
+    AWK_FIRST_FIELD: "$$1"   # the task sees $1, not the value of $1
+tasks:
+  show:
+    action: |
+      echo "$PRICE"
+```
+
+**`action:` bodies are not interpolated by otto.** They are handed to the shell
+verbatim, so a `$` there means whatever bash says it means, and `$$` inside an
+action is bash's own PID. Write `awk '{print $1}'`, not `awk '{print $$1}'`, in
+an action: the doubled form reaches awk as `$$1` and prints the wrong field.
+`$$` is for `envs`, `input`, and `output` values only.
+
+Two more consequences worth knowing:
+
+- **`$$` wins over the other forms.** `$${VAR}` is a literal `$` followed by
+  the four characters `{VAR}`; it does *not* expand `VAR`. Likewise `$$(echo hi)`
+  is a literal `$` followed by `(echo hi)` as text, not a command substitution.
+- **An unterminated `${` is literal text.** `"${"` passes through as `${`
+  rather than erroring.
+
+### Command substitution, and `${VAR:-default}`
+
+Otto does not implement shell parameter expansion. `${MYVAR:-fallback}` is read
+as a *variable named* `MYVAR:-fallback` and fails:
+
+```
+Failed to evaluate global environment variables: Failed to resolve environment
+variable 'G': Environment variable 'MYVAR:-fallback' not found
+```
+
+To use a shell default, defer it to the shell with a command substitution,
+which otto passes through:
+
+```yaml
+    envs:
+      GREETING: "$(echo \"${MYVAR:-fallback}\")"
+```
+
 ## Free-form key sites (do NOT expect `deny_unknown_fields` here)
 
 `deny_unknown_fields` governs a struct's own declared field names; it never
