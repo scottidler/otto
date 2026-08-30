@@ -347,11 +347,18 @@ impl MakefileParser {
         // `help: ## Help me.` is the self-documenting-makefile convention, and
         // `#` starts a comment on any non-recipe line anyway: the old parser
         // read `## Help me.` as three dependencies.
-        let help = comment.or_else(|| {
-            inline_comment
-                .map(|c| c.trim_start_matches('#').trim().to_string())
-                .filter(|c| !c.is_empty())
-        });
+        //
+        // The rule's own inline `##` wins over a preceding `#` banner. It used
+        // to be the other way round, which meant a section banner two lines up
+        // was adopted as the help text for every rule under it: `makefile-example`
+        // converted `help` to "HELP", `build-linux` to "Cross compilation" and
+        // `dep` to "helpers" instead of each rule's own doc string. The banner
+        // describes the section; the `##` describes the target, and the comment
+        // directly above names `##` as the convention this parser honors.
+        let help = inline_comment
+            .map(|c| c.trim_start_matches('#').trim().to_string())
+            .filter(|c| !c.is_empty())
+            .or(comment);
 
         Ok(Some(
             names

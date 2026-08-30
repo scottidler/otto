@@ -157,6 +157,27 @@ impl OttoConverter {
                     ),
                 );
             }
+            // `is_phony` is set from `.PHONY` and, until now, read by nobody:
+            // `TaskSpec` has no phony field, so the converter dropped it. It
+            // does carry information, though, and losing it is the same silent
+            // class as `?=`. A target that is NOT phony and whose name looks
+            // like a path is a make *file rule*: make skips its recipe when the
+            // file is newer than its prerequisites, and otto has no equivalent
+            // check on a converted task, so it runs every time. A phony target,
+            // or one whose name is a plain word, has no such divergence -
+            // hence the path shape, not "everything outside `.PHONY`", which
+            // would warn on every ordinary target an author simply never
+            // listed.
+            if !target.is_phony && looks_like_a_file_path(&target.name) {
+                self.warn(
+                    target.line,
+                    format!(
+                        "`{}` is a file target, not `.PHONY`; make skips its recipe when the file is up to date and otto always runs it",
+                        target.name
+                    ),
+                );
+            }
+
             let task = self.convert_target_to_task(&target);
             tasks.insert(target.name.clone(), task);
         }
@@ -418,3 +439,21 @@ fn is_shell_identifier(name: &str) -> bool {
 
 #[path = "converter_tests.rs"]
 mod tests;
+
+/// Whether a target name is shaped like a filesystem path rather than a plain
+/// word. A `/` anywhere, or a dot with a non-empty extension after it, is what
+/// separates `dist/app` and `app.tar.gz` from `build` and `check-fmt`. Leading
+/// dots are special targets (`.PHONY`, `.SUFFIXES`), handled elsewhere, and are
+/// deliberately not counted here.
+fn looks_like_a_file_path(name: &str) -> bool {
+    if name.starts_with('.') {
+        return false;
+    }
+    if name.contains('/') {
+        return true;
+    }
+    match name.rsplit_once('.') {
+        Some((stem, ext)) => !stem.is_empty() && !ext.is_empty(),
+        None => false,
+    }
+}

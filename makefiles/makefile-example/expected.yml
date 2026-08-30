@@ -20,7 +20,7 @@ otto:
     GIT_COMMIT: $(git rev-parse --short HEAD)
 tasks:
   help:
-    help: HELP
+    help: Help me.
     bash: awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $1, $2}' ${MAKEFILE_LIST}
   test:
     bash: ${GOTEST} ./... -v
@@ -37,7 +37,7 @@ tasks:
       echo "==> Lint project..."
       ${GOLINT} ./...
   build-linux:
-    help: Cross compilation
+    help: Build linux artifact
     before:
     - dep
     bash: |-
@@ -63,7 +63,7 @@ tasks:
       echo "==> Package source code..."
       DOCKER_BUILDKIT=1 docker build -t ttha .
   dep:
-    help: helpers
+    help: Install deps
     bash: |-
       echo "==> Installing dependencies..."
       ${GOGET} -v -d ./...

@@ -419,6 +419,78 @@ fn test_strict_turns_warnings_into_a_nonzero_exit() {
     assert!(stderr.contains("--strict was given"), "{stderr}");
 }
 
+/// The task's own inline `##` doc string beats a preceding `#` banner.
+///
+/// It used to be the other way round, so a section banner two lines above a
+/// rule was adopted as that rule's help text - and the golden generated from
+/// that output committed the bug: `help: HELP` (its own `##` says "Help me."),
+/// `build-linux: Cross compilation` ("Build linux artifact"), `dep: helpers`
+/// ("Install deps"). The comment at the fix site already named `##` as the
+/// self-documenting-makefile convention the parser honors; the code just did
+/// not follow it.
+#[test]
+fn test_a_rules_own_doc_string_beats_a_preceding_banner() {
+    let conversion = convert("# Banner\nbuild: ## Build the thing\n\techo hi\n".to_string());
+
+    assert_eq!(
+        conversion.config.tasks["build"].help.as_deref(),
+        Some("Build the thing"),
+        "the rule's own `##` names the target; the banner names the section"
+    );
+}
+
+/// A banner is still used when the rule has no `##` of its own.
+#[test]
+fn test_a_banner_is_still_the_fallback_when_a_rule_has_no_doc_string() {
+    let conversion = convert("# Banner\nbuild:\n\techo hi\n".to_string());
+
+    assert_eq!(conversion.config.tasks["build"].help.as_deref(), Some("Banner"));
+}
+
+/// `is_phony` was set from `.PHONY` and read by nobody, so a make *file rule*
+/// converted into a task that always runs with nothing said about it. make
+/// skips a file target's recipe when the file is newer than its prerequisites;
+/// otto has no equivalent check.
+///
+/// The signal is the path shape, not "everything outside `.PHONY`": most
+/// authors never list every ordinary target, so warning on all of them would be
+/// noise. `dist/app` and `app.tar.gz` are file rules; `build` and `check-fmt`
+/// are not.
+#[test]
+fn test_a_file_shaped_target_outside_phony_warns() {
+    let conversion = convert("app.tar.gz: build\n\ttar -cz .\n\nbuild:\n\techo hi\n".to_string());
+
+    assert!(
+        conversion
+            .warnings
+            .iter()
+            .any(|w| w.contains("`app.tar.gz` is a file target, not `.PHONY`")),
+        "a file-shaped target outside .PHONY must say make and otto disagree: {:?}",
+        conversion.warnings
+    );
+    assert!(
+        !conversion
+            .warnings
+            .iter()
+            .any(|w| w.contains("`build` is a file target")),
+        "a plain-word target is not a file rule: {:?}",
+        conversion.warnings
+    );
+}
+
+/// And declaring it phony silences it, which is what makes the field read
+/// rather than merely present.
+#[test]
+fn test_a_file_shaped_target_declared_phony_does_not_warn() {
+    let conversion = convert(".PHONY: app.tar.gz\napp.tar.gz:\n\ttar -cz .\n".to_string());
+
+    assert!(
+        !conversion.warnings.iter().any(|w| w.contains("is a file target")),
+        "`.PHONY` is exactly the author saying this is not a file: {:?}",
+        conversion.warnings
+    );
+}
+
 /// `?=` converted as a plain `=`, with no warning at all.
 ///
 /// otto's `envs:` is "the system environment minus every declared key"
