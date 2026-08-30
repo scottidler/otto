@@ -251,7 +251,15 @@ impl Parser {
                     .try_get_matches_from(args)
                     .map_err(|e| task_arg_error(e.render().ansi().to_string(), e.kind(), next_task))?;
 
-                for param_spec in task_spec.params.values() {
+                // Bind against the same spec clap was built from, not the
+                // expanded one. `as_virtual_parent()` empties `params`, so for
+                // a foreach task `task_spec.params` is empty here while clap
+                // has just accepted `--account work` against the original: the
+                // loop body never ran and the value was parsed and dropped,
+                // silently, at exit 0. Binding it onto the parent is what makes
+                // Phase 2 propagate it down to the subtasks, which are the
+                // things that actually run.
+                for param_spec in clap_spec.params.values() {
                     match param_spec.param_type {
                         ParamType::FLG => {
                             // Boolean flag - CLI-provided if user explicitly passed it

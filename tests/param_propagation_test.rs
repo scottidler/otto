@@ -580,6 +580,110 @@ tasks:
     );
 }
 
+/// The flag given to the foreach task *itself*, which is the shape a user
+/// reaches for first and the one nothing covered. `as_virtual_parent()` empties
+/// the parent's `params`, and the CLI-binding loop read the expanded spec, so
+/// clap accepted `--account work` and the value was dropped on the floor at
+/// exit 0. `test_propagation_to_foreach_subtasks` above passes without this
+/// because it only ever gives the flag to a dependent parent.
+#[test]
+#[serial]
+fn test_flag_given_directly_to_a_foreach_task_reaches_its_subtasks() {
+    let config = r#"
+otto:
+  api: 1
+  tasks: [build]
+
+tasks:
+  build:
+    params:
+      --account:
+        default: home
+        help: Account to use
+    foreach:
+      items: [frontend, backend]
+      as: component
+    bash: echo "build ${component} for ${account}"
+"#;
+
+    let tasks = parse_config(config, vec!["build", "--account", "work"]).unwrap();
+
+    for subtask in ["build:frontend", "build:backend"] {
+        assert_eq!(
+            find_task(&tasks, subtask).envs.get("account").map(String::as_str),
+            Some("work"),
+            "{subtask} should see the value given to the foreach task itself, not the default"
+        );
+    }
+}
+
+/// Same shape with `--flag=value`, because the two spellings take different
+/// paths through clap and only one of them was ever exercised.
+#[test]
+#[serial]
+fn test_equals_form_given_directly_to_a_foreach_task_reaches_its_subtasks() {
+    let config = r#"
+otto:
+  api: 1
+  tasks: [build]
+
+tasks:
+  build:
+    params:
+      --account:
+        default: home
+        help: Account to use
+    foreach:
+      items: [frontend, backend]
+      as: component
+    bash: echo "build ${component} for ${account}"
+"#;
+
+    let tasks = parse_config(config, vec!["build", "--account=work"]).unwrap();
+
+    for subtask in ["build:frontend", "build:backend"] {
+        assert_eq!(
+            find_task(&tasks, subtask).envs.get("account").map(String::as_str),
+            Some("work"),
+            "{subtask} should see the value from the --flag=value spelling"
+        );
+    }
+}
+
+/// Nothing given: the default still applies. Guards the fix against the
+/// opposite failure, a parent that binds a clap default as if the user typed it
+/// and thereby outranks a real propagated value.
+#[test]
+#[serial]
+fn test_foreach_task_with_no_flag_still_takes_the_default() {
+    let config = r#"
+otto:
+  api: 1
+  tasks: [build]
+
+tasks:
+  build:
+    params:
+      --account:
+        default: home
+        help: Account to use
+    foreach:
+      items: [frontend, backend]
+      as: component
+    bash: echo "build ${component} for ${account}"
+"#;
+
+    let tasks = parse_config(config, vec!["build"]).unwrap();
+
+    for subtask in ["build:frontend", "build:backend"] {
+        assert_eq!(
+            find_task(&tasks, subtask).envs.get("account").map(String::as_str),
+            Some("home"),
+            "{subtask} should fall back to the declared default"
+        );
+    }
+}
+
 // =============================================================================
 // Flag (boolean) propagation
 // =============================================================================
