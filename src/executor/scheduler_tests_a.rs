@@ -183,6 +183,30 @@ async fn test_scheduler_rejects_a_dependency_cycle_at_init() {
     assert!(err.to_string().contains("dependency cycle detected"), "{err}");
 }
 
+/// A task body that panics before sending its report must still be observed,
+/// not leave the scheduler waiting on a message that never arrives. This is
+/// the exact mechanism `reap_unreported`'s doc comment describes: a spawned
+/// body reaped via `JoinSet` rather than dropped on the floor.
+#[tokio::test]
+async fn reap_unreported_observes_a_panicking_task_body() {
+    let mut active = ActiveTasks::default();
+    active.spawn("boom".to_string(), async {
+        panic!("deliberate panic for reap_unreported's own test");
+    });
+    assert_eq!(active.len(), 1);
+
+    let name = active.reap_unreported().await;
+
+    assert_eq!(
+        name, "boom",
+        "the panicking task's name must be reported, not silently dropped"
+    );
+    assert!(
+        active.is_empty(),
+        "a reaped panic must no longer count as an in-flight task"
+    );
+}
+
 /// A run in which every task is gated out accomplished nothing, and used to
 /// report that as success.
 #[tokio::test]
@@ -483,6 +507,109 @@ async fn test_task_execution() -> Result<()> {
     assert_eq!(status, TaskStatus::Completed);
 
     Ok(())
+}
+
+/// The completion channel's buffer (`COMPLETION_CHANNEL_CAPACITY`, 32) is
+/// smaller than this run's task count. This does not reliably force the
+/// channel past capacity by itself (these tasks finish near-instantly and
+/// the scheduler's own drain loop keeps up in practice, spot-checked by
+/// temporarily changing the real `tx.send(...).await` to `tx.try_send(...)`
+/// - a genuine drop-on-full regression - and finding this test still green);
+/// what it does prove is that a run with more tasks than the channel's
+/// buffer size still completes every one of them correctly. The channel's
+/// actual backpressure-not-drop guarantee is pinned deterministically, at
+/// the channel level, by `a_slow_receiver_does_not_lose_sends_past_the_channel_capacity`
+/// below.
+#[tokio::test]
+#[serial]
+async fn more_than_the_channel_capacity_completing_at_once_all_get_reported() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    let task_count = COMPLETION_CHANNEL_CAPACITY + 8;
+    let tasks: Vec<Task> = (0..task_count)
+        .map(|i| {
+            Task::new(
+                format!("t{i}"),
+                None,
+                vec![],
+                vec![],
+                vec![],
+                HashMap::new(),
+                HashMap::new(),
+                "true".to_string(),
+            )
+        })
+        .collect();
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    // max_parallel >= task_count: every task is ready and spawned at once,
+    // so completions can genuinely race past the channel's capacity rather
+    // than trickling in one at a time.
+    let scheduler = TaskScheduler::new(tasks, Arc::new(workspace), ExecutionContext::new(), task_count, false).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), scheduler.execute_all()).await??;
+
+    for i in 0..task_count {
+        let status = scheduler.get_task_status(&format!("t{i}")).await;
+        assert_eq!(
+            status,
+            TaskStatus::Completed,
+            "t{i} must be reported completed, not lost"
+        );
+    }
+
+    Ok(())
+}
+
+/// The deterministic pin for the channel *property* the test above cannot
+/// reliably force: with more in-flight sends than the channel's capacity and
+/// a receiver too slow to keep up, a bounded `mpsc::Sender::send(...).await`
+/// backpressures (the sender waits) rather than drops. Uses the exact same
+/// constant production code sizes its channel with.
+///
+/// What this does *not* catch: a future edit to `scheduler/task_execution.rs`
+/// that swaps its real `tx.send(report).await` for `tx.try_send(report)`
+/// (drop-on-full - exactly the regression this bullet is about). Spot-checked
+/// live by making that exact edit: this test is unaffected (it owns its own
+/// channel and never touches the scheduler's), and the end-to-end test above
+/// stayed green too, since these tasks finish fast enough that the drop
+/// never actually triggered in that run. Neither test mechanically guards
+/// against that specific edit; the send call site's own doc comment is what
+/// does today.
+#[tokio::test]
+async fn a_slow_receiver_does_not_lose_sends_past_the_channel_capacity() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<usize>(COMPLETION_CHANNEL_CAPACITY);
+    let send_count = COMPLETION_CHANNEL_CAPACITY + 8;
+
+    let sender = tokio::spawn(async move {
+        for i in 0..send_count {
+            // `.send(...).await` must block once the buffer is full rather
+            // than losing `i`; `try_send` would return `Err(Full(..))` here
+            // instead of waiting, and this is exactly what would drop a
+            // completion report in production.
+            tx.send(i).await.expect("receiver must still be alive");
+        }
+    });
+
+    // Give every sender a chance to queue up before draining anything, so
+    // the channel is genuinely at (and, since send_count > capacity, past)
+    // its buffer size before the receiver starts taking messages out.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let mut received = Vec::with_capacity(send_count);
+    while received.len() < send_count {
+        received.push(rx.recv().await.expect("sender must not have dropped early"));
+    }
+    sender.await.expect("sender task must not panic");
+
+    received.sort_unstable();
+    assert_eq!(
+        received,
+        (0..send_count).collect::<Vec<_>>(),
+        "every send past the channel's capacity must still arrive, none dropped"
+    );
 }
 
 #[tokio::test]
@@ -839,4 +966,20 @@ async fn test_file_dependencies_with_task_dependencies() -> Result<()> {
     assert!(output_file.exists(), "Output file should exist");
 
     Ok(())
+}
+
+/// The mechanical guard the two tests above cannot be: a completion report
+/// must go through a blocking, backpressuring send, never a `try_send` that
+/// would drop it under load. Neither a scheduler-level test (these tasks
+/// finish too fast to force real congestion) nor a bare-channel test (it
+/// cannot see the scheduler's own call site) catches a future edit that
+/// swaps one for the other; a direct source check does.
+#[test]
+fn task_execution_never_uses_try_send_for_completion_reports() {
+    let source = include_str!("scheduler/task_execution.rs");
+    assert!(
+        !source.contains("try_send"),
+        "the completion report must use a blocking `send(...).await`, not `try_send`, \
+         or completions can be silently dropped under load"
+    );
 }

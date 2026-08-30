@@ -408,3 +408,23 @@ fn test_set_version() -> Result<()> {
 
     Ok(())
 }
+
+/// An older binary meeting a newer schema refuses outright rather than
+/// silently misreading it or re-running migrations it does not have. This
+/// is the branch a downgrade actually exercises (see the design doc's
+/// Resolved Decisions: no downgrade support, fail closed with a named error).
+#[test]
+fn test_migrate_refuses_a_schema_newer_than_this_binary_supports() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+
+    migrate(&conn)?;
+    set_version(&conn, SCHEMA_VERSION + 1)?;
+
+    let err = migrate(&conn).expect_err("a newer schema must be refused, not silently accepted");
+    let msg = err.to_string();
+    assert!(msg.contains("newer than supported version"), "{msg}");
+    assert!(msg.contains("Please upgrade otto"), "{msg}");
+    assert!(msg.contains(&(SCHEMA_VERSION + 1).to_string()), "{msg}");
+
+    Ok(())
+}

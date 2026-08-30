@@ -250,6 +250,7 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
+#[derive(Debug)]
 struct BackupInfo {
     path: PathBuf,
     version: String,

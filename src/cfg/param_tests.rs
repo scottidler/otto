@@ -391,6 +391,19 @@ fn nargs_extra_colon_is_rejected_naming_the_param() {
     assert!(err.contains("1:2:3"), "{err}");
 }
 
+/// `nargs: ""` errors, but only incidentally: it falls through to the bare
+/// bare-number branch and fails `"".parse::<usize>()`, not a dedicated
+/// emptiness check. Pinned so a future refactor of that branch can't turn
+/// this into a panic or a silent default without a test going red.
+#[test]
+fn nargs_empty_string_is_rejected() {
+    use crate::cfg::config::ConfigSpec;
+    let yaml = "tasks:\n  build:\n    params:\n      --files:\n        nargs: \"\"\n    bash: echo hi\n";
+    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    assert!(err.contains("files"), "{err}");
+    assert!(err.contains("invalid count"), "{err}");
+}
+
 #[test]
 fn nargs_valid_range_still_parses() {
     let nargs: Nargs = serde_yaml::from_str("\"2:5\"").unwrap();

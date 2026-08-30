@@ -1052,3 +1052,49 @@ fn test_load_config_reports_the_api_error_before_the_parse_error() {
         "the parse error must not win over the version error: {err}"
     );
 }
+
+// =========================================================================
+// divine_ottofile rejection table (design doc 2026-06-10, Phase 11)
+// =========================================================================
+
+/// `divine_ottofile`'s two distinct ways to fail, table-driven so both stay
+/// named and neither regresses to a bare OS error. Both wrap the underlying
+/// cause (`fs::canonicalize`'s io::Error, `expanduser`'s io::Error) rather
+/// than let it surface unexplained, per `divine_ottofile`'s own doc comment
+/// ("`otto -o /nope/nothere.yml` used to fail with a bare 'No such file or
+/// directory'").
+#[test]
+fn divine_ottofile_rejection_table() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "/nope/nothere-08e3e0.yml",
+            "ottofile path '/nope/nothere-08e3e0.yml' does not exist",
+        ),
+        (
+            "~otto-phase11-nonexistent-user/otto.yml",
+            "could not expand ottofile path",
+        ),
+    ];
+
+    for (input, expected_substring) in cases {
+        let err = Parser::divine_ottofile(input.to_string())
+            .expect_err(&format!("'{input}' must be rejected, not silently accepted"))
+            .to_string();
+        assert!(
+            err.contains(expected_substring),
+            "'{input}': expected error to contain '{expected_substring}', got: {err}"
+        );
+    }
+}
+
+/// A directory that exists but has no ottofile anywhere up to the filesystem
+/// root is not a rejection: it resolves to `Ok(None)`, letting the caller
+/// render `ottofile_not_found_message()` instead of a bare I/O error.
+#[test]
+fn divine_ottofile_walks_to_the_root_and_returns_none_rather_than_erroring() {
+    // A fresh TempDir has no otto.yml/.otto.yml in it or any of its (equally
+    // fresh) ancestors up to the real filesystem root.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let result = Parser::divine_ottofile(temp_dir.path().to_string_lossy().to_string());
+    assert!(matches!(result, Ok(None)), "{result:?}");
+}

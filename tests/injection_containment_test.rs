@@ -107,6 +107,38 @@ tasks:
     );
 }
 
+/// The same payload class through the *other* script generator: `python:`
+/// sugar builds `os.environ['PAYLOAD'] = '...'` via `python_quote`, a
+/// separate quoting function from `bash_quote`. A payload that breaks out of
+/// a Python single-quoted string (unescaped `'`) would let the rest of the
+/// line run as Python source rather than sit inside the string.
+#[test]
+fn an_env_value_reaches_a_python_task_as_literal_text() {
+    let fixture = Fixture::new(
+        r#"
+otto:
+  name: injection
+  envs:
+    PAYLOAD: "x'; import os; os.system('touch {MARKER}'); y = 'z"
+tasks:
+  hello:
+    action: |
+      #!/usr/bin/env python3
+      import os
+      print("payload=" + os.environ["PAYLOAD"])
+"#,
+    );
+
+    let (code, stdout, stderr) = fixture.run(&["hello"]);
+
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    fixture.assert_not_pwned("env value (python generator)", &stdout);
+    assert!(
+        stdout.contains("payload=x'; import os; os.system"),
+        "the value must arrive whole, as text:\n{stdout}"
+    );
+}
+
 /// Same payload through `--name`, which lands in the parameter generator.
 #[test]
 fn a_param_value_reaches_the_task_as_literal_text() {

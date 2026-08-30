@@ -855,3 +855,125 @@ fn test_find_old_runs_complex_policy() -> Result<()> {
 
     Ok(())
 }
+
+/// A row whose `args` column is not valid JSON must surface a named error,
+/// not panic and not silently drop the row.
+#[test]
+fn get_recent_runs_reports_corrupt_args_json_rather_than_panicking() -> Result<()> {
+    let (manager, _temp_dir) = create_test_manager()?;
+
+    let metadata = RunMetadata::minimal(
+        Some(PathBuf::from("/test/otto.yml")),
+        "abc12345".to_string(),
+        1234567890,
+    );
+    let run_id = manager.record_run_start(&metadata)?;
+    manager.db.with_connection(|conn| {
+        Ok(conn.execute(
+            "UPDATE runs SET args = 'not json at all' WHERE id = ?1",
+            rusqlite::params![run_id],
+        )?)
+    })?;
+
+    let err = manager
+        .get_recent_runs(10, None)
+        .expect_err("corrupt args JSON must be a named error, not a panic or a silently empty list");
+    // eyre's plain Display shows only the outermost context; `{:#}` walks
+    // the full chain down to the actual `bad_column` message.
+    assert!(
+        format!("{err:#}").contains("run args are not a JSON string list"),
+        "{err:#}"
+    );
+
+    Ok(())
+}
+
+/// A row whose `status` column holds a value no `RunStatus` variant parses
+/// must surface a named error, not panic and not silently drop the row.
+#[test]
+fn get_recent_runs_reports_an_unknown_status_rather_than_panicking() -> Result<()> {
+    let (manager, _temp_dir) = create_test_manager()?;
+
+    let metadata = RunMetadata::minimal(
+        Some(PathBuf::from("/test/otto.yml")),
+        "abc12345".to_string(),
+        1234567890,
+    );
+    let run_id = manager.record_run_start(&metadata)?;
+    manager.db.with_connection(|conn| {
+        Ok(conn.execute(
+            "UPDATE runs SET status = 'this-is-not-a-status' WHERE id = ?1",
+            rusqlite::params![run_id],
+        )?)
+    })?;
+
+    let err = manager
+        .get_recent_runs(10, None)
+        .expect_err("an unrecognized status must be a named error, not a panic or a silently empty list");
+    assert!(format!("{err:#}").contains("unknown run status"), "{err:#}");
+
+    Ok(())
+}
+
+/// Two-process concurrency, proxied by separate `StateManager` connections
+/// (each opens its own SQLite handle, exactly as two real `otto` processes
+/// would) pointed at the same database file. `ensure_project`'s upsert plus
+/// WAL mode and a 5-second busy timeout (`src/executor/state/db.rs`) must
+/// make this safe: no thread should see `SQLITE_BUSY` propagate as an error,
+/// there must be exactly one project row for the shared hash, and every
+/// concurrently-started run must persist as its own row.
+#[test]
+fn concurrent_connections_racing_ensure_project_stay_consistent() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let db_path = temp_dir.path().join("concurrent.db");
+    // Pre-create the schema on one connection so every thread below is
+    // racing `ensure_project`/`record_run_start`, not schema creation too.
+    drop(StateManager::with_db_path(db_path.clone())?);
+
+    let thread_count = 8usize;
+    let handles: Vec<_> = (0..thread_count)
+        .map(|i| {
+            let db_path = db_path.clone();
+            std::thread::spawn(move || -> Result<i64> {
+                let manager = StateManager::with_db_path(db_path)?;
+                let metadata = RunMetadata::minimal(
+                    Some(PathBuf::from("/repos/widget/otto.yml")),
+                    "sharedhash".to_string(),
+                    // Distinct timestamps: this also doubles as a same-second
+                    // stress test once threads interleave.
+                    1_700_000_000 + i as u64,
+                );
+                manager.record_run_start(&metadata)
+            })
+        })
+        .collect();
+
+    let mut run_ids = Vec::new();
+    for handle in handles {
+        let run_id = handle
+            .join()
+            .expect("thread must not panic")
+            .expect("record_run_start must not surface SQLITE_BUSY under WAL + busy_timeout");
+        run_ids.push(run_id);
+    }
+
+    run_ids.sort_unstable();
+    run_ids.dedup();
+    assert_eq!(
+        run_ids.len(),
+        thread_count,
+        "every concurrent run must get its own distinct row"
+    );
+
+    let manager = StateManager::with_db_path(db_path)?;
+    let projects = manager.get_all_projects()?;
+    let matching: Vec<_> = projects.iter().filter(|p| p.hash == "sharedhash").collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "ensure_project's upsert must leave exactly one row for the shared hash, not one per racing thread"
+    );
+    assert_eq!(matching[0].run_count as usize, thread_count);
+
+    Ok(())
+}

@@ -523,3 +523,90 @@ fn test_backup_dir_custom() {
     let backup_dir = cmd.get_backup_dir().unwrap();
     assert_eq!(backup_dir, custom_path);
 }
+
+/// `list_backups` reads a directory that anything could have written into
+/// (it's just `~/.otto/backups`, or `--backup-dir`), so its `otto-VERSION-
+/// TIMESTAMP.backup` parser must not panic on a name that does not fit that
+/// shape. None of these should crash; only the well-formed one should
+/// surface as a `BackupInfo`.
+#[test]
+fn list_backups_tolerates_adversarial_filenames() {
+    let temp = tempfile::tempdir().unwrap();
+    let backup_dir = temp.path().join("backups");
+    fs::create_dir_all(&backup_dir).unwrap();
+
+    // Names that must not panic, and must not be mistaken for a real backup.
+    let excluded: &[&str] = &[
+        "otto-solo.backup",           // no hyphen to split version from timestamp
+        "not-otto-shaped-at-all.txt", // doesn't even carry the prefix
+        "otto-latest.backup",         // the symlink name itself, without a version-timestamp body
+    ];
+    for name in excluded {
+        fs::write(backup_dir.join(name), b"not a real binary").unwrap();
+    }
+    // A non-numeric timestamp is accepted, not rejected: `.unwrap_or(0)`
+    // degrades to timestamp 0 (sorts last) rather than dropping the entry.
+    fs::write(backup_dir.join("otto-1.2.3-notanumber.backup"), b"not a real binary").unwrap();
+    // One well-formed entry, so the parser's success path is exercised too.
+    fs::write(backup_dir.join("otto-1.4.0-1700000000.backup"), b"binary bytes").unwrap();
+
+    let cmd = UpgradeCommand {
+        backup_dir: Some(backup_dir),
+        ..command()
+    };
+
+    // Must not panic; must find exactly the two entries whose names carry a
+    // version-timestamp body, and none of the excluded ones.
+    let backups = cmd
+        .list_backups()
+        .expect("list_backups must not error on adversarial names");
+    assert_eq!(backups.len(), 2, "{backups:?}");
+    assert_eq!(backups[0].version, "1.4.0", "newest first: {backups:?}");
+    assert_eq!(backups[0].timestamp, 1700000000);
+    assert_eq!(backups[1].version, "1.2.3", "{backups:?}");
+    assert_eq!(
+        backups[1].timestamp, 0,
+        "an unparseable timestamp degrades to 0, it does not panic"
+    );
+}
+
+/// A 200 response whose body is not valid JSON at all must be a named
+/// error, not a panic - `fetch_releases_rejects_a_non_success_status`
+/// covers the HTTP-status half of this; this is the body-shape half.
+#[tokio::test]
+async fn fetch_releases_rejects_malformed_json() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "/releases".to_string(),
+        Route::Body(b"this is not json at all {{{".to_vec()),
+    );
+    let base = spawn_stub(routes);
+
+    let client = build_http_client(CONNECT_TIMEOUT, READ_TIMEOUT).unwrap();
+    let err = command()
+        .fetch_releases(&client, &format!("{}/releases", base))
+        .await
+        .expect_err("a malformed release listing must be an error, not a panic");
+
+    assert!(!err.to_string().is_empty());
+}
+
+/// Same shape, but the body is valid JSON of the *wrong* shape (an object,
+/// not the expected array of releases).
+#[tokio::test]
+async fn fetch_releases_rejects_a_json_object_where_an_array_was_expected() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "/releases".to_string(),
+        Route::Body(br#"{"message":"Not Found"}"#.to_vec()),
+    );
+    let base = spawn_stub(routes);
+
+    let client = build_http_client(CONNECT_TIMEOUT, READ_TIMEOUT).unwrap();
+    let err = command()
+        .fetch_releases(&client, &format!("{}/releases", base))
+        .await
+        .expect_err("a JSON object where an array was expected must be an error, not a panic");
+
+    assert!(!err.to_string().is_empty());
+}
