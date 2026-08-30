@@ -1,0 +1,31 @@
+# Expected conversion of this directory's Makefile. Compared as a ConfigSpec,
+# not as text: `otto.envs` is a HashMap and its serialized order varies.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - build
+  envs:
+    FLAGS: -race
+    IMAGE: ${NAME}:${VERSION}
+    NAME: example
+    REGISTRY: registry.example.com
+    VERSION: $(git describe --tags --always)
+tasks:
+  build:
+    help: Build the project
+    before:
+    - fmt
+    bash: |-
+      echo "Building ${NAME} ${VERSION}"
+      docker build -t ${IMAGE} --build-arg REV=${UNSET_BY_MAKEFILE} --label commit=${GIT_SHA} .
+      ps aux | awk '{print $1}'
+  fmt:
+    bash: echo "the last recipe for a target wins, as in make"
+  check:
+    help: Format the tree
+    bash: gofmt -l -w .
+  install:
+    before:
+    - build
+    bash: cp dist/${NAME} /usr/local/bin

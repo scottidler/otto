@@ -1009,3 +1009,107 @@ batch` bullet was left unchecked and raised as a go/no-go. It is closed here.
   predicate. Round-trip equality was never at risk (deserialize's own default
   is the same `["*"]`), so no test caught it; it was a redundant-emission gap,
   not a correctness bug.
+
+## Phase 7: Makefile converter truth
+
+### Design decisions
+
+- **Diagnostics are a returned list, not a print.** `src/makefile/diagnostic.rs`
+  defines `Diagnostic { line: Option<usize>, message: String }`; `MakefileParser`
+  and `OttoConverter` each accumulate their own and expose `diagnostics()`, and
+  `cli/commands/convert.rs::convert_makefile` merges, sorts by line, and returns
+  them with the YAML. The policy (print to stderr, `--strict` fails) lives in one
+  place, in the shell, so a library caller can decide differently.
+- **Continuation joining is a preprocessing pass, not per-construct.**
+  `parser.rs::logical_lines` joins every `\`-terminated physical line for all
+  line types before parsing, tagging each logical line with the physical line it
+  started on. That is what make does, and it is what fixes the three separate
+  symptoms the bullet lists (`SOURCES := a.c \` truncating, a recipe truncated
+  to `docker run --rm  --label foo`, and the invented task `-v /a:`) with one
+  mechanism instead of three.
+- **Space-indented recipe lines are an error, not a warning.**
+  `parser.rs::parse_commands` and the target branch of `parse()` both `bail!`
+  with `Makefile:<line>:` and the offending text. Fail-closed: otto cannot tell
+  a mis-indented recipe from a target, and guessing is exactly how `-v /a:/b`
+  became a task. An indented line that parses as a variable assignment is legal
+  make and still parses.
+- **`$(shell CMD)` becomes `$(CMD)`.** `converter.rs::rewrite_expansion`. otto's
+  own env evaluator (`cfg/env.rs`) runs `$(...)` with a nesting-aware scanner, so
+  the make wrapper is the only thing that had to go.
+- **`$(VAR)`/`${VAR}` become `${VAR}`, `$$` becomes `$`.**
+  `converter.rs::rewrite_expansions` walks the text rather than regexing it, so
+  it can tell the four cases apart: a name it can spell in bash, a make-internal
+  name, an automatic variable, and a function call. `$$` had to be handled in
+  the same walk: make passes `awk '{print $$1}'` to the shell as `$1`, and
+  emitting `$$1` would have meant the shell's PID.
+- **Names bash cannot spell are left alone.** `$(BINARY-NAME)` is not rewritten,
+  because `${BINARY-NAME}` means "BINARY, or NAME if unset" in bash. It warns
+  instead. `converter.rs::is_shell_identifier`.
+- **`--strict` refuses to emit.** `convert.rs::execute` bails before writing
+  stdout or `--output`, so a strict run never leaves a half-trusted ottofile on
+  disk.
+- **The converted `otto:` block is `OttoSpec::default()` plus the four fields a
+  Makefile actually determines** (`about`, `tasks`, `envs`, and nothing else).
+  That is what removes `jobs: num_cpus::get()` at the source rather than relying
+  on Phase 6's `skip_serializing_if` to hide it.
+
+### Deviations
+
+- **Same effect, correct seam: `parse()` and `convert()` keep their signatures;
+  diagnostics hang off the objects.** The bullet says "no warning accumulator
+  anywhere in `src/makefile/`" without prescribing a shape. Returning a new
+  `(Ast, Vec<Diagnostic>)` tuple would have rewritten every call site for no
+  gain; `convert(&self)` did have to become `convert(&mut self)`, which is the
+  only API break.
+- **Multi-target rules are expanded, not just warned about.** The bullet says
+  "detect and warn on ... multi-target". Warning while still emitting a task
+  named `"test check"` would have left the corruption in place, so
+  `test check: build` now produces two tasks with the same recipe, plus the
+  warning. Same for `install:: build`, which is warned about and then converted
+  as an ordinary rule rather than being dropped.
+- **Three fixes the bullets did not name, each required to make a named one
+  true.** (1) `#` starts a comment on any non-recipe line, so `help: ## Help me.`
+  used to convert to three dependencies named `##`, `Help` and `me.`; the
+  trailing comment is now stripped and used as the task's `help`. (2) A blank
+  line does not end a recipe in make; treating it as the end dropped every
+  command after the first blank line and turned any of them holding a colon into
+  a target (`makefiles/python-poetry-service` reproduces both). (3) A dependency
+  with no rule in the Makefile now warns, because it converts to a `before:`
+  edge that otto rejects at load - `makefiles/makefile-example` has one
+  (`package: build`).
+- **Actions no longer end in a trailing newline.** A YAML block scalar loses it
+  on the way back in, so the old output could not equal itself after a
+  serialize/load round trip, which is the property the new fixture test asserts.
+- **`?=` was left alone**, per the bullet's own correction: the code is right and
+  the precedence documentation is what is wrong (Phase 10).
+- **The parse and convert calls in `convert_makefile` are no longer
+  `wrap_err`-ed.** `main` prints only the outermost message, so the wrapper
+  turned "Makefile:6: recipe line is indented with spaces, not a tab: ..." into
+  "Failed to parse Makefile".
+
+### Tradeoffs
+
+- **Heuristic plus diagnostics, not a grammar.** As recorded in Resolved
+  Decisions. Everything here is a preprocessing pass and a warning list; the
+  revisit trigger (converter usage growing) is unchanged.
+- **Warnings about a recipe report the rule's line, not the command's.**
+  `Target` carries one line number, not one per command. Adding per-command
+  lines would ripple through every test that builds a `Target` literal, for a
+  warning that is already within a few lines of the truth.
+- **Unsupported make functions are left verbatim rather than translated.**
+  `$(wildcard *.c)` in a recipe stays as written, with a warning. Any
+  translation would be a guess; the success criterion bans leftover `$(shell`
+  and `$(VAR)`, not leftover function calls, and a warning the operator can act
+  on beats a rewrite they cannot audit.
+- **Duplicate targets stay last-wins**, matching make's own "overriding recipe"
+  behavior, and the warning now says outright that the earlier rule's
+  dependencies and recipe are discarded. Merging prerequisites the way make does
+  was not in scope.
+- **Nested `$()` produces no warning.** The bullet asks to "warn on nested `$()`
+  the evaluator cannot handle"; `cfg/env.rs::find_command_substitution` is
+  nesting-aware, so there is no such case left to warn about. Unbalanced `$(` is
+  warned about instead.
+
+### Open questions
+
+- None.

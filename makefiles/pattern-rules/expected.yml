@@ -1,0 +1,10 @@
+# Expected conversion of this directory's Makefile: the pattern rule and the
+# static pattern rule produce no tasks at all, only warnings.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - build
+tasks:
+  build:
+    bash: gcc -o app main.c

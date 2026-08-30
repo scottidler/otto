@@ -1,9 +1,9 @@
 use clap::Parser;
-use eyre::{Context, Result};
+use eyre::{Context, Result, bail};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-use crate::makefile::{MakefileParser, OttoConverter};
+use crate::makefile::{Diagnostic, MakefileParser, OttoConverter};
 
 /// Convert Makefile to Otto YAML format
 #[derive(Parser, Debug)]
@@ -27,16 +27,23 @@ impl ConvertCommand {
             .read_to_string(&mut content)
             .wrap_err("Failed to read from stdin")?;
 
-        // Parse Makefile
-        let mut parser = MakefileParser::new(content);
-        let ast = parser.parse().wrap_err("Failed to parse Makefile")?;
+        let (yaml, diagnostics) = convert_makefile(content)?;
 
-        // Convert to Otto
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().wrap_err("Failed to convert to Otto format")?;
+        // Warnings go to stderr because stdout carries the YAML, which is
+        // routinely piped straight into an ottofile.
+        let mut stderr = io::stderr();
+        for diagnostic in &diagnostics {
+            writeln!(stderr, "{diagnostic}").ok();
+        }
 
-        // Serialize to YAML
-        let yaml = serde_yaml::to_string(&config).wrap_err("Failed to serialize to YAML")?;
+        // `--strict` was a flag nothing read. It now does the only thing it
+        // could honestly mean: refuse to emit a conversion that lost something.
+        if self.strict && !diagnostics.is_empty() {
+            bail!(
+                "conversion produced {} warning(s) and --strict was given; no output written",
+                diagnostics.len()
+            );
+        }
 
         // Write to stdout or file
         if let Some(output_path) = &self.output {
@@ -50,6 +57,35 @@ impl ConvertCommand {
 
         Ok(())
     }
+}
+
+/// Convert Makefile text into ottofile YAML plus everything the conversion
+/// could not translate. Returns data rather than writing, so the warning policy
+/// (`--strict`) and the destination live in one place above.
+pub fn convert_makefile(content: String) -> Result<(String, Vec<Diagnostic>)> {
+    // Neither call is wrapped: both already report the Makefile line and the
+    // construct they choked on, and `main` prints only the outermost message,
+    // so a wrapper here is exactly what turned a precise error into
+    // "Failed to parse Makefile".
+    let mut parser = MakefileParser::new(content);
+    let ast = parser.parse()?;
+
+    let mut converter = OttoConverter::new(ast);
+    let config = converter.convert()?;
+
+    // Parse-time and convert-time warnings interleave by line rather than by
+    // phase, so the operator reads them in the order they appear in the file.
+    let mut diagnostics: Vec<Diagnostic> = parser
+        .diagnostics()
+        .iter()
+        .chain(converter.diagnostics())
+        .cloned()
+        .collect();
+    diagnostics.sort_by_key(|d| d.line);
+
+    let yaml = serde_yaml::to_string(&config).wrap_err("Failed to serialize to YAML")?;
+
+    Ok((yaml, diagnostics))
 }
 
 #[cfg(test)]
@@ -74,5 +110,42 @@ mod tests {
         };
         assert!(cmd.strict);
         assert!(cmd.output.is_some());
+    }
+
+    #[test]
+    fn test_convert_makefile_reports_parser_and_converter_warnings_together() {
+        let makefile = "%.o: %.c\n\tgcc -c $< -o $@\n\nbuild:\n\techo $(NOWHERE)\n";
+
+        let (yaml, diagnostics) = convert_makefile(makefile.to_string()).unwrap();
+
+        let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("pattern rule")),
+            "parser warnings must survive: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("not defined in the Makefile")),
+            "converter warnings must survive: {messages:?}"
+        );
+        assert!(!yaml.contains("%.o"), "{yaml}");
+    }
+
+    #[test]
+    fn test_convert_makefile_clean_input_warns_about_nothing() {
+        let makefile = ".DEFAULT_GOAL := build\n\nNAME := example\n\nbuild:\n\techo $(NAME)\n";
+
+        let (yaml, diagnostics) = convert_makefile(makefile.to_string()).unwrap();
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(yaml.contains("${NAME}"), "{yaml}");
+    }
+
+    #[test]
+    fn test_convert_makefile_rejects_a_space_indented_recipe() {
+        let makefile = "build:\n    docker run -v /a:/b\n";
+
+        let err = convert_makefile(makefile.to_string()).expect_err("must not convert");
+
+        assert!(format!("{err:#}").contains("indented with spaces"), "{err:#}");
     }
 }

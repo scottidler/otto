@@ -1,95 +1,186 @@
 use eyre::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::cfg::config::ConfigSpec;
-use crate::cfg::otto::{OttoSpec, RetentionSpec};
+use crate::cfg::otto::OttoSpec;
 use crate::cfg::task::{TaskSpec, TaskSpecs};
 
 use super::ast::{AssignmentType, MakefileAst, Target};
+use super::diagnostic::Diagnostic;
+
+/// Make variables that name something about make itself. Emitting them as
+/// shell variables is the only thing otto can do, and it is always wrong, so
+/// each one is called out by name.
+const SPECIAL_MAKE_VARIABLES: &[&str] = &[
+    "MAKE",
+    "MAKEFILE_LIST",
+    "MAKECMDGOALS",
+    "MAKEFLAGS",
+    "MAKELEVEL",
+    "CURDIR",
+    "SUFFIXES",
+    "VARIABLES",
+];
+
+/// Make's automatic variables. They are defined per-rule from the target and
+/// its prerequisites; otto has no equivalent, and leaving them in the script
+/// means bash reads `$@` as its own positional arguments.
+const AUTOMATIC_VARIABLES: &[char] = &['@', '<', '^', '?', '*', '+', '%', '|'];
 
 pub struct OttoConverter {
     ast: MakefileAst,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl OttoConverter {
     pub fn new(ast: MakefileAst) -> Self {
-        Self { ast }
+        Self {
+            ast,
+            diagnostics: Vec::new(),
+        }
     }
 
-    pub fn convert(&self) -> Result<ConfigSpec> {
-        let otto_spec = self.convert_otto_spec()?;
-        let tasks = self.convert_targets()?;
+    /// Everything the conversion could see but not translate faithfully.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    fn warn(&mut self, line: usize, message: impl Into<String>) {
+        self.diagnostics.push(Diagnostic::at(line, message));
+    }
+
+    pub fn convert(&mut self) -> Result<ConfigSpec> {
+        let otto_spec = self.convert_otto_spec();
+        let tasks = self.convert_targets();
+
+        // A default goal naming a rule that was skipped (a pattern rule, say)
+        // produces an ottofile that cannot run its own default.
+        for goal in &otto_spec.tasks {
+            if goal != "*" && !tasks.contains_key(goal) {
+                self.diagnostics.push(Diagnostic::detached(format!(
+                    "default goal `{goal}` has no converted task; otto will not be able to run it"
+                )));
+            }
+        }
 
         Ok(ConfigSpec { otto: otto_spec, tasks })
     }
 
-    fn convert_otto_spec(&self) -> Result<OttoSpec> {
+    fn convert_otto_spec(&mut self) -> OttoSpec {
         let envs = self.convert_variables();
         let tasks = self.determine_default_tasks();
 
-        Ok(OttoSpec {
-            name: "otto".to_string(),
+        // Everything but the four fields a conversion actually determines is
+        // left at its default, so the emitted ottofile carries no value it did
+        // not learn from the Makefile. `jobs` in particular used to be baked to
+        // the converting machine's CPU count.
+        OttoSpec {
             about: "Converted from Makefile".to_string(),
-            api: "1".to_string(),
-            jobs: num_cpus::get(),
-            home: "~/.otto".to_string(),
             tasks,
-            verbosity: 1,
             envs,
-            retention: RetentionSpec::default(),
-        })
+            ..OttoSpec::default()
+        }
     }
 
-    fn convert_variables(&self) -> HashMap<String, String> {
+    /// The rule names the Makefile itself defines, which is exactly the set of
+    /// tasks the conversion will produce.
+    fn known_targets(&self) -> HashSet<String> {
+        self.ast.targets.iter().map(|t| t.name.clone()).collect()
+    }
+
+    /// The variable names the Makefile itself defines. A `$(NAME)` that is one
+    /// of these converts cleanly; one that is not can only come from the
+    /// environment, and the operator is told so.
+    fn known_variables(&self) -> HashSet<String> {
+        self.ast.variables.iter().map(|v| v.name.clone()).collect()
+    }
+
+    fn convert_variables(&mut self) -> HashMap<String, String> {
+        let known = self.known_variables();
         let mut envs = HashMap::new();
 
-        for var in &self.ast.variables {
-            // For shell executions, preserve the $(shell ...) syntax
-            // Otto will evaluate these at runtime
-            let value = match var.assignment_type {
-                AssignmentType::ShellExecution => {
-                    // Keep the shell command syntax
-                    var.value.clone()
-                }
-                AssignmentType::Simple | AssignmentType::Recursive | AssignmentType::Conditional => var.value.clone(),
-                AssignmentType::Append => {
-                    // For append, we need to reference the existing value
-                    // Otto doesn't support this directly, so we just use the appended value
-                    var.value.clone()
-                }
-            };
+        for var in self.ast.variables.clone() {
+            if var.assignment_type == AssignmentType::Append {
+                self.warn(
+                    var.line,
+                    format!(
+                        "`{} +=` cannot append in otto; only the appended text is kept",
+                        var.name
+                    ),
+                );
+            }
 
+            // `VERSION := $(shell git describe)` used to be emitted verbatim,
+            // and otto then tried to run a command called `shell`, failing the
+            // whole config load - which took every other env down with it.
+            let value = self.rewrite_expansions(&var.value, var.line, &known);
             envs.insert(var.name.clone(), value);
         }
 
         envs
     }
 
-    fn convert_targets(&self) -> Result<TaskSpecs> {
+    fn convert_targets(&mut self) -> TaskSpecs {
         let mut tasks = TaskSpecs::new();
+        let mut seen: HashMap<String, usize> = HashMap::new();
 
-        for target in &self.ast.targets {
-            let task = self.convert_target_to_task(target)?;
+        for target in self.ast.targets.clone() {
+            // Last-wins matches make's own "overriding recipe" behavior; what
+            // it never did was say so.
+            if let Some(previous) = seen.insert(target.name.clone(), target.line) {
+                self.warn(
+                    target.line,
+                    format!(
+                        "duplicate target `{}` overrides the rule at line {}, discarding its dependencies and recipe",
+                        target.name, previous
+                    ),
+                );
+            }
+            let task = self.convert_target_to_task(&target);
             tasks.insert(target.name.clone(), task);
         }
 
-        Ok(tasks)
+        tasks
     }
 
-    fn convert_target_to_task(&self, target: &Target) -> Result<TaskSpec> {
-        // Build the bash script from commands
-        let action = self.build_bash_action(&target.commands);
+    fn convert_target_to_task(&mut self, target: &Target) -> TaskSpec {
+        let known = self.known_variables();
+        let action = self.build_bash_action(&target.commands, target.line, &known);
 
         // Dependencies in Make become "before" in Otto
         // (task X depends on Y means Y must run before X)
         // Emit as sugar (bare-string) edges so converted ottofiles read naturally.
+        let known_targets = self.known_targets();
+        for dependency in &target.dependencies {
+            if dependency.contains('$') {
+                self.warn(
+                    target.line,
+                    format!(
+                        "dependency `{dependency}` of `{}` is a make expansion; otto task names cannot be computed",
+                        target.name
+                    ),
+                );
+            } else if !known_targets.contains(dependency) {
+                // In make this is a file, or a rule that lives in an included
+                // Makefile. In otto it is a `before:` edge to a task that does
+                // not exist, and the whole ottofile fails to load.
+                self.warn(
+                    target.line,
+                    format!(
+                        "dependency `{dependency}` of `{}` has no rule in this Makefile; otto will reject the edge",
+                        target.name
+                    ),
+                );
+            }
+        }
+
         let before: Vec<crate::cfg::edge::EdgeSpec> = target
             .dependencies
             .iter()
             .map(crate::cfg::edge::EdgeSpec::sugar)
             .collect();
 
-        Ok(TaskSpec {
+        TaskSpec {
             name: target.name.clone(),
             help: target.comment.clone(),
             after: Vec::new(),
@@ -103,10 +194,10 @@ impl OttoConverter {
             virtual_parent: false,
             tty: None,
             on_failure: Vec::new(),
-        })
+        }
     }
 
-    fn build_bash_action(&self, commands: &[String]) -> String {
+    fn build_bash_action(&mut self, commands: &[String], line: usize, known: &HashSet<String>) -> String {
         if commands.is_empty() {
             return "#!/bin/bash\n".to_string();
         }
@@ -123,19 +214,141 @@ impl OttoConverter {
             } else if let Some(cmd_without_dash) = trimmed.strip_prefix('-') {
                 // - ignores errors in Make
                 // In Otto/bash, we can use `|| true` for this
-                let cmd_without_prefix = cmd_without_dash.trim_start();
-                script.push_str(cmd_without_prefix);
+                let cmd_without_prefix = cmd_without_dash.trim_start().to_string();
+                let rewritten = self.rewrite_expansions(&cmd_without_prefix, line, known);
+                script.push_str(&rewritten);
                 script.push_str(" || true\n");
                 continue;
             } else {
                 trimmed
             };
 
-            script.push_str(cleaned_cmd);
+            // `$(VAR)` used to go into bash verbatim, where it is command
+            // substitution: it printed "VAR: command not found", expanded to
+            // nothing, and the task still succeeded.
+            let rewritten = self.rewrite_expansions(cleaned_cmd, line, known);
+            script.push_str(&rewritten);
             script.push('\n');
         }
 
+        // No trailing newline: a YAML block scalar loses it on the way back in,
+        // so keeping it would make convert -> serialize -> load a config that
+        // no longer equals the one that was written.
+        script.truncate(script.trim_end_matches('\n').len());
         script
+    }
+
+    /// Rewrite make's expansion syntax into bash, warning about every construct
+    /// that cannot survive the trip.
+    fn rewrite_expansions(&mut self, text: &str, line: usize, known: &HashSet<String>) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+
+        while i < chars.len() {
+            if chars[i] != '$' {
+                out.push(chars[i]);
+                i += 1;
+                continue;
+            }
+
+            match chars.get(i + 1) {
+                // `$$` is make's escape for a literal `$`; the shell must see
+                // one dollar, not two (`awk '{print $$1}'` -> `$1`, not the pid).
+                Some('$') => {
+                    out.push('$');
+                    i += 2;
+                }
+                Some(&open @ ('(' | '{')) => match matching_close(&chars, i + 1) {
+                    Some(end) => {
+                        let inner: String = chars[i + 2..end].iter().collect();
+                        let rewritten = self.rewrite_expansion(open, &inner, line, known);
+                        out.push_str(&rewritten);
+                        i = end + 1;
+                    }
+                    None => {
+                        self.warn(line, format!("unbalanced `${open}` in `{text}`; left as written"));
+                        out.push('$');
+                        i += 1;
+                    }
+                },
+                Some(&c) if AUTOMATIC_VARIABLES.contains(&c) => {
+                    self.warn(
+                        line,
+                        format!("automatic variable `${c}` has no otto equivalent; left as written"),
+                    );
+                    out.push('$');
+                    out.push(c);
+                    i += 2;
+                }
+                Some(&c) => {
+                    out.push('$');
+                    out.push(c);
+                    i += 2;
+                }
+                None => {
+                    out.push('$');
+                    i += 1;
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Rewrite the inside of one `$(...)` / `${...}`.
+    fn rewrite_expansion(&mut self, open: char, inner: &str, line: usize, known: &HashSet<String>) -> String {
+        let verbatim = || match open {
+            '(' => format!("$({inner})"),
+            _ => format!("${{{inner}}}"),
+        };
+
+        // `$(shell CMD)` is exactly bash's `$(CMD)`, which otto's env evaluator
+        // and every task script already understand.
+        if let Some(command) = inner.strip_prefix("shell ") {
+            let rewritten = self.rewrite_expansions(command.trim(), line, known);
+            return format!("$({rewritten})");
+        }
+
+        if let Some(first) = inner.chars().next()
+            && AUTOMATIC_VARIABLES.contains(&first)
+        {
+            self.warn(
+                line,
+                format!(
+                    "automatic variable `{}` has no otto equivalent; left as written",
+                    verbatim()
+                ),
+            );
+            return verbatim();
+        }
+
+        if !is_shell_identifier(inner) {
+            // A make function call, or a name bash cannot spell. Translating it
+            // would be a guess; saying so is not.
+            self.warn(
+                line,
+                format!(
+                    "`{}` is a make expression otto cannot translate; left as written",
+                    verbatim()
+                ),
+            );
+            return verbatim();
+        }
+
+        if SPECIAL_MAKE_VARIABLES.contains(&inner) {
+            self.warn(
+                line,
+                format!("`{inner}` is a make-internal variable; it will be empty in otto"),
+            );
+        } else if !known.contains(inner) {
+            self.warn(
+                line,
+                format!("`{inner}` is not defined in the Makefile; it will come from the environment"),
+            );
+        }
+
+        format!("${{{inner}}}")
     }
 
     fn determine_default_tasks(&self) -> Vec<String> {
@@ -150,57 +363,136 @@ impl OttoConverter {
     }
 }
 
+/// Index of the `)`/`}` matching the opener at `open`, counting nested pairs of
+/// the same kind, or `None` when the expansion is never closed.
+fn matching_close(chars: &[char], open: usize) -> Option<usize> {
+    let (opener, closer) = match chars.get(open)? {
+        '(' => ('(', ')'),
+        '{' => ('{', '}'),
+        _ => return None,
+    };
+
+    let mut depth = 0usize;
+    for (offset, c) in chars[open..].iter().enumerate() {
+        if *c == opener {
+            depth += 1;
+        } else if *c == closer {
+            depth -= 1;
+            if depth == 0 {
+                return Some(open + offset);
+            }
+        }
+    }
+
+    None
+}
+
+/// True when the name can be spelled as a bash variable. `$(BINARY-NAME)` can
+/// not: bash reads `${BINARY-NAME}` as "BINARY, or NAME if unset".
+fn is_shell_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::makefile::ast::{Target, Variable};
 
-    #[test]
-    fn test_convert_simple_variable() {
-        let mut ast = MakefileAst::new();
-        ast.variables.push(Variable {
-            name: "VAR".to_string(),
-            value: "value".to_string(),
-            assignment_type: AssignmentType::Simple,
-        });
+    fn variable(name: &str, value: &str, assignment_type: AssignmentType) -> Variable {
+        Variable {
+            name: name.to_string(),
+            value: value.to_string(),
+            assignment_type,
+            line: 1,
+        }
+    }
 
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
+    fn target(name: &str, commands: &[&str]) -> Target {
+        Target {
+            name: name.to_string(),
+            dependencies: Vec::new(),
+            commands: commands.iter().map(|c| c.to_string()).collect(),
+            comment: None,
+            is_phony: false,
+            line: 1,
+        }
+    }
 
-        assert_eq!(config.otto.envs.get("VAR"), Some(&"value".to_string()));
+    fn convert(ast: MakefileAst) -> (ConfigSpec, Vec<Diagnostic>) {
+        let mut converter = OttoConverter::new(ast);
+        let config = converter.convert().expect("convert failed");
+        let diagnostics = converter.diagnostics().to_vec();
+        (config, diagnostics)
+    }
+
+    fn messages(diagnostics: &[Diagnostic]) -> String {
+        diagnostics.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n")
     }
 
     #[test]
-    fn test_convert_shell_variable() {
+    fn test_convert_simple_variable() {
         let mut ast = MakefileAst::new();
-        ast.variables.push(Variable {
-            name: "VERSION".to_string(),
-            value: "$(shell git describe --tags)".to_string(),
-            assignment_type: AssignmentType::ShellExecution,
-        });
+        ast.variables.push(variable("VAR", "value", AssignmentType::Simple));
 
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
+        let (config, diagnostics) = convert(ast);
 
-        let version_value = config.otto.envs.get("VERSION").unwrap();
-        assert!(version_value.contains("$(shell"));
+        assert_eq!(config.otto.envs.get("VAR"), Some(&"value".to_string()));
+        assert!(diagnostics.is_empty(), "{}", messages(&diagnostics));
+    }
+
+    #[test]
+    fn test_shell_variable_loses_the_shell_prefix() {
+        let mut ast = MakefileAst::new();
+        ast.variables.push(variable(
+            "VERSION",
+            "$(shell git describe --tags)",
+            AssignmentType::ShellExecution,
+        ));
+
+        let (config, _) = convert(ast);
+
+        assert_eq!(
+            config.otto.envs.get("VERSION"),
+            Some(&"$(git describe --tags)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_variable_reference_becomes_a_shell_reference() {
+        let mut ast = MakefileAst::new();
+        ast.variables.push(variable("NAME", "example", AssignmentType::Simple));
+        ast.variables
+            .push(variable("IMAGE", "$(NAME):latest", AssignmentType::Simple));
+
+        let (config, diagnostics) = convert(ast);
+
+        assert_eq!(config.otto.envs.get("IMAGE"), Some(&"${NAME}:latest".to_string()));
+        assert!(diagnostics.is_empty(), "{}", messages(&diagnostics));
+    }
+
+    #[test]
+    fn test_append_assignment_is_reported() {
+        let mut ast = MakefileAst::new();
+        ast.variables.push(variable("FLAGS", "-g", AssignmentType::Append));
+
+        let (_, diagnostics) = convert(ast);
+
+        assert!(
+            messages(&diagnostics).contains("cannot append"),
+            "{}",
+            messages(&diagnostics)
+        );
     }
 
     #[test]
     fn test_convert_simple_target() {
         let mut ast = MakefileAst::new();
-        ast.targets.push(Target {
-            name: "build".to_string(),
-            dependencies: Vec::new(),
-            commands: vec!["echo Building".to_string()],
-            comment: None,
-            is_phony: false,
-        });
+        ast.targets.push(target("build", &["echo Building"]));
 
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
+        let (config, _) = convert(ast);
 
-        assert!(config.tasks.contains_key("build"));
         let task = config.tasks.get("build").unwrap();
         assert_eq!(task.name, "build");
         assert!(task.action.contains("echo Building"));
@@ -210,16 +502,11 @@ mod tests {
     #[test]
     fn test_convert_target_with_dependencies() {
         let mut ast = MakefileAst::new();
-        ast.targets.push(Target {
-            name: "build".to_string(),
-            dependencies: vec!["test".to_string(), "clean".to_string()],
-            commands: vec!["echo Building".to_string()],
-            comment: None,
-            is_phony: false,
-        });
+        let mut build = target("build", &["echo Building"]);
+        build.dependencies = vec!["test".to_string(), "clean".to_string()];
+        ast.targets.push(build);
 
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
+        let (config, _) = convert(ast);
 
         let task = config.tasks.get("build").unwrap();
         assert_eq!(task.before.len(), 2);
@@ -230,38 +517,25 @@ mod tests {
     #[test]
     fn test_convert_target_with_comment() {
         let mut ast = MakefileAst::new();
-        ast.targets.push(Target {
-            name: "build".to_string(),
-            dependencies: Vec::new(),
-            commands: vec!["echo Building".to_string()],
-            comment: Some("Build the project".to_string()),
-            is_phony: false,
-        });
+        let mut build = target("build", &["echo Building"]);
+        build.comment = Some("Build the project".to_string());
+        ast.targets.push(build);
 
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
+        let (config, _) = convert(ast);
 
-        let task = config.tasks.get("build").unwrap();
-        assert_eq!(task.help, Some("Build the project".to_string()));
+        assert_eq!(
+            config.tasks.get("build").unwrap().help,
+            Some("Build the project".to_string())
+        );
     }
 
     #[test]
     fn test_convert_multiple_commands() {
         let mut ast = MakefileAst::new();
-        ast.targets.push(Target {
-            name: "build".to_string(),
-            dependencies: Vec::new(),
-            commands: vec![
-                "mkdir -p dist".to_string(),
-                "echo Building".to_string(),
-                "echo Done".to_string(),
-            ],
-            comment: None,
-            is_phony: false,
-        });
+        ast.targets
+            .push(target("build", &["mkdir -p dist", "echo Building", "echo Done"]));
 
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
+        let (config, _) = convert(ast);
 
         let task = config.tasks.get("build").unwrap();
         assert!(task.action.contains("mkdir -p dist"));
@@ -270,43 +544,179 @@ mod tests {
     }
 
     #[test]
+    fn test_recipe_variable_becomes_bash_and_never_stays_make() {
+        let mut ast = MakefileAst::new();
+        ast.variables.push(variable("NAME", "example", AssignmentType::Simple));
+        ast.targets
+            .push(target("build", &["echo Building $(NAME) version ${NAME}"]));
+
+        let (config, diagnostics) = convert(ast);
+
+        let action = &config.tasks.get("build").unwrap().action;
+        assert!(action.contains("echo Building ${NAME} version ${NAME}"), "{action}");
+        assert!(!action.contains("$(NAME)"), "{action}");
+        assert!(diagnostics.is_empty(), "{}", messages(&diagnostics));
+    }
+
+    #[test]
+    fn test_dollar_dollar_becomes_one_dollar() {
+        let mut ast = MakefileAst::new();
+        ast.targets.push(target("show", &["awk '{print $$1}'"]));
+
+        let (config, _) = convert(ast);
+
+        let action = &config.tasks.get("show").unwrap().action;
+        assert!(action.contains("awk '{print $1}'"), "{action}");
+    }
+
+    #[test]
+    fn test_undefined_variable_is_reported() {
+        let mut ast = MakefileAst::new();
+        ast.targets.push(target("build", &["echo $(NOWHERE)"]));
+
+        let (config, diagnostics) = convert(ast);
+
+        assert!(config.tasks.get("build").unwrap().action.contains("${NOWHERE}"));
+        assert!(
+            messages(&diagnostics).contains("`NOWHERE` is not defined in the Makefile"),
+            "{}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn test_automatic_variable_is_reported() {
+        let mut ast = MakefileAst::new();
+        ast.targets.push(target("build", &["gcc -c $< -o $@"]));
+
+        let (config, diagnostics) = convert(ast);
+
+        let action = &config.tasks.get("build").unwrap().action;
+        assert!(action.contains("$<") && action.contains("$@"), "{action}");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.message.contains("automatic variable"))
+                .count(),
+            2,
+            "{}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn test_make_function_in_a_recipe_is_reported_not_translated() {
+        let mut ast = MakefileAst::new();
+        ast.targets.push(target("list", &["echo $(wildcard *.c)"]));
+
+        let (config, diagnostics) = convert(ast);
+
+        assert!(config.tasks.get("list").unwrap().action.contains("$(wildcard *.c)"));
+        assert!(
+            messages(&diagnostics).contains("make expression otto cannot translate"),
+            "{}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn test_special_make_variable_is_reported() {
+        let mut ast = MakefileAst::new();
+        ast.targets.push(target("help", &["awk -f help.awk $(MAKEFILE_LIST)"]));
+
+        let (_, diagnostics) = convert(ast);
+
+        assert!(
+            messages(&diagnostics).contains("`MAKEFILE_LIST` is a make-internal variable"),
+            "{}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn test_unbalanced_expansion_is_reported() {
+        let mut ast = MakefileAst::new();
+        ast.targets.push(target("build", &["echo $(NAME"]));
+
+        let (_, diagnostics) = convert(ast);
+
+        assert!(
+            messages(&diagnostics).contains("unbalanced"),
+            "{}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn test_non_shell_name_is_left_alone() {
+        let mut ast = MakefileAst::new();
+        ast.targets.push(target("build", &["echo $(BINARY-NAME)"]));
+
+        let (config, diagnostics) = convert(ast);
+
+        // `${BINARY-NAME}` means "BINARY, or NAME if unset" in bash: rewriting
+        // it would be a silent behavior change.
+        assert!(config.tasks.get("build").unwrap().action.contains("$(BINARY-NAME)"));
+        assert!(
+            messages(&diagnostics).contains("cannot translate"),
+            "{}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn test_duplicate_target_is_reported() {
+        let mut ast = MakefileAst::new();
+        ast.targets.push(target("build", &["echo first"]));
+        let mut second = target("build", &["echo second"]);
+        second.line = 10;
+        ast.targets.push(second);
+
+        let (config, diagnostics) = convert(ast);
+
+        assert_eq!(config.tasks.len(), 1);
+        assert!(config.tasks.get("build").unwrap().action.contains("echo second"));
+        assert!(
+            messages(&diagnostics).contains("duplicate target `build` overrides the rule at line 1, discarding"),
+            "{}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
     fn test_default_goal_conversion() {
         let mut ast = MakefileAst::new();
         ast.default_goal = Some("build".to_string());
-        ast.targets.push(Target {
-            name: "build".to_string(),
-            dependencies: Vec::new(),
-            commands: vec!["echo Building".to_string()],
-            comment: None,
-            is_phony: false,
-        });
+        ast.targets.push(target("build", &["echo Building"]));
 
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
+        let (config, diagnostics) = convert(ast);
 
         assert_eq!(config.otto.tasks, vec!["build".to_string()]);
+        assert!(diagnostics.is_empty(), "{}", messages(&diagnostics));
+    }
+
+    #[test]
+    fn test_default_goal_without_a_task_is_reported() {
+        let mut ast = MakefileAst::new();
+        ast.default_goal = Some("all".to_string());
+        ast.targets.push(target("build", &["echo Building"]));
+
+        let (_, diagnostics) = convert(ast);
+
+        assert!(
+            messages(&diagnostics).contains("default goal `all` has no converted task"),
+            "{}",
+            messages(&diagnostics)
+        );
     }
 
     #[test]
     fn test_no_default_goal_uses_first_target() {
         let mut ast = MakefileAst::new();
-        ast.targets.push(Target {
-            name: "build".to_string(),
-            dependencies: Vec::new(),
-            commands: vec!["echo Building".to_string()],
-            comment: None,
-            is_phony: false,
-        });
-        ast.targets.push(Target {
-            name: "test".to_string(),
-            dependencies: Vec::new(),
-            commands: vec!["echo Testing".to_string()],
-            comment: None,
-            is_phony: false,
-        });
+        ast.targets.push(target("build", &["echo Building"]));
+        ast.targets.push(target("test", &["echo Testing"]));
 
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
+        let (config, _) = convert(ast);
 
         assert_eq!(config.otto.tasks, vec!["build".to_string()]);
     }
@@ -314,20 +724,10 @@ mod tests {
     #[test]
     fn test_command_prefix_handling() {
         let mut ast = MakefileAst::new();
-        ast.targets.push(Target {
-            name: "build".to_string(),
-            dependencies: Vec::new(),
-            commands: vec![
-                "@echo Hidden".to_string(),
-                "-mkdir -p dist".to_string(),
-                "echo Visible".to_string(),
-            ],
-            comment: None,
-            is_phony: false,
-        });
+        ast.targets
+            .push(target("build", &["@echo Hidden", "-mkdir -p dist", "echo Visible"]));
 
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
+        let (config, _) = convert(ast);
 
         let task = config.tasks.get("build").unwrap();
         // @ prefix should be removed
@@ -341,11 +741,22 @@ mod tests {
 
     #[test]
     fn test_empty_makefile() {
-        let ast = MakefileAst::new();
-        let converter = OttoConverter::new(ast);
-        let config = converter.convert().unwrap();
+        let (config, _) = convert(MakefileAst::new());
 
         assert!(config.tasks.is_empty());
         assert_eq!(config.otto.tasks, vec!["*".to_string()]);
+    }
+
+    #[test]
+    fn test_converted_spec_carries_no_machine_specific_jobs() {
+        let mut ast = MakefileAst::new();
+        ast.targets.push(target("build", &["echo Building"]));
+
+        let (config, _) = convert(ast);
+
+        // `jobs` at its default is omitted on serialize, so the converting
+        // machine's CPU count never reaches the ottofile.
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(!yaml.contains("jobs:"), "{yaml}");
     }
 }

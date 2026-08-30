@@ -32,6 +32,9 @@ pub struct Variable {
     pub name: String,
     pub value: String,
     pub assignment_type: AssignmentType,
+    /// 1-based physical line the assignment starts on, so a converter warning
+    /// about this variable can name where to go fix it.
+    pub line: usize,
 }
 
 /// Types of variable assignments in Make
@@ -52,6 +55,9 @@ pub struct Target {
     pub commands: Vec<String>,
     pub comment: Option<String>,
     pub is_phony: bool,
+    /// 1-based physical line the rule starts on. Also what tells a duplicate
+    /// target apart from the rule it overrides.
+    pub line: usize,
 }
 
 #[cfg(test)]
@@ -73,6 +79,7 @@ mod tests {
             name: "VAR".to_string(),
             value: "value".to_string(),
             assignment_type: AssignmentType::Simple,
+            line: 1,
         };
         assert_eq!(var.name, "VAR");
         assert_eq!(var.value, "value");
@@ -87,6 +94,7 @@ mod tests {
             commands: vec!["echo Building".to_string()],
             comment: Some("Build the project".to_string()),
             is_phony: true,
+            line: 3,
         };
         assert_eq!(target.name, "build");
         assert_eq!(target.dependencies.len(), 1);
