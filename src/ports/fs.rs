@@ -36,6 +36,9 @@ pub trait FileSystem: Send + Sync {
     // Sync methods (for use in sync contexts like ActionProcessor)
     fn exists_sync(&self, path: &Path) -> bool;
     fn metadata_sync(&self, path: &Path) -> Result<FileMetadata>;
+    fn read_sync(&self, path: &Path) -> Result<Vec<u8>>;
+    /// Write `contents` to `path` atomically: a reader either sees the previous
+    /// contents or the new ones, never a partial file.
     fn write_sync(&self, path: &Path, contents: &[u8]) -> Result<()>;
     fn create_dir_all_sync(&self, path: &Path) -> Result<()>;
     fn remove_file_sync(&self, path: &Path) -> Result<()>;
@@ -47,6 +50,26 @@ pub trait FileSystem: Send + Sync {
 /// Real filesystem implementation using tokio::fs
 #[derive(Debug, Clone, Default)]
 pub struct RealFs;
+
+/// Write `contents` to `path` via a temporary file in the same directory plus a
+/// rename.
+///
+/// `fs::write` truncates first and then writes, so a crash (or a full disk) in
+/// between leaves a torn file under the final name. That matters most for the
+/// content-addressed script cache, where the name is a promise about the
+/// contents: a truncated entry kept its name and was re-executed forever.
+/// Same-directory staging keeps the rename on one filesystem, where it is atomic.
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(contents)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path)
+        .map_err(|e| eyre::eyre!("Failed to persist {}: {}", path.display(), e.error))?;
+    Ok(())
+}
 
 #[async_trait]
 impl FileSystem for RealFs {
@@ -77,7 +100,9 @@ impl FileSystem for RealFs {
     }
 
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        Ok(tokio::fs::write(path, contents).await?)
+        let path = path.to_path_buf();
+        let contents = contents.to_vec();
+        tokio::task::spawn_blocking(move || atomic_write(&path, &contents)).await?
     }
 
     async fn create_dir_all(&self, path: &Path) -> Result<()> {
@@ -153,8 +178,12 @@ impl FileSystem for RealFs {
         })
     }
 
+    fn read_sync(&self, path: &Path) -> Result<Vec<u8>> {
+        Ok(std::fs::read(path)?)
+    }
+
     fn write_sync(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        Ok(std::fs::write(path, contents)?)
+        atomic_write(path, contents)
     }
 
     fn create_dir_all_sync(&self, path: &Path) -> Result<()> {
@@ -434,6 +463,14 @@ impl FileSystem for MemFs {
         }
     }
 
+    fn read_sync(&self, path: &Path) -> Result<Vec<u8>> {
+        let files = self.files.read().unwrap();
+        files
+            .get(&path.to_path_buf())
+            .cloned()
+            .ok_or_else(|| eyre::eyre!("File not found: {}", path.display()))
+    }
+
     fn write_sync(&self, path: &Path, contents: &[u8]) -> Result<()> {
         let path = path.to_path_buf();
 
@@ -442,6 +479,7 @@ impl FileSystem for MemFs {
             self.add_dir(parent);
         }
 
+        // Inserting the whole value under the lock is already atomic for readers.
         self.files.write().unwrap().insert(path, contents.to_vec());
         Ok(())
     }
@@ -507,6 +545,31 @@ mod tests {
         let content = fs.read_to_string(path).await.unwrap();
 
         assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn realfs_write_sync_replaces_the_file_and_leaves_no_debris() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("script.sh");
+        let fs = RealFs;
+
+        fs.write_sync(&path, b"first version, longer").unwrap();
+        fs.write_sync(&path, b"second").unwrap();
+
+        assert_eq!(fs.read_sync(&path).unwrap(), b"second");
+        // The staging file is renamed, never left behind next to the target.
+        let entries: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 1, "expected only the target file, got {entries:?}");
+    }
+
+    #[test]
+    fn realfs_read_sync_reports_a_missing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fs = RealFs;
+        assert!(fs.read_sync(&temp_dir.path().join("nope")).is_err());
     }
 
     #[tokio::test]

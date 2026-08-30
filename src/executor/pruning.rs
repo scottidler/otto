@@ -18,6 +18,48 @@ pub fn resolve_otto_home() -> Result<PathBuf> {
     }
 }
 
+/// Decide whether `path` may be recursively deleted as part of cleaning `root`,
+/// returning the canonical path when it may.
+///
+/// Two rules, both of which `remove_dir_all` needs and neither of which
+/// `Path::is_dir()` supplies:
+///
+/// - **Never follow a link.** `is_dir()` follows symlinks, so a symlinked run
+///   directory under `~/.otto` made `remove_dir_all` delete the real directory
+///   it pointed at - anywhere on the disk - and leave the link behind.
+/// - **Never leave the root.** After resolving links, the target must still sit
+///   under the tree being cleaned, so a `..` component or a relocated mount
+///   cannot walk out of it.
+pub fn ensure_deletable_under_root(path: &Path, root: &Path) -> Result<PathBuf> {
+    let meta = fs::symlink_metadata(path).map_err(|e| eyre::eyre!("cannot stat {}: {}", path.display(), e))?;
+    if meta.file_type().is_symlink() {
+        return Err(eyre::eyre!(
+            "{} is a symlink; refusing to delete through it",
+            path.display()
+        ));
+    }
+
+    let root_canonical = fs::canonicalize(root).map_err(|e| eyre::eyre!("cannot resolve {}: {}", root.display(), e))?;
+    let path_canonical = fs::canonicalize(path).map_err(|e| eyre::eyre!("cannot resolve {}: {}", path.display(), e))?;
+
+    if !path_canonical.starts_with(&root_canonical) {
+        return Err(eyre::eyre!(
+            "{} resolves to {}, which is outside {}",
+            path.display(),
+            path_canonical.display(),
+            root_canonical.display()
+        ));
+    }
+    if path_canonical == root_canonical {
+        return Err(eyre::eyre!(
+            "refusing to delete the otto root {}",
+            root_canonical.display()
+        ));
+    }
+
+    Ok(path_canonical)
+}
+
 /// Run automatic pruning if enough time has elapsed since the last prune.
 ///
 /// This is best-effort: errors are logged but not propagated.
@@ -163,6 +205,56 @@ mod tests {
         // This test just verifies it doesn't panic
         let home = resolve_otto_home();
         assert!(home.is_ok());
+    }
+
+    #[test]
+    fn ensure_deletable_under_root_refuses_a_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join(".otto");
+        let victim = temp_dir.path().join("victim");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("precious.txt"), "keep me").unwrap();
+
+        let link = root.join("otto-deadbeef");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let err = ensure_deletable_under_root(&link, &root).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(victim.join("precious.txt").exists(), "the target must be untouched");
+    }
+
+    #[test]
+    fn ensure_deletable_under_root_refuses_a_path_outside_the_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join(".otto");
+        let outside = temp_dir.path().join("elsewhere");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let err = ensure_deletable_under_root(&outside, &root).unwrap_err().to_string();
+        assert!(err.contains("outside"), "{err}");
+    }
+
+    #[test]
+    fn ensure_deletable_under_root_refuses_the_root_itself() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join(".otto");
+        fs::create_dir_all(&root).unwrap();
+
+        let err = ensure_deletable_under_root(&root, &root).unwrap_err().to_string();
+        assert!(err.contains("refusing to delete the otto root"), "{err}");
+    }
+
+    #[test]
+    fn ensure_deletable_under_root_accepts_a_real_run_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join(".otto");
+        let run = root.join("otto-abc123").join("1700000000");
+        fs::create_dir_all(&run).unwrap();
+
+        let canonical = ensure_deletable_under_root(&run, &root).unwrap();
+        assert!(canonical.starts_with(fs::canonicalize(&root).unwrap()));
     }
 
     #[test]

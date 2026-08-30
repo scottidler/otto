@@ -1,5 +1,4 @@
 use eyre::{Result, eyre};
-use regex::Regex;
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;
@@ -57,6 +56,16 @@ pub fn evaluate_envs(
         }
 
         if !made_progress && !still_pending.is_empty() {
+            // A cycle is its own error, named as one. Checked before the retry
+            // below, whose message ("... 'B' not found") describes a variable
+            // that exists and blames the wrong end of the loop.
+            if let Some(cycle) = find_reference_cycle(&still_pending, envs) {
+                return Err(eyre!(
+                    "Circular dependency between environment variables: {}",
+                    cycle.join(" -> ")
+                ));
+            }
+
             // Try to evaluate remaining variables with partial resolution
             for var_name in &still_pending {
                 let raw_value = envs.get(var_name).unwrap();
@@ -108,30 +117,45 @@ fn evaluation_context(
     context
 }
 
+/// Marker byte fencing a command-output placeholder. Not a character any shell
+/// or YAML author writes, and - the point - it contains no `$`, so variable
+/// resolution walks straight past it.
+const PLACEHOLDER_MARK: char = '\u{1}';
+
 /// Evaluate a single environment variable value with shell command substitution and variable resolution
 fn evaluate_single_env_value(
     value: &str,
     env_context: &HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
 ) -> Result<String> {
-    let mut result = value.to_string();
+    // Step 1: run every `$(...)`, leaving a placeholder where its output goes.
+    //
+    // The output is data. Splicing it in before step 2 made step 2 read it as
+    // syntax: `LEAK: "$(echo '$PARENTVAL')"` resolved `$PARENTVAL` out of otto's
+    // own environment (a parent-env leak the controlled command environment
+    // exists to prevent), and output containing an undefined `$word` failed the
+    // whole config load. Placeholders keep the two stages from seeing each
+    // other's text.
+    let (templated, outputs) = resolve_shell_commands_with_env(value, working_dir, env_context)?;
 
-    // Step 1: Resolve shell command substitution $(...)
-    // Pass env_context to prevent parent environment pollution
-    result = resolve_shell_commands_with_env(&result, working_dir, env_context)?;
+    // Step 2: resolve ${VAR} / $VAR against the declared context only.
+    let resolved = resolve_env_variables(&templated, env_context)?;
 
-    result = resolve_env_variables(&result, env_context)?;
-
-    Ok(result)
+    // Step 3: put the command output back, verbatim.
+    Ok(restore_command_outputs(&resolved, &outputs))
 }
 
-/// Resolve shell command substitution patterns with explicit environment
+/// Resolve shell command substitution patterns with explicit environment.
+///
+/// Returns the value with each `$(...)` replaced by a placeholder, plus the
+/// outputs in the order they were produced.
 fn resolve_shell_commands_with_env(
     input: &str,
     working_dir: Option<&std::path::Path>,
     env_context: &HashMap<String, String>,
-) -> Result<String> {
+) -> Result<(String, Vec<String>)> {
     let mut result = String::with_capacity(input.len());
+    let mut outputs: Vec<String> = Vec::new();
     let mut rest = input;
 
     while let Some((start, end)) = find_command_substitution(rest)? {
@@ -142,12 +166,49 @@ fn resolve_shell_commands_with_env(
 
         // Execute the shell command with controlled environment
         let output = execute_shell_command_with_env(command_str, working_dir, env_context)?;
-        result.push_str(&output);
+        result.push(PLACEHOLDER_MARK);
+        result.push_str(&outputs.len().to_string());
+        result.push(PLACEHOLDER_MARK);
+        outputs.push(output);
         rest = &rest[end..];
     }
 
     result.push_str(rest);
-    Ok(result)
+    Ok((result, outputs))
+}
+
+/// Replace each placeholder with its command's output, in one pass so an output
+/// that happens to contain a placeholder is never re-substituted.
+fn restore_command_outputs(input: &str, outputs: &[String]) -> String {
+    if outputs.is_empty() {
+        return input.to_string();
+    }
+
+    let mut result = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(open) = rest.find(PLACEHOLDER_MARK) {
+        let after_open = &rest[open + PLACEHOLDER_MARK.len_utf8()..];
+        let Some(close) = after_open.find(PLACEHOLDER_MARK) else {
+            break;
+        };
+        let index: Option<usize> = after_open[..close].parse().ok();
+        match index.and_then(|i| outputs.get(i)) {
+            Some(output) => {
+                result.push_str(&rest[..open]);
+                result.push_str(output);
+                rest = &after_open[close + PLACEHOLDER_MARK.len_utf8()..];
+            }
+            None => {
+                // Not one of ours: emit the mark and keep looking.
+                result.push_str(&rest[..open + PLACEHOLDER_MARK.len_utf8()]);
+                rest = after_open;
+            }
+        }
+    }
+
+    result.push_str(rest);
+    result
 }
 
 /// Which quoting context a byte inside a command substitution sits in.
@@ -241,9 +302,28 @@ fn find_command_substitution(input: &str) -> Result<Option<(usize, usize)>> {
     Err(eyre!("unmatched '$(' (no closing ')')"))
 }
 
-/// Byte offset of the first `$(` in `bytes`.
+/// Byte offset of the first *unescaped* `$(` in `bytes`.
+///
+/// `$$` is the escape for a literal `$` (see `resolve_env_variables`), so it is
+/// consumed here too: `$$(echo hi)` is the four literal characters `$(ec`... -
+/// text, not a command. Honoring the escape in only one of the two stages would
+/// mean there is no way to write a literal `$(` at all.
 fn find_substitution_start(bytes: &[u8]) -> Option<usize> {
-    (0..bytes.len().saturating_sub(1)).find(|&i| bytes[i] == b'$' && bytes[i + 1] == b'(')
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'$' {
+            match bytes[i + 1] {
+                b'$' => {
+                    i += 2;
+                    continue;
+                }
+                b'(' => return Some(i),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Walk every `$(...)` in a value so an unmatched `$(` anywhere is caught, not just a
@@ -300,45 +380,131 @@ fn execute_shell_command_with_env(
     Ok(stdout.trim().to_string())
 }
 
-/// Resolve environment variable references: ${VAR} and $VAR
+/// Resolve environment variable references: `${VAR}`, `$VAR`, and `$$` for a
+/// literal `$`.
+///
+/// One left-to-right pass, and substituted text is never rescanned. The old
+/// implementation ran two regexes and `String::replace`d each match across the
+/// whole value, which had three consequences: every occurrence of a reference was
+/// replaced by whichever match was seen first; a value that resolved to something
+/// containing `$FOO` had that expanded too (data read as syntax); and a guard was
+/// needed to stop the `$VAR` pass from re-touching what the `${VAR}` pass had
+/// already replaced. That guard keyed off the *name*, so `"a=${FOO} b=$FOO"` left
+/// the bare `$FOO` unresolved in the generated script - visible only there,
+/// because a terminal `echo` re-expanded the raw template and printed the value
+/// anyway.
 fn resolve_env_variables(input: &str, env_context: &HashMap<String, String>) -> Result<String> {
-    let mut result = input.to_string();
+    expand_var_refs(input, |name| env_context.get(name).cloned())
+}
 
-    let re_braced = Regex::new(r"\$\{([^}]+)\}").unwrap();
-    for captures in re_braced.captures_iter(input) {
-        let full_match = &captures[0];
-        let var_name = &captures[1];
+/// Walk `input` resolving `${NAME}` / `$NAME` through `lookup`, treating `$$` as
+/// an escaped literal `$`. `lookup` returning `None` is an unresolved reference.
+fn expand_var_refs<F>(input: &str, mut lookup: F) -> Result<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let bytes = input.as_bytes();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
 
-        // ONLY use env_context - never fall back to system environment
-        // This ensures proper test isolation and prevents environment pollution
-        let var_value = env_context
-            .get(var_name)
-            .ok_or_else(|| eyre!("Environment variable '{}' not found", var_name))?;
-
-        result = result.replace(full_match, var_value);
-    }
-
-    // Handle $VAR pattern (less specific, handle after braced)
-    let re_simple = Regex::new(r"\$([A-Za-z_][A-Za-z0-9_]*)").unwrap();
-    for captures in re_simple.captures_iter(&result.clone()) {
-        let full_match = &captures[0];
-        let var_name = &captures[1];
-
-        // Skip if this is part of a ${...} pattern we already handled
-        if input.contains(&format!("${{{var_name}}}")) {
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'$' {
+                i += 1;
+            }
+            result.push_str(&input[start..i]);
             continue;
         }
 
-        // ONLY use env_context - never fall back to system environment
-        // This ensures proper test isolation and prevents environment pollution
-        let var_value = env_context
-            .get(var_name)
-            .ok_or_else(|| eyre!("Environment variable '{}' not found", var_name))?;
-
-        result = result.replace(full_match, var_value);
+        match bytes.get(i + 1) {
+            // `$$` - the escape for a literal dollar sign. Without it there is no
+            // way to put a `$` in an env value that bash will not later read as a
+            // PID or a variable.
+            Some(b'$') => {
+                result.push('$');
+                i += 2;
+            }
+            Some(b'{') => {
+                let Some(close) = input[i + 2..].find('}').map(|offset| i + 2 + offset) else {
+                    // Unterminated `${`: literal text, same as the old regex.
+                    result.push('$');
+                    i += 1;
+                    continue;
+                };
+                let name = &input[i + 2..close];
+                let value = lookup(name).ok_or_else(|| eyre!("Environment variable '{}' not found", name))?;
+                result.push_str(&value);
+                i = close + 1;
+            }
+            Some(&c) if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                    end += 1;
+                }
+                let name = &input[start..end];
+                let value = lookup(name).ok_or_else(|| eyre!("Environment variable '{}' not found", name))?;
+                result.push_str(&value);
+                i = end;
+            }
+            // A `$` before anything else (including end of string) is literal.
+            _ => {
+                result.push('$');
+                i += 1;
+            }
+        }
     }
 
     Ok(result)
+}
+
+/// Every variable name `value` references, in order. Same scanning rules as the
+/// expander, so "what it references" and "what it resolves" cannot disagree.
+fn referenced_vars(value: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let _ = expand_var_refs(value, |name| {
+        names.push(name.to_string());
+        Some(String::new())
+    });
+    names
+}
+
+/// Find a reference cycle among `pending`, returned as the path that closes it.
+///
+/// Without this a real cycle (`A: $B`, `B: $A`) reported `Failed to resolve
+/// environment variable 'A': Environment variable 'B' not found`, which names a
+/// missing variable that is not missing and points at the wrong one of the two.
+fn find_reference_cycle(pending: &[String], envs: &HashMap<String, String>) -> Option<Vec<String>> {
+    let pending_set: std::collections::HashSet<&str> = pending.iter().map(String::as_str).collect();
+
+    for start in pending {
+        let mut path: Vec<String> = vec![start.clone()];
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        seen.insert(start.clone());
+        let mut current = start.clone();
+
+        while let Some(value) = envs.get(&current) {
+            // Follow the first reference that is itself still unresolved; a cycle
+            // reachable this way is a cycle, which is all the message needs.
+            let Some(next) = referenced_vars(value)
+                .into_iter()
+                .find(|name| pending_set.contains(name.as_str()))
+            else {
+                break;
+            };
+            path.push(next.clone());
+            if next == *start {
+                return Some(path);
+            }
+            if !seen.insert(next.clone()) {
+                break;
+            }
+            current = next;
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -346,6 +512,21 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::collections::HashMap;
+
+    /// Substitute and immediately splice the outputs back in.
+    ///
+    /// Production keeps the two apart on purpose (command output must not be
+    /// rescanned for variable references), but for the cases below - which are
+    /// about *finding* the substitution, not about what happens after it - the
+    /// spliced text is the thing under test.
+    fn substitute(
+        input: &str,
+        working_dir: Option<&std::path::Path>,
+        env_context: &HashMap<String, String>,
+    ) -> Result<String> {
+        let (templated, outputs) = resolve_shell_commands_with_env(input, working_dir, env_context)?;
+        Ok(restore_command_outputs(&templated, &outputs))
+    }
 
     #[test]
     fn test_resolve_env_variables() {
@@ -359,7 +540,7 @@ mod tests {
 
     #[test]
     fn test_resolve_shell_commands() {
-        let result = resolve_shell_commands_with_env("Today is $(date +%Y-%m-%d)", None, &HashMap::new()).unwrap();
+        let result = substitute("Today is $(date +%Y-%m-%d)", None, &HashMap::new()).unwrap();
         assert!(result.starts_with("Today is 20")); // Should be a date like "Today is 2024-01-15"
     }
 
@@ -500,7 +681,7 @@ mod tests {
                 other => failures.push(format!("{}: expected a substitution, got {other:?}", case.name)),
             }
 
-            match resolve_shell_commands_with_env(case.value, None, &HashMap::new()) {
+            match substitute(case.value, None, &HashMap::new()) {
                 Ok(resolved) if resolved == case.expected => {}
                 Ok(resolved) => failures.push(format!(
                     "{}: resolved {resolved:?}, want {:?}",
@@ -546,9 +727,7 @@ mod tests {
     /// Several substitutions in one value each resolve independently, in order.
     #[test]
     fn test_multiple_substitutions_in_one_value() {
-        let result =
-            resolve_shell_commands_with_env(r#"$(echo one)/$(echo "t)wo")/$(echo three)"#, None, &HashMap::new())
-                .unwrap();
+        let result = substitute(r#"$(echo one)/$(echo "t)wo")/$(echo three)"#, None, &HashMap::new()).unwrap();
         assert_eq!(result, "one/t)wo/three");
     }
 
@@ -556,7 +735,7 @@ mod tests {
     /// of one output being pasted over every occurrence.
     #[test]
     fn test_repeated_substitution_resolves_each_occurrence() {
-        let result = resolve_shell_commands_with_env("$(echo x)-$(echo x)", None, &HashMap::new()).unwrap();
+        let result = substitute("$(echo x)-$(echo x)", None, &HashMap::new()).unwrap();
         assert_eq!(result, "x-x");
     }
 
@@ -570,9 +749,7 @@ mod tests {
             "$(echo $(echo inner)",
             "ok $(echo done) then $(echo oops",
         ] {
-            let error = resolve_shell_commands_with_env(value, None, &HashMap::new())
-                .unwrap_err()
-                .to_string();
+            let error = substitute(value, None, &HashMap::new()).unwrap_err().to_string();
             assert!(
                 error.contains("unmatched '$('"),
                 "expected an unmatched-paren error for {value:?}, got: {error}"
@@ -612,8 +789,7 @@ mod tests {
     /// A value with no substitution at all comes through untouched.
     #[test]
     fn test_value_without_substitution_is_unchanged() {
-        let result =
-            resolve_shell_commands_with_env("no substitutions (but parens) here", None, &HashMap::new()).unwrap();
+        let result = substitute("no substitutions (but parens) here", None, &HashMap::new()).unwrap();
         assert_eq!(result, "no substitutions (but parens) here");
     }
 
@@ -801,7 +977,10 @@ mod tests {
     }
 
     /// Two keys defined in terms of each other still fail loudly instead of silently
-    /// resolving to inherited values or spinning forever.
+    /// resolving to inherited values or spinning forever - and the message says
+    /// *circular*. It used to say `Failed to resolve environment variable 'A':
+    /// Environment variable 'B' not found`, which names a variable that is not
+    /// missing and blames whichever end of the loop HashMap order reached first.
     #[test]
     #[serial]
     fn test_evaluate_envs_circular_reference_still_errors() {
@@ -817,8 +996,10 @@ mod tests {
 
         let error = evaluate_envs(&envs, None).unwrap_err().to_string();
         assert!(
-            error.contains("Failed to resolve environment variable") && error.contains("not found"),
-            "expected a loud circular-reference failure, got: {error}"
+            error.contains("Circular dependency between environment variables")
+                && error.contains(a)
+                && error.contains(b),
+            "expected a cycle named as a cycle, got: {error}"
         );
     }
 
@@ -845,8 +1026,93 @@ mod tests {
         }
         let error = result.unwrap_err().to_string();
         assert!(
-            error.contains("Failed to resolve environment variable") && error.contains("not found"),
-            "expected a loud circular-reference failure, got: {error}"
+            error.contains("Circular dependency between environment variables")
+                && error.contains(a)
+                && error.contains(b),
+            "expected a cycle named as a cycle, got: {error}"
+        );
+    }
+
+    /// Command output is data. It used to be spliced in before variable
+    /// resolution, so a `$NAME` inside the output was resolved - out of otto's
+    /// own environment, which is the leak the controlled command environment
+    /// exists to prevent.
+    #[test]
+    #[serial]
+    fn command_output_is_not_rescanned_for_variable_references() {
+        unsafe {
+            env::set_var("OTTO_TEST_PARENTVAL", "leaked-parent-value");
+        }
+
+        let mut envs = HashMap::new();
+        envs.insert("LEAK".to_string(), "$(echo '$OTTO_TEST_PARENTVAL')".to_string());
+        let result = evaluate_envs(&envs, None);
+
+        unsafe {
+            env::remove_var("OTTO_TEST_PARENTVAL");
+        }
+
+        let evaluated = result.expect("command output must not fail the load");
+        assert_eq!(
+            evaluated.get("LEAK").map(String::as_str),
+            Some("$OTTO_TEST_PARENTVAL"),
+            "output must arrive as the literal text the command printed"
+        );
+    }
+
+    /// Same defect, the other symptom: output naming something undefined used to
+    /// fail the whole config load rather than being carried as text.
+    #[test]
+    #[serial]
+    fn command_output_naming_an_undefined_variable_is_still_text() {
+        let mut envs = HashMap::new();
+        envs.insert("MSG".to_string(), "$(echo 'cost is $undefined_thing')".to_string());
+
+        let evaluated = evaluate_envs(&envs, None).expect("undefined name in output must not fail the load");
+        assert_eq!(
+            evaluated.get("MSG").map(String::as_str),
+            Some("cost is $undefined_thing")
+        );
+    }
+
+    /// `${FOO}` and `$FOO` in one value both resolve. The old guard skipped the
+    /// bare form whenever the braced form appeared anywhere in the same value,
+    /// and only the generated script showed it (`export BOTH="a=fooval b=$FOO"`).
+    #[test]
+    fn both_reference_forms_resolve_in_one_value() {
+        let mut context = HashMap::new();
+        context.insert("FOO".to_string(), "fooval".to_string());
+
+        let result = resolve_env_variables("a=${FOO} b=$FOO", &context).unwrap();
+        assert_eq!(result, "a=fooval b=fooval");
+    }
+
+    /// A resolved value is not itself rescanned, so a value that happens to
+    /// contain `$SOMETHING` stays as it is.
+    #[test]
+    fn a_substituted_value_is_not_rescanned() {
+        let mut context = HashMap::new();
+        context.insert("FOO".to_string(), "$BAR".to_string());
+        context.insert("BAR".to_string(), "should-not-appear".to_string());
+
+        let result = resolve_env_variables("${FOO}", &context).unwrap();
+        assert_eq!(result, "$BAR");
+    }
+
+    /// `$$` is the literal-dollar escape, and it is honored by both stages: the
+    /// variable pass and the command-substitution scan.
+    #[test]
+    fn double_dollar_is_a_literal_dollar() {
+        let context = HashMap::new();
+        assert_eq!(resolve_env_variables("cost: $$5", &context).unwrap(), "cost: $5");
+
+        let mut envs = HashMap::new();
+        envs.insert("LITERAL".to_string(), "$$(echo ran)".to_string());
+        let evaluated = evaluate_envs(&envs, None).expect("an escaped $( must not execute");
+        assert_eq!(
+            evaluated.get("LITERAL").map(String::as_str),
+            Some("$(echo ran)"),
+            "an escaped substitution must stay text"
         );
     }
 }

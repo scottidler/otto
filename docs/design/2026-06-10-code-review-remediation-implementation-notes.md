@@ -502,3 +502,135 @@ OTTO_HOME=/tmp/ottohome-final2 otto ci -> exit 0, [ci] ✅ All CI checks passed!
   the TUI.** That reads right (the run did not complete), but it means quitting
   a dashboard on a healthy run yields a non-zero exit. Confirm that is wanted
   rather than a distinct exit code or a zero exit.
+
+## Phase 3: Containment - injection, deletion safety, output integrity
+
+### Design decisions
+
+- **Values are single-quoted, not routed through the process environment.** The
+  bullet offered both (`action.rs` generators; the scheduler already calls
+  `.envs(&envs)`). The generated script is a user-facing artifact - it is cached,
+  symlinked into the run's `tasks/` directory and is the thing you re-run by hand
+  when debugging - so a script that only works when otto set the environment for
+  it would be a regression. `bash_quote` / `python_quote` (`executor/action.rs`)
+  quote at the four generators; the process environment keeps carrying the same
+  values as before.
+- **Identifiers are validated, not quoted.** `validate_identifier`
+  (`executor/action.rs`) rejects an `envs:` key or parameter name that is not a
+  shell/Python identifier. Quoting protects the right side of the `=`; nothing
+  protects the left, so `envs: {"X; touch /tmp/pwned": v}` would still have run.
+  A loud config-time error naming the task and the key beats generating a script
+  the author did not write.
+- **Task names are quoted too.** Found while testing: a foreach item `a"b` names
+  the subtask `fe:a"b`, and `otto_serialize_output "{task}"` in the epilogue then
+  ended the argument early - `unexpected EOF while looking for matching '"'`. The
+  four `otto_deserialize_input` / `otto_serialize_output` emissions now quote the
+  name through the same helpers.
+- **Foreach identifiers are slugified, not rejected.** `sanitize_identifier`
+  (`cfg/task.rs`) maps path separators, whitespace and control characters to `_`
+  and replaces an all-dots identifier outright, so an item is always exactly one
+  path component. Rejecting would break a legitimate `foreach: command:` that
+  lists paths (`git ls-files`), and the duplicate-identifier check already turns
+  a slug collision into a loud error. Applied at each source *and* at
+  `expand_foreach_with_items`, which is the site that turns an identifier into a
+  task name.
+- **`$$` is the literal-dollar escape, honored by both evaluation stages.**
+  `find_substitution_start` skips `$$` and `expand_var_refs` emits a single `$`
+  for it (`cfg/env.rs`). That closes the "no escape for a literal `$`" bullet and
+  gives `expand_foreach_with_items` a way to inject an item as data:
+  `escape_literal_env_value` escapes the value so `${IFS}` no longer aborts the
+  task's environment with `Environment variable 'IFS' not found` and `$(...)` in
+  an item never runs.
+- **Command output is spliced back after variable resolution, via placeholders.**
+  `evaluate_single_env_value` (`cfg/env.rs`) substitutes `$(...)` to a
+  `\u{1}<n>\u{1}` marker, resolves variables, then restores. The marker carries no
+  `$`, so the variable pass cannot see into command output.
+- **`resolve_env_variables` is a single left-to-right pass, not two regexes.**
+  Substituted text is never rescanned. This is what deletes the bare-`$VAR` guard
+  the bullet named, and it also stops a resolved value that happens to contain
+  `$FOO` from being expanded again.
+- **One deletion fence, used by both clean paths.** `ensure_deletable_under_root`
+  (`executor/pruning.rs`) refuses a symlink, refuses a target that canonicalizes
+  outside the root, and refuses the root itself. Called from the filesystem
+  delete loop (`cli/commands/clean.rs`) and from the DB-driven delete
+  (`state/manager.rs`); both scans additionally skip symlinked entries via
+  `entry.file_type()`, since `is_dir()` follows links.
+- **Cache hits are validated by content, not by existence** (`write_script`,
+  `executor/action.rs`), and `RealFs` writes through a same-directory temp file
+  plus rename (`atomic_write`, `ports/fs.rs`). Either alone leaves the hole: an
+  atomic writer still can't repair an entry torn by an older otto, and validation
+  alone still tears on the next crash.
+- **The output drain reads bytes.** `read_until(b'\n')` plus `from_utf8_lossy`
+  for display in `process_output`, and the same in `read_output`, which otherwise
+  could not read back a log the drain had faithfully written.
+
+### Deviations
+
+- **The `$$` escape is implemented (not just documented), and used internally.**
+  The bullet said "Support `$$` or document"; supporting it is what makes the
+  foreach-item escaping possible, so the two bullets share one mechanism.
+- **`resolve_env_variables` was rewritten rather than having its guard deleted.**
+  Same observable fix the bullet asks for (`BOTH: "a=${FOO} b=$FOO"` now
+  generates `export BOTH='a=fooval b=fooval'`), at the seam that also removes the
+  per-call `Regex::new` cost the same phase names - there is no regex left in
+  `cfg/env.rs`, so the `LazyLock` sub-bullet is satisfied by deletion.
+- **Fail-closed was applied at the global-env site only.** `DynamicResolver::global_envs`
+  and `Parser::global_envs` now propagate. The two task-level swallows
+  (`executor/task.rs:141`, `cli/parser.rs:293`, "Warning: Failed to evaluate
+  environment variables for task ...") are a different message and a different
+  signature (`-> Self`, ~10 call sites across `src/` and `tests/`); left alone
+  deliberately - see Open questions.
+- **Python parameter names now get bash's hyphen rule** (`--dry-run` binds as
+  `dry_run`). Previously the python generator emitted `dry-run = '...'`, a syntax
+  error; the alternative was rejecting the param outright.
+- **`MAX_ITERATIONS` is unchanged at 100.** The bullet's "threshold is ~200" was
+  about the *observed* depth at which a chain fails; the constant was already 100
+  and already returned `Err`. What changed is that the error now reaches the user
+  instead of being swallowed.
+- **Four shipped tests were inverted, all of which pinned behavior this phase
+  changes**: `test_evaluate_envs_circular_reference_still_errors` and
+  `test_evaluate_envs_circular_reference_errors_even_when_inherited`
+  (`cfg/env.rs`) asserted the wrong cycle message the phase replaces;
+  `test_unmatched_substitution_is_reported_with_key_and_value`
+  (`tests/env_command_substitution_test.rs`) asserted the warn-and-continue
+  behavior (`BROKEN=[UNSET]`, exit 0) the fail-closed change removes; and
+  `test_circular_env_definition_still_fails_loudly`
+  (`tests/env_self_reference_test.rs`) asserted the same old message. Three
+  generator assertions in `executor/action.rs` were updated for the new quoting.
+
+### Tradeoffs
+
+- **Slugify vs reject for foreach identifiers.** Slugifying can merge two items
+  into one name (`a/b` and `a_b`), which surfaces as the existing duplicate error
+  rather than silently running one task. Rejecting is louder but breaks path-
+  listing commands, which are the main reason `foreach: command:` exists.
+- **Validating a cache hit costs a read per task per run.** The alternative -
+  trusting the name - is what let a 60-byte stump report `finished successfully`
+  on every future run. A hash of the read bytes would cost the same read.
+- **`\u{1}` as the placeholder marker vs a random token.** A value containing the
+  marker with a matching index could confuse the restore pass. It is not a
+  security boundary (the value is the author's own), and the alternative costs a
+  per-evaluation RNG and a longer marker for a case no YAML author can hit
+  accidentally.
+- **Escaping foreach values with `$$` vs carrying a literal-envs map.** The map
+  is more explicit, but `TaskSpec` has 73 struct-literal construction sites in
+  `src/` and `tests/`, so a new field is a large mechanical change for a
+  behavior the escape already delivers exactly.
+
+### Open questions
+
+- **The two task-level env-evaluation swallows are still warnings.** A task whose
+  own `envs:` cannot be evaluated prints `Warning: ...` and runs with an empty
+  environment. Making them fail closed means `Task::from_task*` returns `Result`
+  at ~10 call sites. Worth doing; it is not in this phase's bullets, which name
+  only the global site.
+- **`OTTO_HOME` alone still does not isolate the database.** Confirmed again
+  here: `OTTO_HOME=<scratch> otto ci` fails 6 `cleanup_integration_test` cases
+  when `OTTO_DB_PATH` is *also* set, at HEAD as well as with this phase's
+  changes, because those tests isolate `OTTO_HOME` only. That is the Phase 4
+  bullet; the tests will need updating with it.
+- **`ensure_deletable_under_root` fences the DB delete against `$HOME/.otto`,
+  which is the path `manager.rs` builds.** That path also ignores `OTTO_HOME` and
+  reconstructs `otto-<hash>` rather than `<name>-<hash>` - both Phase 4 bullets.
+  The fence is therefore correct relative to a root that is itself wrong; Phase 4
+  fixing the root does not require touching the fence.

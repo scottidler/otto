@@ -442,15 +442,17 @@ impl Parser {
     /// command source first, the envs are resolved before the command runs.
     /// Global envs do not depend on task args, so the values are identical
     /// wherever the first ask happens.
-    fn global_envs(&self) -> &HashMap<String, String> {
+    ///
+    /// A failure here is fatal, not a warning: dropping the globals and carrying
+    /// on ran the tasks with an environment nobody configured (a >100-deep or
+    /// circular chain hit exactly this and the run continued, silently
+    /// env-less).
+    fn global_envs(&self) -> Result<&HashMap<String, String>> {
         self.resolver.global_envs(|| {
             if self.config_spec.otto.envs.is_empty() {
-                HashMap::new()
+                Ok(HashMap::new())
             } else {
-                env_eval::evaluate_envs(&self.config_spec.otto.envs, Some(&self.cwd)).unwrap_or_else(|e| {
-                    eprintln!("Warning: Failed to evaluate global environment variables: {e}");
-                    HashMap::new()
-                })
+                env_eval::evaluate_envs(&self.config_spec.otto.envs, Some(&self.cwd))
             }
         })
     }
@@ -463,7 +465,7 @@ impl Parser {
             return foreach.resolve_items(self.base_dir());
         }
         self.resolver.foreach_items(task_name, || {
-            foreach.resolve_command_items(task_name, self.base_dir(), self.global_envs())
+            foreach.resolve_command_items(task_name, self.base_dir(), self.global_envs()?)
         })
     }
 
@@ -1085,7 +1087,7 @@ impl Parser {
         // Step 0: Evaluate global environment variables once
         // (memoized: a command-sourced foreach may already have forced this
         // evaluation at partition time, and both sites must see one result)
-        let global_envs = self.global_envs().clone();
+        let global_envs = self.global_envs()?.clone();
 
         // Step 0.4: Check which requested tasks have --Serial flag
         let serial_tasks: HashSet<String> = self.detect_serial_tasks(requested_tasks);
@@ -1901,7 +1903,7 @@ impl Parser {
         }
         let key = format!("{task_name}:{}", param_spec.name);
         self.resolver.choices(&key, || {
-            param_spec.resolve_choices_command(task_name, self.base_dir(), self.global_envs())
+            param_spec.resolve_choices_command(task_name, self.base_dir(), self.global_envs()?)
         })
     }
 

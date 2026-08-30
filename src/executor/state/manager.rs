@@ -904,13 +904,19 @@ impl StateManager {
                     Ok(hash)
                 })?;
 
-                let run_dir = home
-                    .join(".otto")
+                let otto_root = home.join(".otto");
+                let run_dir = otto_root
                     .join(format!("otto-{}", project_hash))
                     .join(timestamp.to_string());
 
-                if run_dir.exists() {
-                    std::fs::remove_dir_all(&run_dir).context("Failed to delete run directory")?;
+                if std::fs::symlink_metadata(&run_dir).is_ok() {
+                    // Same fence as the filesystem-scan path in `clean`: never
+                    // delete through a symlink, never delete outside the otto
+                    // root. The DB path had no check at all, so a run directory
+                    // replaced by a link deleted the link's target instead.
+                    let canonical = crate::executor::pruning::ensure_deletable_under_root(&run_dir, &otto_root)
+                        .context("Refusing to delete run directory")?;
+                    std::fs::remove_dir_all(&canonical).context("Failed to delete run directory")?;
                 }
             }
         }
@@ -1067,6 +1073,7 @@ impl StateStore for StateManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -1075,6 +1082,46 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let manager = StateManager::with_db_path(db_path)?;
         Ok((manager, temp_dir))
+    }
+
+    /// The DB-driven delete had no symlink or containment check at all - it was
+    /// the second half of the same defect as the filesystem scan, and the one
+    /// with no `is_dir()` in front of it. `HOME` is what it derives the run
+    /// directory from, hence the scratch home and `#[serial]`.
+    #[test]
+    #[serial]
+    fn delete_run_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
+        let (manager, temp_dir) = create_test_manager()?;
+
+        let fake_home = temp_dir.path().join("fakehome");
+        let run_dir_parent = fake_home.join(".otto").join("otto-abc123");
+        std::fs::create_dir_all(&run_dir_parent)?;
+
+        let victim = temp_dir.path().join("victim");
+        std::fs::create_dir_all(&victim)?;
+        std::fs::write(victim.join("precious.txt"), "keep me")?;
+        std::os::unix::fs::symlink(&victim, run_dir_parent.join("1234567890"))?;
+
+        let previous_home = std::env::var("HOME").ok();
+        // SAFETY: single-threaded test body, serialized against the other tests
+        // that read HOME.
+        unsafe { std::env::set_var("HOME", &fake_home) };
+
+        let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc123".to_string(), 1234567890);
+        manager.record_run_start(&metadata)?;
+        let result = manager.delete_run(1234567890, true);
+
+        unsafe {
+            match previous_home {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Refusing to delete run directory"), "{err}");
+        assert!(victim.join("precious.txt").exists(), "the symlink target must survive");
+        Ok(())
     }
 
     #[test]

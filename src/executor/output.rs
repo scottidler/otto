@@ -201,9 +201,25 @@ impl TaskStreams {
         )
         .await;
 
-        let mut line = String::new();
+        // Drain bytes, not `String`s. `read_line` decodes UTF-8 and returns
+        // InvalidData on the first bad byte; the old `while let Ok(n)` read that
+        // error as end-of-stream, so one stray byte truncated the terminal output
+        // AND the log file at that line and the task still reported success. Bytes
+        // cannot fail to decode: display goes through `from_utf8_lossy`, exactly
+        // like `TeeWriter::write` already does, and the log keeps the raw bytes.
+        let mut line: Vec<u8> = Vec::new();
 
-        while let Ok(n) = reader.read_line(&mut line).await {
+        loop {
+            line.clear();
+            let n = match reader.read_until(b'\n', &mut line).await {
+                Ok(n) => n,
+                Err(e) => {
+                    // A real read error ends the drain, and says so rather than
+                    // passing for a clean EOF.
+                    log::warn!("Error reading {output_type:?} for task '{task_name}': {e}");
+                    break;
+                }
+            };
             if n == 0 {
                 break;
             }
@@ -212,16 +228,14 @@ impl TaskStreams {
                 task_name: task_name.clone(),
                 stream_type: output_type.clone(),
                 timestamp: SystemTime::now(),
-                content: line.clone(),
+                content: String::from_utf8_lossy(&line).into_owned(),
             };
 
             // Write to both file and terminal
-            writer.write(line.as_bytes()).await?;
+            writer.write(&line).await?;
 
             // Broadcast for real-time monitoring
             let _ = self.output_tx.send(output);
-
-            line.clear();
         }
 
         Ok(())
@@ -233,12 +247,23 @@ impl TaskStreams {
             OutputType::Stderr => &self.stderr_file,
         };
 
+        // Read back the same way the log is written: bytes, decoded lossily.
+        // `lines()` errors on the first non-UTF-8 byte, which would make a log
+        // that faithfully captured a task's binary output unreadable to otto.
         let mut lines = Vec::new();
         let file = File::open(file_path).await?;
-        let mut reader = BufReader::new(file).lines();
+        let mut reader = BufReader::new(file);
+        let mut buffer: Vec<u8> = Vec::new();
 
-        while let Some(line) = reader.next_line().await? {
-            lines.push(line);
+        loop {
+            buffer.clear();
+            if reader.read_until(b'\n', &mut buffer).await? == 0 {
+                break;
+            }
+            while matches!(buffer.last(), Some(b'\n' | b'\r')) {
+                buffer.pop();
+            }
+            lines.push(String::from_utf8_lossy(&buffer).into_owned());
         }
 
         Ok(lines)
@@ -273,6 +298,33 @@ mod tests {
         let received = rx.try_recv().unwrap();
         assert_eq!(received.task_name, "test_task");
         assert_eq!(received.content, "line 1\n");
+    }
+
+    /// A non-UTF-8 byte mid-stream used to end the drain: `read_line`'s
+    /// InvalidData error was read as EOF, so the terminal and `stdout.log` both
+    /// stopped at line 1 and the task still reported success.
+    #[tokio::test]
+    async fn a_non_utf8_byte_does_not_truncate_the_log() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_dir = PathBuf::from(temp_dir.path());
+
+        let streams = TaskStreams::new("test_task", &output_dir).await.unwrap();
+
+        let mut test_output: Vec<u8> = Vec::new();
+        test_output.extend_from_slice(b"line1\n");
+        test_output.extend_from_slice(b"\xff\xfe bad\n");
+        test_output.extend_from_slice(b"line3\nline4\nline5\n");
+
+        let mut cursor = std::io::Cursor::new(test_output);
+        streams
+            .process_output("test_task".to_string(), OutputType::Stdout, &mut cursor, true, false)
+            .await
+            .unwrap();
+
+        let contents = streams.read_output(OutputType::Stdout).await.unwrap();
+        assert_eq!(contents.len(), 5, "every line must survive the bad byte: {contents:?}");
+        assert_eq!(contents[0], "line1");
+        assert_eq!(contents[4], "line5");
     }
 
     #[tokio::test]

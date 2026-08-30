@@ -46,7 +46,11 @@ pub struct DynamicResolver {
     /// Resolved global `envs:`, evaluated at most once and only when a dynamic
     /// source actually needs them (they are part of the command's environment
     /// contract, so they must be resolved before any command runs).
-    global_envs: OnceCell<HashMap<String, String>>,
+    /// The failure is memoized too, as its message: an env evaluation that
+    /// failed once fails the same way every time, and every asking surface has
+    /// to see it rather than the first one seeing an error and the rest an
+    /// empty map.
+    global_envs: OnceCell<std::result::Result<HashMap<String, String>, String>>,
     /// task name -> resolved items, for command-sourced foreach only.
     foreach: RefCell<HashMap<String, Vec<ForeachItem>>>,
     /// `task:param` -> resolved value set, for `choices-command` params only.
@@ -60,11 +64,18 @@ impl DynamicResolver {
     }
 
     /// Resolved global `envs:`, computed by `init` on first call and reused after.
-    pub fn global_envs<F>(&self, init: F) -> &HashMap<String, String>
+    ///
+    /// Fails closed: if the globals cannot be evaluated, callers get the error.
+    /// They used to get a warning on stderr and an empty map, so a circular or
+    /// unresolvable global env silently removed every global from the run.
+    pub fn global_envs<F>(&self, init: F) -> Result<&HashMap<String, String>>
     where
-        F: FnOnce() -> HashMap<String, String>,
+        F: FnOnce() -> Result<HashMap<String, String>>,
     {
-        self.global_envs.get_or_init(init)
+        match self.global_envs.get_or_init(|| init().map_err(|e| e.to_string())) {
+            Ok(envs) => Ok(envs),
+            Err(message) => Err(eyre!("Failed to evaluate global environment variables: {}", message)),
+        }
     }
 
     /// Cached foreach items for `task`, resolved by `resolve` on the first ask.
@@ -277,9 +288,9 @@ mod tests {
         let resolver = DynamicResolver::new();
         let calls = std::cell::Cell::new(0);
         for _ in 0..3 {
-            resolver.global_envs(|| {
+            let _ = resolver.global_envs(|| {
                 calls.set(calls.get() + 1);
-                HashMap::new()
+                Ok(HashMap::new())
             });
         }
         assert_eq!(calls.get(), 1);

@@ -145,8 +145,11 @@ tasks:
     );
 }
 
-/// Circular self-definition stays loud: a warning naming the unresolvable variable, and a
-/// non-zero exit because the task body then hits an unbound variable.
+/// Circular self-definition stays loud, and now says *circular*: the message
+/// used to be `Failed to resolve environment variable 'A': Environment variable
+/// 'B' not found`, naming a variable that is not missing. The exit is non-zero
+/// because global env evaluation now fails the run rather than warning and
+/// dropping the globals. See 2026-06-10-code-review-remediation.md Phase 3.
 #[test]
 fn test_circular_env_definition_still_fails_loudly() {
     let temp = TempDir::new().unwrap();
@@ -173,9 +176,10 @@ tasks:
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Failed to evaluate global environment variables")
-            && stderr.contains("Failed to resolve environment variable")
-            && stderr.contains("not found"),
-        "expected a loud circular-reference warning, got stderr:\n{stderr}"
+            && stderr.contains("Circular dependency between environment variables")
+            && stderr.contains("A")
+            && stderr.contains("B"),
+        "expected the cycle named as a cycle, got stderr:\n{stderr}"
     );
     assert_ne!(output.status.code(), Some(0), "circular env definition must not exit 0");
 }

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::executor::pruning::ensure_deletable_under_root;
 use crate::executor::state::{RunMetadata, StateManager};
 use crate::ports::StateStore;
 
@@ -236,6 +237,14 @@ impl CleanCommand {
             let mut deleted_size = 0u64;
 
             for run in &runs_to_delete {
+                // Never delete through a link and never delete outside the root
+                // being cleaned. Checked again here, not only during the scan:
+                // the scan and the delete are two separate walks of a tree the
+                // user can change in between.
+                if let Err(e) = ensure_deletable_under_root(&run.path, otto_home) {
+                    eprintln!("  Refusing to delete {}: {}", run.path.display(), e);
+                    continue;
+                }
                 match fs::remove_dir_all(&run.path) {
                     Ok(()) => {
                         deleted_size += run.size_bytes;
@@ -274,6 +283,13 @@ impl CleanCommand {
             let entry = entry?;
             let path = entry.path();
 
+            // `is_dir()` follows symlinks; a symlinked project directory is a
+            // directory somewhere else, and cleaning is not allowed to reach it.
+            if entry.file_type()?.is_symlink() {
+                eprintln!("  Skipping symlink {}", path.display());
+                continue;
+            }
+
             if !path.is_dir() {
                 continue;
             }
@@ -311,6 +327,13 @@ impl CleanCommand {
         for entry in fs::read_dir(project_dir)? {
             let entry = entry?;
             let path = entry.path();
+
+            // Same rule as the project scan: a symlinked run directory is never
+            // a deletion candidate, because deleting it deletes its target.
+            if entry.file_type()?.is_symlink() {
+                eprintln!("  Skipping symlink {}", path.display());
+                continue;
+            }
 
             if !path.is_dir() {
                 continue;
@@ -441,6 +464,75 @@ mod tests {
 
         let runs = cmd.scan_for_old_runs(temp_dir.path())?;
         assert_eq!(runs.len(), 0);
+        Ok(())
+    }
+
+    /// Reproduced under a scratch HOME: a symlinked project directory under
+    /// `~/.otto` reported `Deleted [deadbeef] ...`, the real directory it pointed
+    /// at was gone, and the symlink was still there. `is_dir()` follows links.
+    #[tokio::test]
+    async fn clean_never_deletes_through_a_symlinked_project_directory() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let otto_home = temp_dir.path().join(".otto");
+        fs::create_dir_all(&otto_home)?;
+
+        let victim = temp_dir.path().join("otto-victim");
+        fs::create_dir_all(victim.join("1000000000").join("tasks"))?;
+        fs::write(victim.join("1000000000").join("tasks").join("data.log"), "precious")?;
+
+        std::os::unix::fs::symlink(&victim, otto_home.join("otto-deadbeef"))?;
+
+        let cmd = CleanCommand {
+            keep_days: 1,
+            keep_last: None,
+            keep_failed: None,
+            dry_run: false,
+            project_filter: None,
+            no_db: true,
+            quiet: true,
+        };
+
+        cmd.execute_with_filesystem(&otto_home).await?;
+
+        assert!(
+            victim.join("1000000000").join("tasks").join("data.log").exists(),
+            "the symlink target must survive"
+        );
+        assert!(
+            otto_home.join("otto-deadbeef").exists(),
+            "the link itself is left alone"
+        );
+        Ok(())
+    }
+
+    /// Same rule one level down: a symlinked *run* directory inside a real
+    /// project directory is not a deletion candidate either.
+    #[tokio::test]
+    async fn clean_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let otto_home = temp_dir.path().join(".otto");
+        let project = otto_home.join("otto-abc123");
+        fs::create_dir_all(&project)?;
+
+        let victim = temp_dir.path().join("victim");
+        fs::create_dir_all(&victim)?;
+        fs::write(victim.join("precious.txt"), "keep me")?;
+
+        std::os::unix::fs::symlink(&victim, project.join("1000000000"))?;
+
+        let cmd = CleanCommand {
+            keep_days: 1,
+            keep_last: None,
+            keep_failed: None,
+            dry_run: false,
+            project_filter: None,
+            no_db: true,
+            quiet: true,
+        };
+
+        cmd.execute_with_filesystem(&otto_home).await?;
+
+        assert!(victim.join("precious.txt").exists(), "the symlink target must survive");
         Ok(())
     }
 

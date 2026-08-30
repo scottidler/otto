@@ -95,6 +95,48 @@ pub struct ForeachItem {
     pub value: String,
 }
 
+/// Reduce a foreach item to something safe to use as one path component.
+///
+/// A subtask is named `<parent>:<identifier>` and that name becomes a directory
+/// under the run's `tasks/`. The only sanitizing that existed was space to
+/// underscore, so an item of `../../../ESCAPED` produced the directory
+/// `tasks/build:../../../ESCAPED`, which the kernel resolves - the run wrote
+/// outside its own `tasks/` tree. Separators and whitespace collapse to `_`
+/// (slugified rather than rejected, because a command source listing paths is a
+/// legitimate foreach; duplicate identifiers are already a loud error), and an
+/// identifier made only of dots would still be a traversal or a self-reference,
+/// so it is replaced outright.
+#[must_use]
+pub fn sanitize_identifier(raw: &str) -> String {
+    let slug: String = raw
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c.is_whitespace() || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    if slug.is_empty() || slug.chars().all(|c| c == '.') {
+        "_".to_string()
+    } else {
+        slug
+    }
+}
+
+/// Escape a value that must survive `cfg::env` evaluation unchanged.
+///
+/// A foreach item is data produced by a glob, a list, a range or a command - it
+/// is not an expression the ottofile author wrote. Injected raw, an item
+/// containing `${IFS}` aborted the whole task's environment with `Environment
+/// variable 'IFS' not found`, and one containing `$(...)` would have run. `$$`
+/// is the evaluator's literal-dollar escape, honored by both its stages.
+fn escape_literal_env_value(value: &str) -> String {
+    value.replace('$', "$$")
+}
+
 impl ForeachSpec {
     /// True when the items come from a command's stdout rather than from the
     /// ottofile itself. Command sources execute, so they resolve lazily and
@@ -206,7 +248,7 @@ impl ForeachSpec {
             .into_iter()
             .map(|line| ForeachItem {
                 // Sanitized exactly as glob identifiers are.
-                identifier: line.replace(' ', "_"),
+                identifier: sanitize_identifier(&line),
                 value: line,
             })
             .collect();
@@ -249,8 +291,8 @@ impl ForeachSpec {
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_else(|| path.to_string_lossy().to_string());
 
-                    // Sanitize identifier: replace whitespace with underscore
-                    let identifier = identifier.replace(' ', "_");
+                    // Sanitize identifier: it becomes one path component
+                    let identifier = sanitize_identifier(&identifier);
 
                     let value = path.to_string_lossy().to_string();
 
@@ -273,7 +315,7 @@ impl ForeachSpec {
             .iter()
             .filter(|item| !item.trim().is_empty())
             .map(|item| ForeachItem {
-                identifier: item.clone(),
+                identifier: sanitize_identifier(item),
                 value: item.clone(),
             })
             .collect()
@@ -629,29 +671,38 @@ impl TaskSpec {
             None => return Ok(vec![self.clone()]),
         };
 
+        // Sanitize here as well as at each source: this is the site that turns an
+        // identifier into a task name, and a `ForeachItem` built anywhere else
+        // (a test fixture, a future source) must not be able to skip the rule.
+        let identifiers: Vec<String> = items.iter().map(|item| sanitize_identifier(&item.identifier)).collect();
+
         // Check for duplicate identifiers
         let mut seen_identifiers = std::collections::HashSet::new();
-        for item in items {
-            if !seen_identifiers.insert(&item.identifier) {
+        for identifier in &identifiers {
+            if !seen_identifiers.insert(identifier) {
                 return Err(eyre!(
                     "foreach produced duplicate subtask name '{}:{}'",
                     self.name,
-                    item.identifier
+                    identifier
                 ));
             }
         }
 
         items
             .iter()
+            .zip(identifiers)
             .enumerate()
-            .map(|(index, item)| {
+            .map(|(index, (item, identifier))| {
                 let mut subtask = self.clone();
-                subtask.name = format!("{}:{}", self.name, item.identifier);
+                subtask.name = format!("{}:{}", self.name, identifier);
                 subtask.foreach = None; // Prevent recursive expansion
 
-                // Inject foreach variables into environment
-                subtask.envs.insert(foreach.var_name.clone(), item.value.clone());
-                subtask.envs.insert("OTTO_FOREACH_ITEM".to_string(), item.value.clone());
+                // Inject foreach variables into environment. The item is data, so
+                // it is escaped against the env evaluator rather than handed to it
+                // as an expression.
+                let literal_value = escape_literal_env_value(&item.value);
+                subtask.envs.insert(foreach.var_name.clone(), literal_value.clone());
+                subtask.envs.insert("OTTO_FOREACH_ITEM".to_string(), literal_value);
                 subtask.envs.insert("OTTO_FOREACH_INDEX".to_string(), index.to_string());
 
                 Ok(subtask)
@@ -1060,6 +1111,94 @@ mod foreach_tests {
             .to_string();
 
         assert!(err.contains("duplicate subtask name 'up:a'"), "{err}");
+    }
+
+    #[test]
+    fn sanitize_identifier_keeps_an_item_to_one_path_component() {
+        // The reproduced traversal: this identifier became the directory
+        // `tasks/build:../../../ESCAPED`, i.e. a write outside the run's tasks/.
+        assert_eq!(sanitize_identifier("../../../ESCAPED"), ".._.._.._ESCAPED");
+        assert_eq!(sanitize_identifier("pkg/sub/name"), "pkg_sub_name");
+        assert_eq!(sanitize_identifier(r"win\path"), "win_path");
+        assert_eq!(sanitize_identifier("two words"), "two_words");
+        assert_eq!(sanitize_identifier(".."), "_");
+        assert_eq!(sanitize_identifier("."), "_");
+        assert_eq!(sanitize_identifier(""), "_");
+        // Ordinary identifiers are untouched.
+        assert_eq!(sanitize_identifier("01-basic.sh"), "01-basic.sh");
+        assert_eq!(sanitize_identifier("us-east-1"), "us-east-1");
+    }
+
+    #[test]
+    fn expand_foreach_cannot_name_a_subtask_outside_its_tasks_dir() {
+        let mut task = TaskSpec::new(
+            "build".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            ParamSpecs::new(),
+            "echo ${pkg}".to_string(),
+        );
+        task.foreach = Some(command_foreach("printf '../../../ESCAPED\n'"));
+
+        let items = vec![ForeachItem {
+            identifier: "../../../ESCAPED".to_string(),
+            value: "../../../ESCAPED".to_string(),
+        }];
+        let subtasks = task.expand_foreach_with_items(&items).unwrap();
+
+        assert_eq!(subtasks[0].name, "build:.._.._.._ESCAPED");
+        assert!(
+            !subtasks[0].name.contains('/'),
+            "a subtask name is one path component: {}",
+            subtasks[0].name
+        );
+        // The value the script sees is untouched data.
+        assert_eq!(
+            subtasks[0].envs.get("OTTO_FOREACH_ITEM"),
+            Some(&"../../../ESCAPED".to_string())
+        );
+    }
+
+    #[test]
+    fn foreach_item_values_are_escaped_against_the_env_evaluator() {
+        let mut task = TaskSpec::new(
+            "build".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            ParamSpecs::new(),
+            "echo ${pkg}".to_string(),
+        );
+        task.foreach = Some(command_foreach("printf 'a\n'"));
+
+        let items = vec![ForeachItem {
+            identifier: "item".to_string(),
+            value: "${IFS}-$(touch /tmp/OTTO_PWNED)".to_string(),
+        }];
+        let subtasks = task.expand_foreach_with_items(&items).unwrap();
+
+        // `$$` is the evaluator's literal-dollar escape; it evaluates back to the
+        // item verbatim instead of aborting the task env with
+        // `Environment variable 'IFS' not found` or running the command.
+        let injected = subtasks[0].envs.get("OTTO_FOREACH_ITEM").unwrap();
+        assert_eq!(injected, "$${IFS}-$$(touch /tmp/OTTO_PWNED)");
+
+        let evaluated = crate::cfg::env::evaluate_envs(&subtasks[0].envs, None).unwrap();
+        assert_eq!(
+            evaluated.get("OTTO_FOREACH_ITEM").map(String::as_str),
+            Some("${IFS}-$(touch /tmp/OTTO_PWNED)")
+        );
+        assert!(
+            !std::path::Path::new("/tmp/OTTO_PWNED").exists(),
+            "the item must never have executed"
+        );
     }
 
     #[test]

@@ -88,7 +88,10 @@ tasks:
         .stdout(predicates::str::contains("GROUP=[grouped]"));
 }
 
-/// An unmatched `$(` is reported by key and by value, never passed through as a literal.
+/// An unmatched `$(` is reported by key and by value, never passed through as a
+/// literal - and it now stops the run. It used to be a warning: the globals were
+/// dropped and the task ran anyway with an environment nobody configured
+/// (`BROKEN=[UNSET]`, exit 0). See 2026-06-10-code-review-remediation.md Phase 3.
 #[test]
 fn test_unmatched_substitution_is_reported_with_key_and_value() {
     let temp = TempDir::new().unwrap();
@@ -107,10 +110,11 @@ tasks:
     otto_cmd(temp.path(), &ottofile)
         .arg("show")
         .assert()
+        .failure()
         .stderr(predicates::str::contains("BROKEN"))
         .stderr(predicates::str::contains("unmatched '$('"))
         .stderr(predicates::str::contains("$(echo hello"))
-        .stdout(predicates::str::contains("BROKEN=[UNSET]").and(predicates::str::contains("$(echo hello").not()));
+        .stdout(predicates::str::contains("BROKEN=").not());
 }
 
 /// Task-scoped envs go through the same scanner as global ones.
