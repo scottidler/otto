@@ -516,35 +516,53 @@ fn classify_edge(
     failed: &std::collections::HashSet<String>,
     skipped: &SkippedSet,
 ) -> EdgeState {
-    if let Some(kind) = skipped.get(&edge.task) {
-        return match edge.when {
+    classify_source(&edge.task, edge.when, completed, failed, skipped)
+}
+
+/// The table above, read off the runtime sets for one `source` under one
+/// `when`. The single implementation of the ladder.
+///
+/// `classify_edge` is this with the `when` carried on a `TaskEdge`; the serial
+/// chain's `classify` is this with `When::Success`, which is what a serial
+/// predecessor means. Those two used to open-code the same skipped/completed/
+/// failed/pending sequence separately, so a change to skip semantics had to be
+/// made twice and was not.
+fn classify_source(
+    source: &str,
+    when: When,
+    completed: &std::collections::HashSet<String>,
+    failed: &std::collections::HashSet<String>,
+    skipped: &SkippedSet,
+) -> EdgeState {
+    if let Some(kind) = skipped.get(source) {
+        return match when {
             When::Success if kind.is_success_like() => EdgeState::Satisfied,
             When::Success => EdgeState::Unreachable,
             When::Failure => EdgeState::Unreachable,
             When::Always => EdgeState::Satisfied,
         };
     }
-    match edge.when {
+    match when {
         When::Success => {
-            if completed.contains(&edge.task) {
+            if completed.contains(source) {
                 EdgeState::Satisfied
-            } else if failed.contains(&edge.task) {
+            } else if failed.contains(source) {
                 EdgeState::Unreachable
             } else {
                 EdgeState::Pending
             }
         }
         When::Failure => {
-            if failed.contains(&edge.task) {
+            if failed.contains(source) {
                 EdgeState::Satisfied
-            } else if completed.contains(&edge.task) {
+            } else if completed.contains(source) {
                 EdgeState::Unreachable
             } else {
                 EdgeState::Pending
             }
         }
         When::Always => {
-            if completed.contains(&edge.task) || failed.contains(&edge.task) {
+            if completed.contains(source) || failed.contains(source) {
                 EdgeState::Satisfied
             } else {
                 EdgeState::Pending
@@ -646,21 +664,10 @@ impl SerialGroups {
     ) -> EdgeState {
         match self.predecessor(task) {
             None => EdgeState::Satisfied,
-            Some(pred) => {
-                if let Some(kind) = skipped.get(pred) {
-                    if kind.is_success_like() {
-                        EdgeState::Satisfied
-                    } else {
-                        EdgeState::Unreachable
-                    }
-                } else if completed.contains(pred) {
-                    EdgeState::Satisfied
-                } else if failed.contains(pred) {
-                    EdgeState::Unreachable
-                } else {
-                    EdgeState::Pending
-                }
-            }
+            // A serial predecessor is a `when: success` source: the chain
+            // advances when the one before it succeeded or was a warm-cache
+            // skip. Same ladder as every other edge, so it is the same code.
+            Some(pred) => classify_source(pred, When::Success, completed, failed, skipped),
         }
     }
 }

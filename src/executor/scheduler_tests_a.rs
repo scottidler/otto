@@ -474,6 +474,181 @@ fn classify_edge_skip_provenance_matrix() {
     }
 }
 
+/// Every gate that decides "may this task start, given the state of its source"
+/// must run the same ladder. There are three: the scheduler's edge admission
+/// (`classify_edge`), the worker's terminal-status double-check
+/// (`edge_satisfied_by_status`), and the serial chain's ordering gate
+/// (`SerialGroups::classify`).
+///
+/// The nine-cell matrix test above covers the skipped rows. This covers the
+/// whole lattice (skipped for each kind, completed, failed, and
+/// not-yet-finished) against every `when:`, and asserts the serial gate is
+/// exactly the `When::Success` column rather than a second opinion about it.
+/// The serial gate open-coded that column until this test existed; nothing had
+/// ever compared them.
+#[test]
+fn every_gate_runs_the_same_ladder_over_the_whole_source_lattice() {
+    use EdgeState::{Pending, Satisfied, Unreachable};
+
+    let empty = std::collections::HashSet::new();
+    let src_completed = std::collections::HashSet::from(["src".to_string()]);
+    let src_failed = std::collections::HashSet::from(["src".to_string()]);
+
+    /// One row of the source lattice: how the runtime sets and the terminal
+    /// status both describe the same source task.
+    struct SourceState<'a> {
+        label: &'a str,
+        completed: &'a std::collections::HashSet<String>,
+        failed: &'a std::collections::HashSet<String>,
+        skipped: SkippedSet,
+        /// `None` when the source has not finished, which is the one row with no
+        /// terminal status for the worker's double-check to read.
+        status: Option<TaskStatus>,
+    }
+
+    let row = |label, completed, failed, skipped, status| SourceState {
+        label,
+        completed,
+        failed,
+        skipped,
+        status,
+    };
+
+    let states: Vec<SourceState<'_>> = vec![
+        row(
+            "skipped up-to-date",
+            &empty,
+            &empty,
+            SkippedSet::from([("src".to_string(), SkipKind::UpToDate)]),
+            Some(TaskStatus::Skipped(SkipKind::UpToDate)),
+        ),
+        row(
+            "skipped serial-predecessor",
+            &empty,
+            &empty,
+            SkippedSet::from([("src".to_string(), SkipKind::SerialPredecessor)]),
+            Some(TaskStatus::Skipped(SkipKind::SerialPredecessor)),
+        ),
+        row(
+            "skipped unreachable",
+            &empty,
+            &empty,
+            SkippedSet::from([("src".to_string(), SkipKind::Unreachable)]),
+            Some(TaskStatus::Skipped(SkipKind::Unreachable)),
+        ),
+        row(
+            "completed",
+            &src_completed,
+            &empty,
+            SkippedSet::new(),
+            Some(TaskStatus::Completed),
+        ),
+        row(
+            "failed",
+            &empty,
+            &src_failed,
+            SkippedSet::new(),
+            Some(TaskStatus::Failed("boom".to_string())),
+        ),
+        row("not finished", &empty, &empty, SkippedSet::new(), None),
+    ];
+
+    let mut serial_column_checked = 0;
+
+    for SourceState {
+        label,
+        completed,
+        failed,
+        skipped,
+        status,
+    } in &states
+    {
+        for when in [When::Success, When::Failure, When::Always] {
+            let edge = TaskEdge::new("src".to_string(), when);
+            let via_edge = classify_edge(&edge, completed, failed, skipped);
+            let via_source = classify_source("src", when, completed, failed, skipped);
+            assert_eq!(
+                via_edge, via_source,
+                "{label} / when: {when:?}: classify_edge and classify_source disagree"
+            );
+
+            // The worker's double-check is defined on terminal states only; a
+            // source that has not finished has no status to read.
+            if let Some(status) = status {
+                assert_eq!(
+                    edge_satisfied_by_status(when, Some(status)),
+                    via_edge == Satisfied,
+                    "{label} / when: {when:?}: worker double-check disagrees with the admission gate"
+                );
+            } else {
+                assert_eq!(via_edge, Pending, "{label} / when: {when:?} must be Pending");
+                assert!(
+                    !edge_satisfied_by_status(when, None),
+                    "{label}: an unfinished source satisfies nothing"
+                );
+            }
+
+            // The serial ordering gate is the `when: success` column, and only
+            // that column: a serial predecessor is a success-gated source.
+            if when == When::Success {
+                let mut member = Task::new(
+                    "member".to_string(),
+                    None,
+                    vec![],
+                    vec![],
+                    vec![],
+                    HashMap::new(),
+                    HashMap::new(),
+                    String::new(),
+                );
+                member.serial_group = Some("g".to_string());
+                member.serial_index = 1;
+                let mut predecessor = Task::new(
+                    "src".to_string(),
+                    None,
+                    vec![],
+                    vec![],
+                    vec![],
+                    HashMap::new(),
+                    HashMap::new(),
+                    String::new(),
+                );
+                predecessor.serial_group = Some("g".to_string());
+                predecessor.serial_index = 0;
+
+                let groups = SerialGroups::new(&[predecessor, member.clone()]);
+                assert_eq!(
+                    groups.classify(&member, completed, failed, skipped),
+                    via_edge,
+                    "{label}: the serial ordering gate disagrees with the when: success column"
+                );
+                serial_column_checked += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        serial_column_checked,
+        states.len(),
+        "the serial gate must be checked against every source state"
+    );
+    // Sanity: the lattice actually produces all three outcomes, so an
+    // always-Satisfied ladder could not pass this test.
+    let outcomes: Vec<EdgeState> = states
+        .iter()
+        .flat_map(|s| {
+            let (c, f, sk) = (s.completed, s.failed, &s.skipped);
+            [When::Success, When::Failure, When::Always].map(move |w| classify_source("src", w, c, f, sk))
+        })
+        .collect();
+    for required in [Satisfied, Unreachable, Pending] {
+        assert!(
+            outcomes.contains(&required),
+            "the lattice must exercise {required:?}; an always-{required:?} ladder would pass otherwise. got {outcomes:?}"
+        );
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn test_task_execution() -> Result<()> {
