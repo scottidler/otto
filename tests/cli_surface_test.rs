@@ -5,7 +5,9 @@
 //! `--help` reads, how an argument that spells a task name is partitioned,
 //! and whether a builtin behind a global flag still routes.
 
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
+use common::otto_cmd;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
@@ -69,10 +71,8 @@ fn write(path: &Path, content: &str) {
 #[test]
 fn help_reads_the_ottofile_the_flag_names() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
-        .args(["-o", "sub/other.yml", "--help"]);
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
+    cmd.current_dir(temp.path()).args(["-o", "sub/other.yml", "--help"]);
 
     cmd.assert()
         .success()
@@ -83,10 +83,9 @@ fn help_reads_the_ottofile_the_flag_names() {
 #[test]
 fn help_reads_the_ottofile_the_env_names() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
     cmd.current_dir(temp.path())
         .env("OTTOFILE", "sub/other.yml")
-        .env("OTTO_HOME", temp.path().join("otto-home"))
         .arg("--help");
 
     cmd.assert()
@@ -98,10 +97,8 @@ fn help_reads_the_ottofile_the_env_names() {
 #[test]
 fn a_flag_value_that_spells_a_task_reaches_the_task() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
-        .args(["build", "--msg", "test"]);
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
+    cmd.current_dir(temp.path()).args(["build", "--msg", "test"]);
 
     cmd.assert()
         .success()
@@ -111,10 +108,8 @@ fn a_flag_value_that_spells_a_task_reaches_the_task() {
 #[test]
 fn a_double_dash_hands_the_rest_to_the_task() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
-        .args(["build", "--", "--msg=x"]);
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
+    cmd.current_dir(temp.path()).args(["build", "--", "--msg=x"]);
 
     cmd.assert().success().stdout(predicate::str::contains("build msg=x"));
 }
@@ -122,10 +117,8 @@ fn a_double_dash_hands_the_rest_to_the_task() {
 #[test]
 fn a_choice_is_accepted_in_any_case_and_stored_canonically() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
-        .args(["fmt", "--format", "ASCII"]);
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
+    cmd.current_dir(temp.path()).args(["fmt", "--format", "ASCII"]);
 
     cmd.assert()
         .success()
@@ -135,9 +128,8 @@ fn a_choice_is_accepted_in_any_case_and_stored_canonically() {
 #[test]
 fn a_task_requested_twice_is_an_error() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
     cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
         .args(["build", "--msg=a", "build", "--msg=b"]);
 
     cmd.assert()
@@ -148,10 +140,8 @@ fn a_task_requested_twice_is_an_error() {
 #[test]
 fn an_unknown_task_flag_fails_without_panicking() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
-        .args(["build", "--bogus"]);
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
+    cmd.current_dir(temp.path()).args(["build", "--bogus"]);
 
     cmd.assert()
         .failure()
@@ -164,9 +154,8 @@ fn a_builtin_routes_from_behind_a_global_flag() {
     let temp = fixture();
     write(&temp.path().join("Makefile"), "all:\n\techo hi\n");
 
-    let mut cmd = cargo_bin_cmd!("otto");
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
     cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
         .args(["-j", "2", "Convert"])
         .write_stdin("all:\n\techo hi\n");
 
@@ -178,9 +167,8 @@ fn a_builtin_routes_from_behind_the_tui_flag() {
     // The TUI path dispatches the same builtin table as the terminal path, so
     // this converts rather than printing "No tasks to execute".
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
     cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
         .args(["--tui", "Convert"])
         .write_stdin("all:\n\techo hi\n");
 
@@ -193,10 +181,8 @@ fn a_builtin_routes_from_behind_the_tui_flag() {
 #[test]
 fn an_invalid_history_status_is_rejected() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
-        .args(["History", "--status", "bogus"]);
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
+    cmd.current_dir(temp.path()).args(["History", "--status", "bogus"]);
 
     cmd.assert()
         .failure()
@@ -206,10 +192,8 @@ fn an_invalid_history_status_is_rejected() {
 #[test]
 fn a_missing_ottofile_names_the_path_it_looked_for() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
-        .args(["-o", "/nope/nothere.yml", "build"]);
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
+    cmd.current_dir(temp.path()).args(["-o", "/nope/nothere.yml", "build"]);
 
     cmd.assert()
         .failure()
@@ -222,10 +206,8 @@ fn the_tui_flag_is_accepted_after_a_task_name() {
     // subcommands, so this used to fail with "unexpected argument '--tui'".
     // Not a tty under test, so the TUI falls back to terminal output.
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
-        .args(["test", "--tui"]);
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
+    cmd.current_dir(temp.path()).args(["test", "--tui"]);
 
     cmd.assert()
         .success()
@@ -235,10 +217,8 @@ fn the_tui_flag_is_accepted_after_a_task_name() {
 #[test]
 fn an_unknown_log_level_is_rejected() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
-        .args(["--log-level", "bogus", "test"]);
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
+    cmd.current_dir(temp.path()).args(["--log-level", "bogus", "test"]);
 
     cmd.assert()
         .failure()
@@ -248,10 +228,8 @@ fn an_unknown_log_level_is_rejected() {
 #[test]
 fn no_prefix_drops_the_prefix_from_status_lines_too() {
     let temp = fixture();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(temp.path())
-        .env("OTTO_HOME", temp.path().join("otto-home"))
-        .args(["--no-prefix", "test"]);
+    let mut cmd = otto_cmd(&temp.path().join("otto-home"));
+    cmd.current_dir(temp.path()).args(["--no-prefix", "test"]);
 
     cmd.assert()
         .success()

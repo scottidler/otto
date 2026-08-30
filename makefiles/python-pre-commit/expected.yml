@@ -1,0 +1,36 @@
+# Expected conversion of this directory's Makefile. Compared as a ConfigSpec,
+# not as text: `otto.envs` is a HashMap and its serialized order varies.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - dev
+tasks:
+  all:
+    before:
+    - dev
+    - unit-test
+    - type-check
+    - lint
+    bash: ''
+  dev:
+    bash: poetry install
+  unit-test:
+    before:
+    - dev
+    bash: poetry run pytest tests/python
+  type-check:
+    before:
+    - dev
+    bash: poetry run mypy
+  lint:
+    before:
+    - dev
+    bash: poetry run pre-commit run --all-files
+  clean:
+    bash: |-
+      rm -rf build/ dist/ .venv/ .mypy_cache/ .pytest_cache/
+      rm -rf *.egg-info
+      rm -rf .coverage
+      find . -name '__pycache__' -delete
+      find . -name '*.pyc' -delete

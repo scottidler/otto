@@ -1,25 +1,15 @@
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
+use common::otto_cmd;
 use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
-
-/// Helper to set up isolated test database and workspace
-fn setup_test_db(temp_dir: &std::path::Path) -> std::path::PathBuf {
-    let db_path = temp_dir.join("test_otto.db");
-    let otto_home = temp_dir.join(".otto");
-    unsafe {
-        std::env::set_var("OTTO_DB_PATH", &db_path);
-        std::env::set_var("OTTO_HOME", &otto_home);
-    }
-    db_path
-}
 
 /// Test that all four built-in commands are registered and show up in help
 #[test]
 #[serial]
 fn test_all_builtin_commands_registered() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
-    let db_path = setup_test_db(temp_dir.path());
     let otto_home = temp_dir.path().join(".otto");
     let ottofile = temp_dir.path().join("otto.yml");
 
@@ -33,10 +23,8 @@ tasks:
 "#,
     )?;
 
-    let output = cargo_bin_cmd!("otto")
+    let output = otto_cmd(&otto_home)
         .current_dir(temp_dir.path())
-        .env("OTTO_DB_PATH", &db_path)
-        .env("OTTO_HOME", &otto_home)
         .arg("--help")
         .output()?;
 
@@ -72,7 +60,6 @@ tasks:
 #[serial]
 fn test_graph_command_exists() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
-    let db_path = setup_test_db(temp_dir.path());
     let otto_home = temp_dir.path().join(".otto");
     let ottofile = temp_dir.path().join("otto.yml");
 
@@ -85,14 +72,8 @@ tasks:
 "#,
     )?;
 
-    let mut cmd = cargo_bin_cmd!("otto");
-    let output = cmd
-        .current_dir(temp_dir.path())
-        .env("OTTO_DB_PATH", &db_path)
-        .env("OTTO_HOME", &otto_home)
-        .arg("Graph")
-        .arg("--help")
-        .output()?;
+    let mut cmd = otto_cmd(&otto_home);
+    let output = cmd.current_dir(temp_dir.path()).arg("Graph").arg("--help").output()?;
 
     assert!(output.status.success(), "Graph --help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -109,16 +90,10 @@ tasks:
 #[serial]
 fn test_clean_command_exists() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
-    let db_path = setup_test_db(temp_dir.path());
     let otto_home = temp_dir.path().join(".otto");
 
-    let mut cmd = cargo_bin_cmd!("otto");
-    let output = cmd
-        .env("OTTO_DB_PATH", &db_path)
-        .env("OTTO_HOME", &otto_home)
-        .arg("Clean")
-        .arg("--help")
-        .output()?;
+    let mut cmd = otto_cmd(&otto_home);
+    let output = cmd.arg("Clean").arg("--help").output()?;
 
     assert!(output.status.success(), "Clean --help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -132,16 +107,10 @@ fn test_clean_command_exists() -> Result<(), Box<dyn std::error::Error>> {
 #[serial]
 fn test_history_command_exists() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
-    let db_path = setup_test_db(temp_dir.path());
     let otto_home = temp_dir.path().join(".otto");
 
-    let mut cmd = cargo_bin_cmd!("otto");
-    let output = cmd
-        .env("OTTO_DB_PATH", &db_path)
-        .env("OTTO_HOME", &otto_home)
-        .arg("History")
-        .arg("--help")
-        .output()?;
+    let mut cmd = otto_cmd(&otto_home);
+    let output = cmd.arg("History").arg("--help").output()?;
 
     assert!(output.status.success(), "History --help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -158,16 +127,10 @@ fn test_history_command_exists() -> Result<(), Box<dyn std::error::Error>> {
 #[serial]
 fn test_stats_command_exists() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
-    let db_path = setup_test_db(temp_dir.path());
     let otto_home = temp_dir.path().join(".otto");
 
-    let mut cmd = cargo_bin_cmd!("otto");
-    let output = cmd
-        .env("OTTO_DB_PATH", &db_path)
-        .env("OTTO_HOME", &otto_home)
-        .arg("Stats")
-        .arg("--help")
-        .output()?;
+    let mut cmd = otto_cmd(&otto_home);
+    let output = cmd.arg("Stats").arg("--help").output()?;
 
     assert!(output.status.success(), "Stats --help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -184,7 +147,6 @@ fn test_stats_command_exists() -> Result<(), Box<dyn std::error::Error>> {
 #[serial]
 fn test_builtin_commands_filtered_from_execution() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
-    let db_path = setup_test_db(temp_dir.path());
     let otto_home = temp_dir.path().join(".otto");
     let ottofile = temp_dir.path().join("otto.yml");
 
@@ -200,13 +162,8 @@ tasks:
 
     // If we try to run "graph real-task", it should handle graph specially
     // and then execute real-task normally
-    let mut cmd = cargo_bin_cmd!("otto");
-    let output = cmd
-        .current_dir(temp_dir.path())
-        .env("OTTO_DB_PATH", &db_path)
-        .env("OTTO_HOME", &otto_home)
-        .arg("real-task")
-        .output()?;
+    let mut cmd = otto_cmd(&otto_home);
+    let output = cmd.current_dir(temp_dir.path()).arg("real-task").output()?;
 
     // Should succeed - real-task executes
     assert!(output.status.success(), "real-task should execute successfully");
@@ -219,7 +176,6 @@ tasks:
 #[serial]
 fn test_builtin_command_count() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
-    let db_path = setup_test_db(temp_dir.path());
     let otto_home = temp_dir.path().join(".otto");
     let ottofile = temp_dir.path().join("otto.yml");
 
@@ -232,13 +188,8 @@ tasks:
 "#,
     )?;
 
-    let mut cmd = cargo_bin_cmd!("otto");
-    let output = cmd
-        .current_dir(temp_dir.path())
-        .env("OTTO_DB_PATH", &db_path)
-        .env("OTTO_HOME", &otto_home)
-        .arg("--help")
-        .output()?;
+    let mut cmd = otto_cmd(&otto_home);
+    let output = cmd.current_dir(temp_dir.path()).arg("--help").output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -268,16 +219,10 @@ fn test_builtin_commands_have_help() -> Result<(), Box<dyn std::error::Error>> {
 
     for (cmd_name, expected_word, expected_flag) in commands {
         let temp_dir = TempDir::new()?;
-        let db_path = setup_test_db(temp_dir.path());
         let otto_home = temp_dir.path().join(".otto");
 
-        let mut cmd = cargo_bin_cmd!("otto");
-        let output = cmd
-            .env("OTTO_DB_PATH", &db_path)
-            .env("OTTO_HOME", &otto_home)
-            .arg(cmd_name)
-            .arg("--help")
-            .output()?;
+        let mut cmd = otto_cmd(&otto_home);
+        let output = cmd.arg(cmd_name).arg("--help").output()?;
 
         assert!(output.status.success(), "{} --help should succeed", cmd_name);
 

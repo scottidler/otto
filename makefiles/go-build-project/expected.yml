@@ -1,0 +1,50 @@
+# Expected conversion of this directory's Makefile. Compared as a ConfigSpec,
+# not as text: `otto.envs` is a HashMap and its serialized order varies.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - build
+  envs:
+    SRC: $(find . -type f -name '*.go' -not -path "./vendor/*")
+    LDFLAGS: -ldflags "-X=main.Version=${VERSION} -X=main.Build=${BUILD}"
+    VERSION: $(git describe --tags --always --dirty)
+    BUILD: '`git rev-parse HEAD`'
+tasks:
+  all:
+    before:
+    - unit-test
+    - type-check
+    - lint
+    - build
+    bash: ''
+  build:
+    bash: |-
+      mkdir -p dist
+      go build -o dist/example cmd/example/main.go
+  run:
+    before:
+    - build
+    bash: ./dist/example 2> err.log
+  unit-test:
+    bash: go test -cover -coverprofile=coverage.txt ./...
+  test:
+    before:
+    - unit-test
+    bash: ''
+  coverage:
+    before:
+    - unit-test
+    bash: go tool cover -html=coverage.txt
+  fmt:
+    bash: gofmt -l -w ${SRC}
+  type-check:
+    bash: go run honnef.co/go/tools/cmd/staticcheck@v0.5.1 ./...
+  lint:
+    before:
+    - fmt
+    bash: ''
+  clean:
+    bash: |-
+      rm -rf dist/
+      rm -rf .coverage

@@ -8,11 +8,13 @@
 //! The old suite asserted only that the output was non-empty, which is why
 //! `$(shell ...)` and `$(VAR)` survived conversion for as long as they did.
 
+mod common;
+
 use otto::ConfigSpec;
 use otto::makefile::{MakefileParser, OttoConverter};
 use std::fs;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tempfile::TempDir;
 
 /// Every fixture that is expected to convert, with the warnings it must
@@ -158,13 +160,22 @@ fn make_variable_references(yaml: &str) -> Vec<String> {
     found
 }
 
+/// Every fixture, against its committed golden - no exceptions, and no silent
+/// skip. This used to `continue` when `expected.yml` was absent, which left 5
+/// of the 7 fixtures compared against nothing while the criterion this test
+/// implements says "every fixture in `makefiles/` converts to exactly its
+/// committed `expected.yml`". A missing golden is now the loudest failure in
+/// the file: it is what a new fixture forgets.
 #[test]
 fn test_every_fixture_matches_its_expected_output() {
     for (name, _) in CONVERTING_FIXTURES {
         let expected_path = format!("makefiles/{name}/expected.yml");
-        let Ok(expected_yaml) = fs::read_to_string(&expected_path) else {
-            continue; // fixtures without a golden are covered by the other tests
-        };
+        let expected_yaml = fs::read_to_string(&expected_path).unwrap_or_else(|e| {
+            panic!(
+                "{expected_path} is missing ({e}); every fixture in CONVERTING_FIXTURES must \
+                 carry a golden, or this test compares it against nothing"
+            )
+        });
 
         let expected: ConfigSpec =
             serde_yaml::from_str(&expected_yaml).unwrap_or_else(|e| panic!("{expected_path} is not a ConfigSpec: {e}"));
@@ -289,14 +300,12 @@ clean:
 fn run_convert(makefile: &str, args: &[&str]) -> (i32, String, String) {
     // `Convert` doesn't touch the store, but it's isolated anyway so
     // isolation can't drift file by file. `assert_cmd::Command` doesn't
-    // expose raw stdio piping, so this uses `std::process::Command`
-    // directly with the same two env calls `common::otto_cmd` makes.
+    // expose raw stdio piping, so this goes through `common::otto_std_cmd`,
+    // the `std::process::Command` twin of `common::otto_cmd`.
     let home = TempDir::new().expect("failed to create scratch OTTO_HOME");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_otto"))
+    let mut child = common::otto_std_cmd(home.path())
         .arg("Convert")
         .args(args)
-        .env("OTTO_HOME", home.path())
-        .env_remove("OTTO_DB_PATH")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

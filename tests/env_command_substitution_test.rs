@@ -4,19 +4,19 @@
 //! ran a truncated command, failed, and took the whole env map down with it. These fixtures
 //! pin the shapes an ottofile can now write, and the loud error for the one shape it can't.
 
+mod common;
+
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 use std::path::Path;
 use tempfile::TempDir;
 
-#[allow(deprecated)]
+/// The fixture's own otto, isolated through `common::otto_cmd` so history and
+/// state land in the fixture instead of the developer's `~/.otto`.
 fn otto_cmd(work_dir: &Path, ottofile: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("otto").expect("Failed to find otto binary");
+    let mut cmd = common::otto_cmd(&work_dir.join(".otto"));
     cmd.current_dir(work_dir);
     cmd.arg("--ottofile").arg(ottofile);
-    // Keep history/state inside the fixture instead of the developer's ~/.otto
-    cmd.env("OTTO_HOME", work_dir.join(".otto"));
-    cmd.env("OTTO_DB_PATH", work_dir.join("otto.db"));
     cmd
 }
 

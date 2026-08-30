@@ -211,15 +211,15 @@ tasks:
 fn tasks_defaults_to_yaml_on_a_real_tty() {
     let temp = TempDir::new().unwrap();
     let ottofile = write_ottofile(temp.path(), FIXTURE);
-    let bin = env!("CARGO_BIN_EXE_otto");
-
-    let inner_cmd = format!("{bin} --tasks -o {}", ottofile.display());
-    let output = StdCommand::new("script")
+    // `script` runs the command through a shell, so otto inherits `script`'s
+    // environment: isolating the outer process isolates the inner otto.
+    let inner_cmd = format!("{} --tasks -o {}", common::OTTO_BIN, ottofile.display());
+    let mut script = StdCommand::new("script");
+    common::isolate(&mut script, temp.path());
+    let output = script
         .arg("-qec")
         .arg(&inner_cmd)
         .arg("/dev/null")
-        .env("OTTO_HOME", temp.path())
-        .env_remove("OTTO_DB_PATH")
         .output()
         .expect("failed to run `script` (util-linux) for the pty test");
 

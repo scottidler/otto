@@ -8,7 +8,9 @@
 //! Every fixture here is non-interactive and self-terminating: a task that waits
 //! for input would wedge the suite.
 
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
+use common::{OTTO_BIN, isolate, otto_cmd};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Output};
@@ -21,13 +23,7 @@ fn write_ottofile(dir: &Path, contents: &str) -> PathBuf {
 }
 
 fn otto(ottofile: &Path, otto_home: &Path, args: &[&str]) -> Output {
-    cargo_bin_cmd!("otto")
-        .env("OTTO_HOME", otto_home)
-        .arg("-o")
-        .arg(ottofile)
-        .args(args)
-        .output()
-        .unwrap()
+    otto_cmd(otto_home).arg("-o").arg(ottofile).args(args).output().unwrap()
 }
 
 fn stdout(output: &Output) -> String {
@@ -100,14 +96,12 @@ fn tty_task_sees_a_real_tty_on_stdout_under_a_pty() {
     let temp = TempDir::new().unwrap();
     let otto_home = temp.path().join("otto-home");
     let ottofile = write_ottofile(temp.path(), TTY_FIXTURE);
-    let bin = env!("CARGO_BIN_EXE_otto");
-
-    let inner_cmd = format!(
-        "OTTO_HOME={} {bin} -o {} interactive",
-        otto_home.display(),
-        ottofile.display()
-    );
-    let output = StdCommand::new("script")
+    // `script` runs the command through a shell, so otto inherits `script`'s
+    // environment: isolating the outer process isolates the inner otto.
+    let inner_cmd = format!("{OTTO_BIN} -o {} interactive", ottofile.display());
+    let mut script = StdCommand::new("script");
+    isolate(&mut script, &otto_home);
+    let output = script
         .arg("-qec")
         .arg(&inner_cmd)
         .arg("/dev/null")

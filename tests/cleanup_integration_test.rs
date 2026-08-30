@@ -1,4 +1,6 @@
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
+use common::otto_cmd;
 use eyre::Result;
 use serial_test::serial;
 use std::fs;
@@ -13,16 +15,12 @@ const PROJECT: &str = "widget";
 
 /// The otto binary, with its environment pinned rather than inherited.
 ///
-/// `HOME` and `OTTO_HOME` point at the scratch tree, and `OTTO_DB_PATH` is
-/// *removed*: the database derives from `OTTO_HOME`, so these tests must pass
-/// whether or not the developer running them has `OTTO_DB_PATH` exported. They
-/// used to fail outright when it was, because the child inherited it and read a
-/// database that knew nothing about the fixture.
+/// `common::otto_cmd` pins `OTTO_HOME` and removes `OTTO_DB_PATH`; these tests
+/// additionally pin `HOME`, because cleanup resolves `~` for the fallback home
+/// and a stray real `~/.otto` would otherwise be in scope for a delete.
 fn otto(home_dir: &std::path::Path, otto_home: &std::path::Path) -> assert_cmd::Command {
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.env("HOME", home_dir)
-        .env("OTTO_HOME", otto_home)
-        .env_remove("OTTO_DB_PATH");
+    let mut cmd = otto_cmd(otto_home);
+    cmd.env("HOME", home_dir);
     cmd
 }
 

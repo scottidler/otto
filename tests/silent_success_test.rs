@@ -6,19 +6,19 @@
 //! not exist, `-j 0` accepted and then spun forever, `exit 7` recorded as 1.
 //! See docs/design/2026-06-10-code-review-remediation.md Phase 1.
 
+mod common;
+
+use common::otto_std_cmd;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use tempfile::TempDir;
 
 /// Run the real binary in `dir` with an isolated `OTTO_HOME`, returning
 /// (exit code, stdout, stderr).
 fn run_otto(dir: &Path, otto_home: &Path, args: &[&str]) -> (i32, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_otto"))
+    let output = otto_std_cmd(otto_home)
         .current_dir(dir)
-        .env("OTTO_HOME", otto_home)
-        .env("OTTO_DB_PATH", otto_home.join("otto.db"))
         .env_remove("OTTOFILE")
         .args(args)
         .output()
@@ -208,10 +208,8 @@ fn spawn_failure_names_the_real_task_and_the_run_terminates() {
     );
     let bin = path_without_python3(dir.path());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_otto"))
+    let output = otto_std_cmd(&home)
         .current_dir(dir.path())
-        .env("OTTO_HOME", &home)
-        .env("OTTO_DB_PATH", home.join("otto.db"))
         .env("PATH", &bin)
         .env_remove("OTTOFILE")
         .args(["pytask", "downstream"])

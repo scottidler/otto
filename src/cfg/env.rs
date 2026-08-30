@@ -10,7 +10,9 @@ pub fn evaluate_envs(
 ) -> Result<HashMap<String, String>> {
     log::debug!("cfg::evaluate_envs: keys={} working_dir={working_dir:?}", envs.len());
     let mut evaluated = HashMap::new();
-    let mut pending: Vec<String> = envs.keys().cloned().collect();
+    // Name *and* value, borrowed straight from `envs`: carrying the pair is what
+    // keeps the retry loop free of a map lookup that could only be unwrapped.
+    let mut pending: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let mut iterations = 0;
     const MAX_ITERATIONS: usize = 100; // Prevent infinite loops
 
@@ -40,18 +42,17 @@ pub fn evaluate_envs(
         let mut made_progress = false;
         let mut still_pending = Vec::new();
 
-        for var_name in pending {
-            let raw_value = envs.get(&var_name).unwrap();
-            let context = evaluation_context(&base_env, &evaluated, &inherited, &var_name);
+        for (var_name, raw_value) in pending {
+            let context = evaluation_context(&base_env, &evaluated, &inherited, var_name);
 
             match evaluate_single_env_value(raw_value, &context, working_dir) {
                 Ok(resolved_value) => {
-                    evaluated.insert(var_name, resolved_value);
+                    evaluated.insert(var_name.to_string(), resolved_value);
                     made_progress = true;
                 }
                 Err(_) => {
                     // Might depend on other variables not yet resolved
-                    still_pending.push(var_name);
+                    still_pending.push((var_name, raw_value));
                 }
             }
         }
@@ -60,7 +61,8 @@ pub fn evaluate_envs(
             // A cycle is its own error, named as one. Checked before the retry
             // below, whose message ("... 'B' not found") describes a variable
             // that exists and blames the wrong end of the loop.
-            if let Some(cycle) = find_reference_cycle(&still_pending, envs) {
+            let still_pending_names: Vec<String> = still_pending.iter().map(|(name, _)| (*name).to_string()).collect();
+            if let Some(cycle) = find_reference_cycle(&still_pending_names, envs) {
                 return Err(eyre!(
                     "Circular dependency between environment variables: {}",
                     cycle.join(" -> ")
@@ -68,12 +70,11 @@ pub fn evaluate_envs(
             }
 
             // Try to evaluate remaining variables with partial resolution
-            for var_name in &still_pending {
-                let raw_value = envs.get(var_name).unwrap();
+            for (var_name, raw_value) in &still_pending {
                 let context = evaluation_context(&base_env, &evaluated, &inherited, var_name);
                 match evaluate_single_env_value(raw_value, &context, working_dir) {
                     Ok(resolved_value) => {
-                        evaluated.insert(var_name.clone(), resolved_value);
+                        evaluated.insert((*var_name).to_string(), resolved_value);
                     }
                     Err(e) => {
                         return Err(eyre!("Failed to resolve environment variable '{}': {}", var_name, e));

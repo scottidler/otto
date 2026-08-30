@@ -7,6 +7,8 @@
 //! file exercises the four behaviors that contract exists to deliver, end to end
 //! through the real parser and scheduler.
 
+mod common;
+
 use eyre::Result;
 use serial_test::serial;
 use std::path::{Path, PathBuf};
@@ -340,10 +342,8 @@ tasks:
     )
     .expect("write ottofile");
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_otto"))
+    let output = common::otto_std_cmd(&otto_home)
         .current_dir(dir.path())
-        .env("OTTO_HOME", &otto_home)
-        .env("OTTO_DB_PATH", otto_home.join("otto.db"))
         .env_remove("OTTOFILE")
         .arg("consumer")
         .output()

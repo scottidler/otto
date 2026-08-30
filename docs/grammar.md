@@ -20,7 +20,7 @@ Otto CLI uses a two-pass parsing approach:
 
 The grammar supports:
 - Global options (affecting Otto behavior)
-- Built-in commands (`graph`, `help`, `version`)
+- Built-in commands (`Graph`, `History`, `Stats`, `Clean`, `Convert`, `Upgrade`, plus `help`)
 - Task invocations with typed arguments
 - Mixed global and task-specific options
 
@@ -45,15 +45,16 @@ global_option_long_space  = "--", identifier, whitespace1, argument_value ;
 global_option_short_space = "-", short_char, whitespace1, argument_value ;
 global_option_flag       = ( "--", identifier ) | ( "-", short_char ) ;
 
-command = "graph", [ graph_options ]
-        | "help", [ task_name ]
-        | "version" ;
+command = builtin_command, { whitespace1, task_argument }
+        | "help", [ task_name ] ;
+
+builtin_command = "Clean" | "Convert" | "Graph" | "History" | "Stats" | "Upgrade" ;
 
 graph_options = { graph_option } ;
 graph_option = "--format", whitespace1, graph_format
              | "--output", whitespace1, file_path ;
 
-graph_format = "ascii" | "dot" | "svg" ;
+graph_format = "ascii" | "dot" | "svg" | "png" | "pdf" ;
 
 task_invocations = task_invocation, { whitespace1, task_invocation } ;
 
@@ -78,7 +79,7 @@ quoted_string = '"', { ? any character except '"' ? }, '"'
               | "'", { ? any character except "'" ? }, "'" ;
 unquoted_value = { ? any non-whitespace character ? } ;
 
-short_char = "o" | "a" | "j" | "H" | "t" | "v" | "h" | "V" ;
+short_char = "C" | "o" | "j" | "t" | "h" | "V" ;
 letter = "a" | "b" | "c" | ? ... ? | "z" | "A" | "B" | ? ... ? | "Z" ;
 digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 whitespace1 = { " " | "\t" | "\n" | "\r" } ;
@@ -112,19 +113,20 @@ Classic Backus-Naur Form:
 <global_option_flag>       ::= "--" <global_flag_name>
                              | "-" <global_short_flag>
 
-<global_option_name> ::= "ottofile" | "api" | "jobs" | "home" | "tasks" | "verbosity"
-<global_flag_name>   ::= "help" | "version" | "verbose"
-<global_short_char>  ::= "o" | "a" | "j" | "H" | "t" | "v"
-<global_short_flag>  ::= "h" | "V"
+<global_option_name> ::= "cwd" | "ottofile" | "jobs" | "format" | "log-level"
+<global_flag_name>   ::= "help" | "version" | "tui" | "tasks" | "list-subtasks" | "no-prefix"
+<global_short_char>  ::= "C" | "o" | "j"
+<global_short_flag>  ::= "h" | "V" | "t"
 
-<command> ::= <graph_command>
+<command> ::= <builtin_command>
             | <help_command>
-            | <version_command>
 
-<graph_command> ::= "graph" <graph_options>
-<help_command>  ::= "help" <task_name>
+<builtin_command> ::= <graph_command>
+                    | "Clean" | "Convert" | "History" | "Stats" | "Upgrade"
+
+<graph_command>   ::= "Graph" <graph_options>
+<help_command>    ::= "help" <task_name>
                   | "help"
-<version_command> ::= "version"
 
 <graph_options> ::= <graph_option>
                   | <graph_options> <graph_option>
@@ -133,7 +135,7 @@ Classic Backus-Naur Form:
 <graph_option> ::= "--format" <whitespace1> <graph_format>
                  | "--output" <whitespace1> <file_path>
 
-<graph_format> ::= "ascii" | "dot" | "svg"
+<graph_format> ::= "ascii" | "dot" | "svg" | "png" | "pdf"
 
 <task_invocations> ::= <task_invocation>
                      | <task_invocations> <whitespace1> <task_invocation>
@@ -228,7 +230,7 @@ EQUALS         ::= "="
 ### Tokenization Order
 
 1. **Whitespace** (consumed, not returned)
-2. **Keywords** (`graph`, `help`, `version`)
+2. **Keywords** (the capitalized builtins, plus `help`)
 3. **Operators** (`--`, `-`, `=`)
 4. **Quoted strings** (higher precedence than unquoted)
 5. **Identifiers** (alphanumeric + underscore + dash)
@@ -238,17 +240,31 @@ EQUALS         ::= "="
 
 ### Global Options
 
+This table is the whole global surface: every row below appears in
+`otto --help`, and nothing in `otto --help` is missing from it. Re-derived
+against the binary on 2026-08-30, which is when `--api`, `--home`/`-H`,
+`--verbosity`/`-v` and a bare `--verbose` were struck: none of them existed.
+`otto.home` and `otto.verbosity` were deleted from the ottofile schema the same
+week (see `docs/commands/ottofile-strict-schema-migration.md`), so this page no
+longer advertises either spelling.
+
 | Option | Short | Type | Description |
 |--------|-------|------|-------------|
-| `--ottofile` | `-o` | `String` | Path to Otto configuration file |
-| `--api` | `-a` | `String` | API URL |
-| `--jobs` | `-j` | `u32` | Number of parallel jobs |
-| `--home` | `-H` | `String` | Otto home directory |
-| `--tasks` | `-t` | `String` | Comma-separated task list |
-| `--verbosity` | `-v` | `u8` | Verbosity level (0-9) |
+| `--cwd` | `-C` | `DIR` | Change to DIR before doing anything |
+| `--ottofile` | `-o` | `PATH` | Path to the ottofile (env: `OTTOFILE`) |
+| `--list-subtasks` | | `Flag` | List all foreach subtasks and exit |
+| `--tasks` | | `Flag` | Print the machine-readable task list and exit |
+| `--format` | | `yaml\|json` | Output format for `--tasks`; yaml on a tty, json when piped |
+| `--jobs` | `-j` | `N` | Number of parallel jobs |
+| `--tui` | `-t` | `Flag` | Enable the interactive TUI dashboard |
+| `--no-prefix` | | `Flag` | Suppress the `[task]` prefix on task output |
+| `--log-level` | | `LEVEL` | Verbosity of otto's own log file (`off`..`trace`) |
 | `--help` | `-h` | `Flag` | Show help message |
 | `--version` | `-V` | `Flag` | Show version |
-| `--verbose` | | `Flag` | Enable verbose output |
+
+Otto's own state directory is `$OTTO_HOME` (or `$HOME/.otto`), an environment
+variable with no flag spelling; the database under it can be moved on its own
+with `$OTTO_DB_PATH`.
 
 ### Task Arguments
 
@@ -305,12 +321,12 @@ otto --jobs 4 build
 #### 2. Flag vs Argument with Space
 
 ```bash
-otto --verbose build
+otto --no-prefix build
 ```
 
 **Ambiguous interpretations:**
-- `--verbose` is a flag, `build` is a task name
-- `--verbose` is an argument with value `build`
+- `--no-prefix` is a flag, `build` is a task name
+- `--no-prefix` is an argument with value `build`
 
 **Resolution:** Known global flags are recognized by name, unknown flags are treated as arguments with values.
 
@@ -403,7 +419,7 @@ command_line
 ### Graph Command
 
 ```bash
-otto graph --format dot --output graph.dot
+otto Graph --format dot --output graph.dot
 ```
 
 **Parse tree:**
@@ -412,7 +428,7 @@ command_line
 ├── global_options: []
 └── command
     └── graph_command
-        ├── keyword: "graph"
+        ├── keyword: "Graph"
         └── graph_options
             ├── graph_option: format="dot"
             └── graph_option: output="graph.dot"
@@ -421,7 +437,7 @@ command_line
 ### Complex Mixed Example
 
 ```bash
-otto --ottofile=build.yml --verbose test --unit --integration build --release=true
+otto --ottofile=build.yml --no-prefix test --unit --integration build --release=true
 ```
 
 **Parse tree:**
@@ -429,7 +445,7 @@ otto --ottofile=build.yml --verbose test --unit --integration build --release=tr
 command_line
 ├── global_options
 │   ├── global_option: ottofile="build.yml"
-│   └── global_option: verbose=flag
+│   └── global_option: no-prefix=flag
 └── task_invocations
     ├── task_invocation
     │   ├── task_name: "test"

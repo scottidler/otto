@@ -1468,3 +1468,132 @@ Continuation of Phase 11 on top of `cf768eb`. The prior pass scoped its effort t
 - **The coverage floor (85) needs confirming against a real CI-runner measurement** and ratcheting up if the runner's number is meaningfully higher than the local 90.35% this pass measured; this pass could not trigger an actual runner execution.
 - **Whether to run "revert the fix, confirm red" for every test this pass added**, or accept the spot-checked subset as sufficient evidence, is the reviewer's call — flagged rather than assumed either way.
 - The three open questions from the prior Phase 11 section stand: the residual `.tmp*` project rows (the author is sweeping these directly), `tests/flag_integration_test.rs`'s unguarded `set_current_dir`, and whether this plan's remaining scope needs its own follow-up doc — the last of these is now moot, since this pass closed everything Phase 11 named.
+
+## Audit remediation (2026-08-30)
+
+Round-1 implementation audit of this design doc (two review seats plus a
+synthesis pass) returned three must-fix and four cheap-win findings against
+HEAD `294047c`. This section covers the fix pass for all seven plus one
+deferred item. It is a remediation pass, not a phase: it adds no scope the
+design doc did not already claim.
+
+### Design decisions
+- **`tests/common/mod.rs` grew two more shapes rather than the callers growing
+  their own env calls** — `otto_std_cmd` (the `std::process::Command` twin, for
+  the two tests that need raw stdio piping, which `assert_cmd::Command` does
+  not expose) and `isolate` (applies the same two env calls to a command that
+  reaches otto *indirectly*, i.e. the two pty tests that run it under
+  `script -qec`). The finding was that eight `tests/*.rs` files bypassed the
+  helper; the reason they bypassed it was that it only fit one spawn shape.
+  Adding the missing shapes is what makes "every spawning file routes through
+  the helper" a property that holds instead of a sentence that has to be
+  re-checked. Now mechanical: `grep -rn 'CARGO_BIN_EXE_otto\|cargo_bin_cmd\|Command::cargo_bin' tests/*.rs`
+  returns nothing outside `tests/common/mod.rs`.
+- **`tests/builtin_commands_test.rs` lost its `unsafe { std::env::set_var }`
+  entirely** — `setup_test_db` mutated the *test process's* own environment
+  (`OTTO_DB_PATH`, `OTTO_HOME`) and then passed the same values per spawn. The
+  per-spawn values were doing all the work; the global mutation was leaking
+  `OTTO_DB_PATH` into every other test in that binary, which is the same class
+  of defect the isolation helper exists to prevent. `#[serial]` was left in
+  place rather than removed in the same change.
+- **The `env.rs` map-get unwraps were removed by construction, not by an
+  `ok_or_else`** — `src/cfg/env.rs::evaluate_envs`'s `pending` list now carries
+  `(&str, &str)` name/value pairs borrowed from `envs` instead of names alone,
+  so both retry loops already hold the value and there is no lookup left. An
+  `ok_or_else(...)?` would have replaced a panic with an unreachable error
+  branch: honest, but permanently uncovered and still describing an impossible
+  state. The cycle check still needs a `&[String]`, so the names are collected
+  for that one call.
+- **The coverage floor got its own CI job, not a step inside `checks`** —
+  `.github/workflows/checks.yml` now has a `coverage` job running `otto cov`
+  (which chains `cov-report` through `cov`'s own `after:`). Going through `cov`
+  rather than `ci` leaves out `lint`, the one step with no CI-portable install
+  path — the same reason the existing job runs `otto quick`. A separate job so
+  a coverage failure and a test/clippy/fmt failure report independently, which
+  is the reason `otto quick` runs its checks as siblings. Both `CI` and
+  `Release` gate on the whole reusable workflow, so this lands the floor in the
+  release gate too.
+- **The reference-doc drift test now pins the doc's *arithmetic*, not just its
+  key names** (`src/cfg/task_tests.rs::ottofile_reference_key_inventory_is_exhaustive`).
+  The per-key loop only asserted each key name appears somewhere on the page,
+  which is why `docs/commands/ottofile-reference.md` could say "Total: 44" and
+  "`OttoSpec` 9" for a day while its own section header twenty lines earlier
+  said 7, and the test stayed green. It now asserts the stated total, the sum
+  line, the drift-test description's count, and each per-struct count. Verified
+  it bites: flipping the header to "Total: 44" turns the test red with
+  ``docs/commands/ottofile-reference.md must state `## Total: 42 fixed keys` ``.
+- **The five missing converter goldens were generated from current behavior and
+  then read** — `makefiles/{go-build-project,python-poetry-service,python-pre-commit,docker-compose-service,makefile-example}/expected.yml`.
+  A golden generated from the implementation only pins against future drift, so
+  each was reviewed against the sibling assertions that do constrain behavior
+  (no `$(shell`, no bare `$(VAR)`, exact warning list, reload-to-equal-ConfigSpec)
+  before committing. The two pre-existing goldens are byte-unchanged.
+
+### Deviations
+- **`docs/grammar.md` was swept wider than the finding named.** The finding
+  named `home`/`verbosity` in the global-option production and the
+  `--home`/`-H` and `--verbosity`/`-v` rows in the options table. Measured
+  against `target/debug/otto --help`, `--api`/`-a` and a bare `--verbose` were
+  equally fictional, `-t` is `--tui` (not `--tasks`), `--tasks` is a flag rather
+  than a comma-separated string, and `--cwd`/`-C`, `--list-subtasks`,
+  `--format`, `--no-prefix` and `--log-level` were all missing. Measured also
+  that `otto graph` and `otto version` do not exist (`unknown task 'graph'; did
+  you mean 'Graph'?`), so the `<command>` production named commands that are
+  not commands. Fixing only the two named errors would have left the page
+  wrong in the same way for the same reason. The whole global surface and the
+  builtin-command production are now re-derived from the binary, with the
+  derivation date stated on the page.
+- **Acceptance criterion `:590` was NOT ticked; the other seven were.** The
+  instruction for this pass was to tick all eight. Seven were re-probed live
+  and ticked with their observed output recorded beside the original
+  `Observed on main` line. The first names a GitHub Actions conclusion ("The
+  `CI` workflow concludes `success`"), which no local probe can produce. Its
+  structure is verified and recorded (`release-and-publish.yml:24` calls
+  `checks.yml`; `:32`/`:105` are `needs: checks`; `:160` is
+  `needs: [build-linux, build-macos]`), and the box is left open with that
+  stated. Ticking a runner conclusion that has never run on a runner is the
+  exact failure mode this document was written to catch.
+- **Phase 11 bullet `:531` was left unticked, as instructed, although its fix is
+  now complete and proven.** The audit was right that it was correctly
+  unchecked at `294047c` (the routing claim at `:560` was false). This pass
+  closed it and proved it adversarially. The close-out prose records that; the
+  box stays open pending the reviewer's call, rather than being flipped by the
+  same agent that wrote the fix.
+- **The pre-fix leak measurement quoted in the doc (`9 .tmp* project rows, 15
+  runs`) is the audit's, not this pass's**, and is attributed as such in the
+  text. Reproducing it would have required reverting the fix; the post-fix
+  measurement is this pass's own.
+
+### Tradeoffs
+- **Adversarial verification ran the twelve affected test files, not the whole
+  suite, under the faked `HOME`.** Faking `HOME` breaks `sccache` (`Operation
+  not permitted`) and `rustup`, so the run needs pre-built binaries plus
+  `RUSTUP_HOME`/`CARGO_HOME` pinned at the real paths. The twelve files are
+  exactly the ones that spawn the binary; the rest cannot write a project row.
+  The unisolated whole-suite run was covered separately by the md5 proof.
+- **`#[serial]` kept on `tests/builtin_commands_test.rs`** even though the
+  global `set_var` that justified it is gone. Removing it is a scheduling
+  change with its own risk, unrelated to isolation; left for whoever touches
+  that file next.
+- **The `expected.yml` regenerator was deleted after use rather than committed
+  as an `#[ignore]`d test.** It rewrites goldens from current behavior and
+  strips their header comments, which is a footgun sitting next to a test whose
+  whole job is to detect drift.
+
+### Open questions
+- **The coverage floor still has never run on a GitHub runner.** The gap is now
+  narrower than before this pass — it is "has it run there", not "does it run
+  there" — but the first real runner measurement should still be used to ratchet
+  85 up or confirm it. The `coverage` job also roughly doubles the runner cost
+  of every push and every tag, since it re-runs the whole suite instrumented;
+  if that is unacceptable, the alternative is gating coverage on `main` pushes
+  and tags only, which is a policy call, not an implementation one.
+- **Should `:531` be ticked?** Its fix is complete and adversarially proven
+  (twelve files, `OTTO_DB_PATH` exported at a scratch db, `HOME` faked: 92
+  tests pass and the steered database is never created). It was left unticked
+  on instruction.
+- **`docs/migration-guide.md:89` still says "Ottofiles: No modifications
+  required" and "Filesystem layout: Unchanged".** The audit ranked this below
+  `grammar.md` because that section is scoped to an older v1.x migration, and it
+  was left alone here. Someone should decide whether that scoping is clear
+  enough to a reader who lands on the line cold.

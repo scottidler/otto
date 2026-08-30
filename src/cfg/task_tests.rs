@@ -1004,4 +1004,29 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         total, 42,
         "total on-disk key count drifted from the design doc's count of 42"
     );
+
+    // The per-key loop above only proves each key *name* appears somewhere on
+    // the page, so it cannot see a wrong total: the reference doc said "Total:
+    // 44" and "`OttoSpec` 9" for a full day after the schema moved to 42/7,
+    // contradicting its own section header twenty lines earlier. Pin the prose
+    // arithmetic too.
+    let stated_total = format!("## Total: {total} fixed keys");
+    assert!(
+        doc.contains(&stated_total),
+        "docs/commands/ottofile-reference.md must state `{stated_total}`; its total section is stale"
+    );
+    assert!(
+        doc.contains(&format!("= **{total}**")),
+        "docs/commands/ottofile-reference.md's per-struct sum must total **{total}**"
+    );
+    assert!(
+        doc.contains(&format!("every one of those {total}")),
+        "docs/commands/ottofile-reference.md's drift-test description must name {total} recovered keys"
+    );
+    for (struct_name, expected_count, _, _) in expectations {
+        assert!(
+            doc.contains(&format!("`{struct_name}` {expected_count}")),
+            "docs/commands/ottofile-reference.md's per-struct sum must read `{struct_name}` {expected_count}"
+        );
+    }
 }

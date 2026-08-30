@@ -1,0 +1,74 @@
+# Expected conversion of this directory's Makefile. Compared as a ConfigSpec,
+# not as text: `otto.envs` is a HashMap and its serialized order varies.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - help
+  envs:
+    GOTEST: ${GOCMD} test
+    GOLINT: golint
+    GOGET: ${GOCMD} get
+    GOCLEAN: ${GOCMD} clean
+    BINARY_NAME: ttha
+    PROJECT: github.com/dmswe/ttha
+    GOINSTALL: ${GOCMD} install
+    GOCMD: go
+    GO_FILES: $(find . -name '*.go' | grep -v _test.go)
+    GOBUILD: ${GOCMD} build
+    NAME: ${PROJECT}
+    GIT_COMMIT: $(git rev-parse --short HEAD)
+tasks:
+  help:
+    help: HELP
+    bash: awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $1, $2}' ${MAKEFILE_LIST}
+  test:
+    bash: ${GOTEST} ./... -v
+  clean:
+    help: Clean Project
+    bash: |-
+      echo "==> Clean project..."
+      ${GOCLEAN}
+      rm -f ${BINARY_NAME}
+      rm -f ${BINARY_NAME}.tar.gz
+  lint:
+    help: Lint Project
+    bash: |-
+      echo "==> Lint project..."
+      ${GOLINT} ./...
+  build-linux:
+    help: Cross compilation
+    before:
+    - dep
+    bash: |-
+      echo "==> Build Linux artifact..."
+      CGO_ENABLED=0 GOOS=linux GOARCH=amd64 ${GOBUILD} -o ${BINARY_NAME} -v
+  build-mac:
+    help: Build linux artifact
+    before:
+    - dep
+    bash: |-
+      echo "==> Build OSX artifact..."
+      CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 ${GOBUILD} -o ${BINARY_NAME} -v
+  package:
+    help: Package source code
+    before:
+    - build
+    bash: |-
+      echo "==> Package source code..."
+      tar -czvf ${PROJECT_NAME}.tar.gz ${BINARY_NAME}
+  build-docker:
+    help: Build docker image with buildkit
+    bash: |-
+      echo "==> Package source code..."
+      DOCKER_BUILDKIT=1 docker build -t ttha .
+  dep:
+    help: helpers
+    bash: |-
+      echo "==> Installing dependencies..."
+      ${GOGET} -v -d ./...
+      ${GOGET} -u golang.org/x/lint/golint
+  fmt:
+    bash: |-
+      echo "==> Fixing source code with gofmt..."
+      gofmt -s -w ./main.go ./meta.go ./cmd

@@ -135,9 +135,12 @@ here too.
 The `params:` map's keys are **rich titles**, e.g. `-v|--verbose`, `-s`,
 `--service`, or a bare word for a positional param — free-form, parsed by
 `divine()` into the derived (non-writable) `name`/`short`/`long` fields.
-`divine()`'s own tolerance for malformed titles (e.g. `-verbose` misread as
-positional) is a separate, still-open hazard tracked in
-`docs/design/2026-06-10-code-review-remediation.md:217`, not this page.
+`divine()` is fallible: a malformed title is a load error, not a silent
+misreading. `-verbose` (a multi-character name behind one dash), `-v|-x` (two
+shorts), `--foo|--bar` (two longs), a bare name mixed with a flag, and two
+titles that divine to the same name are each rejected by name (`divine()` in
+`src/cfg/param.rs`, pinned by `divine_rejects_*` and
+`deny_duplicate_divined_names_in_one_params_map` in `src/cfg/param_tests.rs`).
 
 Each param VALUE's own keys are fixed and listed here. **Five fields are
 `#[serde(skip)]`** (`name`, `short`, `long`, `param_type`, `value`): they are
@@ -171,10 +174,10 @@ accept arbitrary keys:
 3. **`params:` (`tasks.<name>.params`)** — keys are rich param titles parsed
    by `divine()`, values are `tasks.<name>.params.<title>:`.
 
-## Total: 44 fixed keys across the seven structs
+## Total: 42 fixed keys across the seven structs
 
-`ConfigSpec` 2 + `OttoSpec` 9 + `RetentionSpec` 5 + `ForeachSpec` 7 +
-`TaskSpecHelper` 13 + `ParamSpec` 6 + `EdgeSpec` 2 = **44**. This count, and
+`ConfigSpec` 2 + `OttoSpec` 7 + `RetentionSpec` 5 + `ForeachSpec` 7 +
+`TaskSpecHelper` 13 + `ParamSpec` 6 + `EdgeSpec` 2 = **42**. This count, and
 every key name above, is pinned by an automated drift test
 (`ottofile_reference_key_inventory_is_exhaustive`, in
 `src/cfg/task.rs`'s `#[cfg(test)]` module): it destructures a live instance of
@@ -183,6 +186,9 @@ gains or loses a field, before any test even runs) and separately recovers
 each struct's real on-disk key list from its "unknown field" error message
 (fed a deliberately bogus key — `deny_unknown_fields`'s derive-generated
 error for the six Architecture-table structs, `EdgeSpec`'s hand-written
-`visit_map` error for the seventh), then asserts every one of those 44
-recovered keys is mentioned, verbatim, on this page. If this page and the
-schema ever drift, `cargo test` fails — it does not merely go stale quietly.
+`visit_map` error for the seventh), then asserts every one of those 42
+recovered keys is mentioned, verbatim, on this page. The stated total and the
+per-struct arithmetic in this section are pinned by the same test, so a wrong
+count here is a red build rather than a footnote nobody re-adds up. If this
+page and the schema ever drift, `cargo test` fails — it does not merely go
+stale quietly.

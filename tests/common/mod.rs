@@ -16,6 +16,12 @@
 //! and removing `OTTO_DB_PATH`, is not isolation: a developer's shell that
 //! exports either one would still steer the child at the real store.
 //!
+//! Three shapes, because a test's spawn shape varies and the isolation must
+//! not: [`otto_cmd`] for an `assert_cmd::Command`, [`otto_std_cmd`] for the
+//! tests that need raw stdio piping, and [`isolate`] for the pty tests that
+//! reach otto indirectly through `script`. No `tests/*.rs` file constructs a
+//! command from `CARGO_BIN_EXE_otto` or `cargo_bin_cmd!` on its own.
+//!
 //! Not every test file that includes this module uses every item in it;
 //! that's expected, since each `tests/*.rs` file is its own compiled binary.
 
@@ -34,6 +40,27 @@ pub fn otto_cmd(home: &Path) -> assert_cmd::Command {
     let mut cmd = cargo_bin_cmd!("otto");
     cmd.env("OTTO_HOME", home).env_remove("OTTO_DB_PATH");
     cmd
+}
+
+/// The `otto` binary under test, for the two shapes `assert_cmd` cannot
+/// express: raw stdio piping, and running otto *indirectly* (under `script`
+/// for a pty). Always pair it with [`isolate`].
+pub const OTTO_BIN: &str = env!("CARGO_BIN_EXE_otto");
+
+/// The `std::process` twin of [`otto_cmd`], for tests that need raw stdio
+/// piping (`Stdio::piped`, writing to the child's stdin), which
+/// `assert_cmd::Command` does not expose. Same isolation, same two env calls.
+pub fn otto_std_cmd(home: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(OTTO_BIN);
+    isolate(&mut cmd, home);
+    cmd
+}
+
+/// Apply [`otto_cmd`]'s isolation to a command that reaches otto *indirectly*,
+/// such as `script -qec "<otto ...>"` in the pty tests, where the binary is
+/// spawned by the shell `script` starts and inherits `script`'s environment.
+pub fn isolate<'c>(cmd: &'c mut std::process::Command, home: &Path) -> &'c mut std::process::Command {
+    cmd.env("OTTO_HOME", home).env_remove("OTTO_DB_PATH")
 }
 
 /// Build a `StateManager` rooted at `home`'s `otto.db`, for tests that talk

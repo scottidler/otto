@@ -8,20 +8,21 @@
 //! here runs the real binary with a payload that creates a marker file, and
 //! asserts the marker was NOT created.
 
+mod common;
+
+use common::otto_std_cmd;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use tempfile::TempDir;
 
-/// Run the real binary in `dir` with an isolated `OTTO_HOME` *and* `OTTO_DB_PATH`
-/// (`OTTO_HOME` alone does not move the database), returning
+/// Run the real binary in `dir` isolated through `common::otto_std_cmd`, which
+/// pins `OTTO_HOME` and removes any inherited `OTTO_DB_PATH` (`OTTO_HOME` alone
+/// is not isolation: `OTTO_DB_PATH` wins over it). Returns
 /// (exit code, stdout, stderr).
 fn run_otto(dir: &Path, otto_home: &Path, args: &[&str]) -> (i32, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_otto"))
+    let output = otto_std_cmd(otto_home)
         .current_dir(dir)
-        .env("OTTO_HOME", otto_home)
-        .env("OTTO_DB_PATH", otto_home.join("otto.db"))
         .env_remove("OTTOFILE")
         .args(args)
         .output()

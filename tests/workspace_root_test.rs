@@ -6,7 +6,9 @@
 //! task that ran `cargo install --path borg` from `<root>/borg` looked for
 //! `<root>/borg/borg/Cargo.toml` and failed.
 
-use assert_cmd::cargo::cargo_bin_cmd;
+mod common;
+
+use common::otto_cmd;
 use std::fs;
 use std::io::Write;
 use tempfile::tempdir;
@@ -39,8 +41,8 @@ tasks:
     // Isolate ~/.otto writes so concurrent test runs don't collide.
     let otto_home = tempdir().unwrap();
 
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(&subdir).env("OTTO_HOME", otto_home.path()).arg("where");
+    let mut cmd = otto_cmd(otto_home.path());
+    cmd.current_dir(&subdir).arg("where");
 
     let assert = cmd.assert().success();
     let _ = assert; // surface output if the assertion above fails
@@ -107,8 +109,8 @@ tasks:
     fs::create_dir(&subdir).unwrap();
 
     let otto_home = tempdir().unwrap();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(&subdir).env("OTTO_HOME", otto_home.path()).arg("where");
+    let mut cmd = otto_cmd(otto_home.path());
+    cmd.current_dir(&subdir).arg("where");
     cmd.assert().success();
 
     // The sentinel lands somewhere under the project root (through the link
@@ -157,8 +159,8 @@ tasks:
     .unwrap();
 
     let otto_home = tempdir().unwrap();
-    let mut cmd = cargo_bin_cmd!("otto");
-    cmd.current_dir(root).env("OTTO_HOME", otto_home.path()).arg("where");
+    let mut cmd = otto_cmd(otto_home.path());
+    cmd.current_dir(root).arg("where");
     cmd.assert().success();
 
     let recorded = fs::read_to_string(root.join("sentinel.txt")).expect("sentinel must be written");

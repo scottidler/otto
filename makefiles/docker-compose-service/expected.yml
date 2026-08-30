@@ -1,0 +1,92 @@
+# Expected conversion of this directory's Makefile. Compared as a ConfigSpec,
+# not as text: `otto.envs` is a HashMap and its serialized order varies.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - dev
+  envs:
+    PYPI_PASSWORD: $(cat ~/.config/pip/pip.conf | grep extra-index-url | awk -F '[//|@]' '{print $3}' | awk -F '[:]' '{print $2}')
+    LOCAL_DUMP_FILE: ./schema/local-db/example-service-pgdump.tar.gz
+    PYPI_USERNAME: $(cat ~/.config/pip/pip.conf | grep extra-index-url | awk -F '[//|@]' '{print $3}' | awk -F '[:]' '{print $1}')
+    DUMP_CHECK: ${LOCAL_DUMP_FILE}-${LATEST_S3_DUMP_FILE}.check
+    LATEST_S3_DUMP_FILE: $(aws s3api list-objects-v2 --bucket "example-pg-dumps" --prefix 'example_service' --query 'sort_by(Contents, &LastModified)[-1].Key' --output=text)
+    GIT_DESCRIBE: $(git describe --always --abbrev=7)
+tasks:
+  all:
+    before:
+    - dev
+    - unit-test
+    - integration-test
+    - type-check
+    - lint
+    bash: ''
+  dev:
+    bash: poetry install
+  test:
+    before:
+    - dev
+    bash: poetry run pytest
+  unit-test:
+    before:
+    - dev
+    bash: poetry run pytest --junitxml=pytest.xml --cov=example_service tests/unit --log-cli-level=CRITICAL
+  integration-test:
+    before:
+    - dev
+    bash: poetry run pytest tests/integration -s || true
+  type-check:
+    before:
+    - dev
+    bash: poetry run mypy
+  lint:
+    before:
+    - dev
+    bash: poetry run pre-commit run --all-files
+  run-rest:
+    before:
+    - dev
+    bash: poetry run uvicorn example_service.rest.app:app --reload
+  clean:
+    help: Clean
+    before:
+    - dev-clean
+    bash: |-
+      rm -rf build/ dist/ .venv/ .mypy_cache/ .pytest_cache/
+      rm -rf *.egg-info
+      rm -rf .coverage
+      find . -name '*.pyc' -delete
+      find . -name '__pycache__' -delete
+  dev-clean:
+    bash: rm -f ${LOCAL_DUMP_FILE}-*.check
+  get-postgres-dump:
+    bash: |-
+      echo "LATEST_S3_DUMP_FILE: ${LATEST_S3_DUMP_FILE}"
+      echo "Downloading the latest pgdump from S3.."
+      [ -f "${DUMP_CHECK}" ] && echo "  dump file already exists" || aws s3 cp s3://example-pg-dumps/${LATEST_S3_DUMP_FILE} ${LOCAL_DUMP_FILE}
+      touch "${DUMP_CHECK}"
+  docker-compose-build:
+    bash: docker compose up --build -d
+  docker-compose:
+    before:
+    - get-postgres-dump
+    - docker-compose-build
+    bash: ''
+  docker-compose-down:
+    bash: docker compose -f docker-compose.yaml down
+  docker-compose-with-farnsworth-build:
+    bash: docker compose -f docker-compose.yaml -f docker-compose.farnsworth.yaml up --build -d
+  docker-compose-with-farnsworth:
+    before:
+    - get-postgres-dump
+    - docker-compose-with-farnsworth-build
+    bash: ''
+  docker-compose-with-farnsworth-down:
+    bash: docker compose -f docker-compose.yaml -f docker-compose.farnsworth.yaml down
+  docker-compose-clean:
+    bash: |-
+      echo "Deleting example-service volumes and containers..."
+      docker ps -a | grep 'example-service'  | awk -F ' ' '{print $1}' | xargs -I {} sh -c "docker rm -f {}"
+      docker volume list | grep 'example-service' | awk -F ' ' '{print $2}' | xargs -I {} sh -c "docker volume rm -f {}"
+  psql:
+    bash: docker exec -it example-service-db-1 psql -U example example_service
