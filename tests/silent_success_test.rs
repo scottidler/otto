@@ -330,3 +330,57 @@ fn an_unresolvable_task_env_fails_the_run() {
         "the healthy key must not be dropped alongside the failing one: {stdout}"
     );
 }
+
+/// `otto_get_input <task>.<Key>` returned empty at exit 0 for any key that was
+/// not already lowercase.
+///
+/// The round trip goes through an uppercased shell variable
+/// (`OTTO_INPUT_<TASK>_<KEY>`), so the key's original spelling is not
+/// recoverable from it. The bash reader lowercased and called that the key,
+/// which is a guess: `producer.MIXED_Case` came back empty while
+/// `producer.mixed_case` returned the value. Wrong answer, exit 0, no
+/// diagnostic - the class this file exists for. The Python generator reads the
+/// JSON directly and never had the bug, so the two generators disagreed.
+///
+/// otto now writes the key's original spelling beside each value and the
+/// reader uses it. The JSON key is the contract: `producer.mixed_case` is a
+/// miss now, correctly, because that key does not exist.
+#[test]
+fn input_keys_keep_the_case_the_producer_wrote() {
+    let (dir, otto_home) = project(
+        r#"
+otto:
+  api: 1
+  tasks: [consumer]
+tasks:
+  producer:
+    output: [MIXED_Case, plain, UPPER]
+    bash: |
+      otto_set_output "MIXED_Case" "hello"
+      otto_set_output "plain" "world"
+      otto_set_output "UPPER" "shout"
+  consumer:
+    before: [producer]
+    input: [producer.MIXED_Case, producer.plain, producer.UPPER]
+    bash: |
+      echo "mixed=[$(otto_get_input producer.MIXED_Case)]"
+      echo "plain=[$(otto_get_input producer.plain)]"
+      echo "upper=[$(otto_get_input producer.UPPER)]"
+      echo "wrongcase=[$(otto_get_input producer.mixed_case)]"
+"#,
+    );
+
+    let (code, stdout, stderr) = run_otto(dir.path(), &otto_home, &["consumer"]);
+
+    assert_eq!(code, 0, "stderr: {stderr}");
+    for expected in ["mixed=[hello]", "plain=[world]", "upper=[shout]"] {
+        assert!(
+            stdout.contains(expected),
+            "expected {expected} in output; got:\n{stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("wrongcase=[]"),
+        "a key the producer never wrote must miss, not alias onto one it did:\n{stdout}"
+    );
+}

@@ -258,7 +258,7 @@ impl From<crate::cli::parser::Task> for Task {
     }
 }
 
-fn calculate_hash(action: &String) -> String {
+fn calculate_hash(action: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(action.as_bytes());
     let result = hasher.finalize();

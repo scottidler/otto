@@ -1087,6 +1087,37 @@ fn divine_ottofile_rejection_table() {
     }
 }
 
+/// An ottofile that exists but cannot be read names itself too.
+///
+/// `divine_ottofile` covers the not-exists and cannot-expand paths; this is
+/// the third, and it used to be the one that got nothing. `fs::canonicalize`
+/// succeeds on an unreadable file, so the failure landed on the later
+/// `fs::read_to_string`, which had no context: the user saw a bare
+/// "Permission denied (os error 13)" with no path.
+#[test]
+fn an_unreadable_ottofile_names_the_path_it_could_not_read() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let ottofile = temp_dir.path().join("otto.yml");
+    std::fs::write(&ottofile, "otto:\n  api: 1\n").unwrap();
+    std::fs::set_permissions(&ottofile, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+
+    // Root defeats the fixture: mode 000 is still readable for uid 0. Probe the
+    // capability directly rather than checking a uid - it is the same question,
+    // asked of the actual file.
+    if std::fs::read_to_string(&ottofile).is_ok() {
+        return;
+    }
+
+    let err = Parser::load_config_from_path(Some(ottofile.clone()))
+        .expect_err("an unreadable ottofile must be rejected")
+        .to_string();
+
+    assert!(
+        err.contains("could not read ottofile") && err.contains(&ottofile.display().to_string()),
+        "the error must name the file it could not read, got: {err}"
+    );
+}
+
 /// A directory that exists but has no ottofile anywhere up to the filesystem
 /// root is not a rejection: it resolves to `Ok(None)`, letting the caller
 /// render `ottofile_not_found_message()` instead of a bare I/O error.

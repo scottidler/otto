@@ -454,9 +454,27 @@ otto_deserialize_input() {
                 "${prefix}"*) ;;
                 *) continue ;;
             esac
-            # Strip the prefix and convert back to lowercase with underscores
-            key="${var_name:$prefix_len}"
-            key=$(echo "$key" | tr '[:upper:]' '[:lower:]')
+            # Recover the key's ORIGINAL spelling from the companion
+            # OTTO_INPUTKEY_ variable otto writes beside each value.
+            #
+            # This used to lowercase the uppercased variable name and call that
+            # the key, which is a guess, not a recovery: the round trip goes
+            # through OTTO_INPUT_<TASK>_<KEY>, so case and `-`/`.` are gone by
+            # the time this loop sees it. Any key that was not already lowercase
+            # came back wrong, and `otto_get_input producer.MIXED_Case` returned
+            # empty at exit 0 - a silent wrong answer, not an error.
+            #
+            # The fallback keeps an input .env written by an older otto working:
+            # no companion variable means the old lowercase guess, which is
+            # exactly what that file's reader would have done anyway.
+            local suffix key_var
+            suffix="${var_name:$prefix_len}"
+            key_var="OTTO_INPUTKEY_${task_upper}_${suffix}"
+            if [ -n "${!key_var+set}" ]; then
+                key="${!key_var}"
+            else
+                key=$(echo "$suffix" | tr '[:upper:]' '[:lower:]')
+            fi
             OTTO_INPUT+=("${task_name}.${key}=${!var_name}")
         done < <(compgen -v)
     fi

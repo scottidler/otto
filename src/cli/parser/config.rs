@@ -33,7 +33,12 @@ impl Parser {
 
     fn load_config_from_path(ottofile_path: Option<PathBuf>) -> Result<(ConfigSpec, String, Option<PathBuf>)> {
         if let Some(ottofile) = ottofile_path {
-            let content = fs::read_to_string(&ottofile)?;
+            // Named, for the same reason `divine_ottofile` names its two
+            // failures: the not-exists branch already said which file it was
+            // looking for, while an unreadable one failed with a bare
+            // "Permission denied (os error 13)" and no path at all.
+            let content = fs::read_to_string(&ottofile)
+                .wrap_err_with(|| format!("could not read ottofile '{}'", ottofile.display()))?;
             let mut hasher = Sha256::new();
             hasher.update(&content);
             let result = hasher.finalize();

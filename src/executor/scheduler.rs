@@ -309,6 +309,23 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
             // Escape single quotes for bash single-quoted string
             let escaped = str_value.replace('\'', "'\\''");
             lines.push(format!("{var_name}='{escaped}'"));
+
+            // The key's original spelling, carried alongside the value.
+            //
+            // `var_name` is uppercased and has `-`/`.` folded to `_`, so the
+            // key cannot be recovered from it. The bash side used to guess by
+            // lowercasing, which meant `otto_get_input producer.MIXED_Case`
+            // returned empty at exit 0 while `producer.mixed_case` returned the
+            // value - a silent wrong answer for any key that was not already
+            // lowercase. The JSON is the source of truth for key names (the
+            // Python generator reads it directly and has never had this bug);
+            // this line is how bash gets at it.
+            //
+            // `OTTO_INPUTKEY_` rather than `OTTO_INPUT_KEY_`: the reader scans
+            // for the prefix `OTTO_INPUT_<TASK>_`, and a task literally named
+            // `key` would collide with the latter.
+            let escaped_key = key.replace('\'', "'\\''");
+            lines.push(format!("OTTO_INPUTKEY_{safe_task}_{safe_key}='{escaped_key}'"));
         }
     }
 

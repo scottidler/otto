@@ -316,6 +316,11 @@ tasks:
 /// File-based data passing survives a multiline value, end to end through the real
 /// binary. `MULTI='line1\nline2\nline3'` in the `.env` used to arrive as `'line1` -
 /// a stray quote and one line of what the task wrote - while the run exited 0.
+///
+/// The reads used to be spelled `producer.single`/`.quoted`/`.multi` against a
+/// producer that wrote `SINGLE`/`QUOTED`/`MULTI`, and passed - because the
+/// reader lowercased every key on the way in. That was the bug fixed alongside
+/// this: the key a consumer asks for is now the key the producer wrote.
 #[test]
 #[serial]
 fn test_multiline_output_reaches_the_consumer_intact() {
@@ -335,9 +340,9 @@ tasks:
   consumer:
     before: [producer]
     bash: |
-      echo "SINGLE=[$(otto_get_input producer.single)]"
-      echo "QUOTED=[$(otto_get_input producer.quoted)]"
-      echo "MULTI=[$(otto_get_input producer.multi)]"
+      echo "SINGLE=[$(otto_get_input producer.SINGLE)]"
+      echo "QUOTED=[$(otto_get_input producer.QUOTED)]"
+      echo "MULTI=[$(otto_get_input producer.MULTI)]"
 "#,
     )
     .expect("write ottofile");
