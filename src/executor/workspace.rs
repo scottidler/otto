@@ -1,4 +1,4 @@
-use crate::executor::layout::{resolve_otto_home, run_root};
+use crate::executor::layout::{resolve_otto_home, run_dir_name, run_root};
 use crate::ports::{FileSystem, RealFs, StateStore, record_blocking};
 use expanduser::expanduser;
 use eyre::{Result, eyre};
@@ -11,6 +11,11 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use super::state::{RunMetadata, StateManager};
+
+/// How many same-second run directories to disambiguate before giving up. Far
+/// past any realistic burst; the bound exists so a pathological filesystem cannot
+/// spin here forever.
+const RUN_DIR_ATTEMPTS: u32 = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionContext {
@@ -139,7 +144,31 @@ impl<F: FileSystem> Workspace<F> {
         // so cleanup can find the directory this run creates.
         let project = run_root(&home, &name, &hash);
         let cache = project.join(".cache");
-        let run = project.join(time.to_string());
+
+        // Reserve the run directory here rather than letting `init` create it,
+        // because reserving a name and creating it have to be one step. Every run
+        // starting in the same second used to get the same directory: they raced
+        // each other creating `tasks/` (`File exists (os error 17)`), overwrote
+        // each other's task logs, and once the runs table stopped rejecting
+        // duplicate timestamps, cleaning any one of them deleted the directory the
+        // others still pointed at.
+        fs.create_dir_all(&project)
+            .await
+            .map_err(|e| eyre!("Failed to create project directory {}: {}", project.display(), e))?;
+        let mut run = project.join(run_dir_name(time, 0));
+        for seq in 0..RUN_DIR_ATTEMPTS {
+            let candidate = project.join(run_dir_name(time, seq));
+            if fs.create_dir_exclusive(&candidate).await? {
+                run = candidate;
+                break;
+            }
+            if seq + 1 == RUN_DIR_ATTEMPTS {
+                return Err(eyre!(
+                    "Failed to reserve a run directory under {} after {RUN_DIR_ATTEMPTS} attempts",
+                    project.display()
+                ));
+            }
+        }
 
         // Try to create default StateManager for production use
         let state_store: Option<Arc<dyn StateStore>> =

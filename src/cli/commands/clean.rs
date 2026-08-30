@@ -378,8 +378,10 @@ impl CleanCommand {
                 continue;
             }
 
-            // Try to parse as timestamp
-            if let Ok(timestamp) = dir_name.parse::<u64>() {
+            // Try to parse as a run directory name. Not a bare `parse::<u64>()`:
+            // a same-second run is named `<timestamp>-<seq>` and would otherwise be
+            // invisible here and leak forever.
+            if let Some(timestamp) = crate::executor::layout::parse_run_dir_name(dir_name) {
                 let age_days = now.saturating_sub(timestamp) / 86400;
                 let size_bytes = Self::calculate_dir_size(&path)?;
 

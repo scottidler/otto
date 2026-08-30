@@ -24,6 +24,13 @@ pub trait FileSystem: Send + Sync {
     async fn read_to_string(&self, path: &Path) -> Result<String>;
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<()>;
     async fn create_dir_all(&self, path: &Path) -> Result<()>;
+    /// Create exactly this directory, failing if it already exists.
+    ///
+    /// The failure is the point: it is the only way to reserve a directory name
+    /// against other processes, because the check and the creation happen in one
+    /// syscall. `create_dir_all` succeeds on an existing directory and so cannot
+    /// tell a caller whether it won the name.
+    async fn create_dir_exclusive(&self, path: &Path) -> Result<bool>;
     async fn remove_file(&self, path: &Path) -> Result<()>;
     async fn remove_dir_all(&self, path: &Path) -> Result<()>;
     async fn copy(&self, from: &Path, to: &Path) -> Result<u64>;
@@ -107,6 +114,14 @@ impl FileSystem for RealFs {
 
     async fn create_dir_all(&self, path: &Path) -> Result<()> {
         Ok(tokio::fs::create_dir_all(path).await?)
+    }
+
+    async fn create_dir_exclusive(&self, path: &Path) -> Result<bool> {
+        match tokio::fs::create_dir(path).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn remove_file(&self, path: &Path) -> Result<()> {
@@ -331,6 +346,14 @@ impl FileSystem for MemFs {
     async fn create_dir_all(&self, path: &Path) -> Result<()> {
         self.add_dir(path);
         Ok(())
+    }
+
+    async fn create_dir_exclusive(&self, path: &Path) -> Result<bool> {
+        if self.is_dir(path).await {
+            return Ok(false);
+        }
+        self.add_dir(path);
+        Ok(true)
     }
 
     async fn remove_file(&self, path: &Path) -> Result<()> {

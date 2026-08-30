@@ -59,7 +59,41 @@ pub fn run_root(otto_home: &Path, name: &str, hash: &str) -> PathBuf {
 
 /// The directory one run writes into: `<otto_home>/<name>-<hash>/<timestamp>`.
 pub fn run_dir(otto_home: &Path, name: &str, hash: &str, timestamp: u64) -> PathBuf {
-    run_root(otto_home, name, hash).join(timestamp.to_string())
+    run_root(otto_home, name, hash).join(run_dir_name(timestamp, 0))
+}
+
+/// The directory name for the `seq`th run to start in one second: `<timestamp>`
+/// for the first, `<timestamp>-<seq>` for each one after it.
+///
+/// The timestamp alone was the whole name, so every run starting in the same
+/// second shared one directory. They overwrote each other's `tasks/<name>/`
+/// output while running, raced each other creating it (`File exists (os error
+/// 17)`), and - once the `UNIQUE(runs.timestamp)` constraint was dropped so the
+/// rows no longer collided - cleaning any one of them deleted the directory the
+/// others were still pointing at.
+///
+/// The unsuffixed first name is deliberate: it is what every existing run
+/// directory on disk is already called, and the overwhelmingly common case is
+/// one run per second.
+pub fn run_dir_name(timestamp: u64, seq: u32) -> String {
+    if seq == 0 { timestamp.to_string() } else { format!("{timestamp}-{seq}") }
+}
+
+/// The start time encoded in a run directory name, or `None` if the name is not
+/// one otto produced.
+///
+/// Accepts both shapes [`run_dir_name`] emits. A cleanup path that parsed only
+/// the bare timestamp would walk straight past every disambiguated directory and
+/// leak it forever.
+pub fn parse_run_dir_name(dir_name: &str) -> Option<u64> {
+    match dir_name.split_once('-') {
+        Some((timestamp, seq)) => {
+            // Both halves must be numeric, or this is not a run directory.
+            seq.parse::<u32>().ok()?;
+            timestamp.parse().ok()
+        }
+        None => dir_name.parse().ok(),
+    }
 }
 
 /// Split a directory name under the otto home back into `(name, hash)`, or
