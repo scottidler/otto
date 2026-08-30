@@ -511,6 +511,36 @@ fn classify_edge(
     }
 }
 
+/// The same contract as `classify_edge`, read off a source's terminal
+/// `TaskStatus` instead of off the runtime sets.
+///
+/// This is the worker's dependency double-check, the second gate on the same
+/// edge. It lives here, as a named function both the worker and
+/// `classify_edge_skip_provenance_matrix` call, because the guarantee the design
+/// bought with the five-site change is that the two gates cannot drift: a test
+/// that re-transcribes these arms asserts its own copy and stays green while the
+/// gate it claims to pin moves underneath it.
+///
+/// A disagreement with `classify_edge` aborts at spawn time a task the scheduler
+/// just admitted, so the nine cells here are the nine cells in that table.
+fn edge_satisfied_by_status(when: When, status: Option<&TaskStatus>) -> bool {
+    match (when, status) {
+        // when: success requires Completed, or a skip that is success-like: an
+        // up-to-date source produced current outputs.
+        (When::Success, Some(TaskStatus::Completed)) => true,
+        (When::Success, Some(TaskStatus::Skipped(kind))) => kind.is_success_like(),
+        // when: failure requires a Failed status on the source: it ran and its
+        // action exited non-zero. No skip satisfies it.
+        (When::Failure, Some(TaskStatus::Failed(_))) => true,
+        // when: always is satisfied by any terminal state, whatever the skip
+        // kind, which is what makes cleanup reliable.
+        (When::Always, Some(TaskStatus::Completed)) => true,
+        (When::Always, Some(TaskStatus::Skipped(_))) => true,
+        (When::Always, Some(TaskStatus::Failed(_))) => true,
+        _ => false,
+    }
+}
+
 /// Serial foreach ordering, indexed for the ready loop.
 ///
 /// Serial ordering is a property of the tasks, not a dependency edge: it constrains the

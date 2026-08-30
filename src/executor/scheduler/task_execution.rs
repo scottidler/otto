@@ -65,22 +65,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         // Second gate on the same edge, and it must answer exactly what
                         // `classify_edge` answered: same nine cells, asserted together by
                         // `classify_edge_skip_provenance_matrix`. A disagreement here
-                        // aborts at spawn time a task the scheduler just admitted.
-                        let satisfied = match (dep.when, status) {
-                            // when: success requires Completed, or a skip that is
-                            // success-like: an up-to-date source produced current outputs.
-                            (When::Success, Some(TaskStatus::Completed)) => true,
-                            (When::Success, Some(TaskStatus::Skipped(kind))) => kind.is_success_like(),
-                            // when: failure requires a Failed status on the source: it ran
-                            // and its action exited non-zero. No skip satisfies it.
-                            (When::Failure, Some(TaskStatus::Failed(_))) => true,
-                            // when: always is satisfied by any terminal state, whatever the
-                            // skip kind, which is what makes cleanup reliable.
-                            (When::Always, Some(TaskStatus::Completed)) => true,
-                            (When::Always, Some(TaskStatus::Skipped(_))) => true,
-                            (When::Always, Some(TaskStatus::Failed(_))) => true,
-                            _ => false,
-                        };
+                        // aborts at spawn time a task the scheduler just admitted, so the
+                        // table lives in one function that both this gate and that test
+                        // call rather than being transcribed into either.
+                        let satisfied = edge_satisfied_by_status(dep.when, status);
                         if !satisfied {
                             return Err(eyre!(
                                 "Dependency {} not satisfied (when: {:?}, status: {:?}) for task {}",

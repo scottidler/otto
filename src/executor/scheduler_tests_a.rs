@@ -461,19 +461,13 @@ fn classify_edge_skip_provenance_matrix() {
         );
 
         // Gate 2: the worker's dependency double-check, which reads the kind off
-        // the source's TaskStatus rather than off the runtime sets.
+        // the source's TaskStatus rather than off the runtime sets. This calls
+        // the function the worker itself calls; transcribing its arms into the
+        // test instead would assert the copy and stay green while the real gate
+        // drifted.
         let status = TaskStatus::Skipped(kind);
-        let double_check_satisfied = match (when, Some(&status)) {
-            (When::Success, Some(TaskStatus::Completed)) => true,
-            (When::Success, Some(TaskStatus::Skipped(k))) => k.is_success_like(),
-            (When::Failure, Some(TaskStatus::Failed(_))) => true,
-            (When::Always, Some(TaskStatus::Completed)) => true,
-            (When::Always, Some(TaskStatus::Skipped(_))) => true,
-            (When::Always, Some(TaskStatus::Failed(_))) => true,
-            _ => false,
-        };
         assert_eq!(
-            double_check_satisfied,
+            edge_satisfied_by_status(when, Some(&status)),
             expected == Satisfied,
             "worker double-check disagrees with classify_edge: {kind:?} against when: {when:?}"
         );
