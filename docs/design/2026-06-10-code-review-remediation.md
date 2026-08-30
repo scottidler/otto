@@ -520,7 +520,11 @@ Coordination notes:
 
 Executed against `main` at HEAD `5f127eb` on 2026-08-29. Each records what the command returns **today**, so the criterion is falsifiable and its starting state is not assumed.
 
-Every command below was typed into a shell against HEAD `5f127eb` on 2026-08-29 and its real output recorded. Behavioral probes ran under a scratch `HOME` and `OTTO_HOME` so the developer's `~/.otto` was never touched.
+Every command below was typed into a shell against HEAD `5f127eb` on 2026-08-29 and its real output recorded. Behavioral probes ran under a scratch `HOME` and `OTTO_HOME`.
+
+**Correction, 2026-08-29 (found while verifying Phase 1):** the original wording of this paragraph claimed the developer's `~/.otto` "was never touched". That claim was false for the database half, and is withdrawn. `OTTO_HOME` does not isolate the DB: `default_db_path()` (`src/executor/state/db.rs:53-55`) reads only `OTTO_DB_PATH` and otherwise hardcodes `$HOME/.otto/otto.db`, so a probe's run directories land in the scratch tree while its rows are written into the real `~/.otto/otto.db`. Demonstrated: three probe runs under `OTTO_HOME=/tmp/p1check/.otto` left the scratch `otto.db` at 0 bytes and added a `p1check` project plus three `boom` task rows to the real database (since deleted, with the DB backed up first). Re-running the same probe with `OTTO_DB_PATH` also set left the real DB's task count unchanged at 4286 and wrote `boom|7|failed` to the scratch DB, confirming `OTTO_DB_PATH` is the isolating knob today.
+
+**Consequence for anyone re-running these criteria:** set `OTTO_HOME` *and* `OTTO_DB_PATH`. The two-variable requirement is itself the defect Phase 4 closes (`Derive the DB path from resolve_otto_home()`); once that lands, `OTTO_HOME` alone is sufficient and this correction becomes historical.
 
 - [ ] **The `CI` workflow concludes `success`, and a tag push with a failing `CI` produces no release.**
   `gh run view 33284438194 --json conclusion -q .conclusion`
