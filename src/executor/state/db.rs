@@ -11,6 +11,15 @@ use crate::executor::layout::resolve_otto_home;
 /// before giving up.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How many times to attempt the `journal_mode=WAL` switch before giving up, and
+/// the base backoff between attempts (it scales linearly with the attempt index).
+///
+/// A journal-mode switch needs a brief exclusive lock that `busy_timeout` does not
+/// cover, so concurrent cold starts collide here. The window is short; the retry
+/// only has to outlive another opener's switch.
+const WAL_PRAGMA_ATTEMPTS: u32 = 10;
+const WAL_PRAGMA_BACKOFF: Duration = Duration::from_millis(20);
+
 /// The database file name inside the otto home.
 const DB_FILE_NAME: &str = "otto.db";
 
@@ -35,15 +44,53 @@ impl DatabaseManager {
 
         let conn = Connection::open(&db_path).context(format!("Failed to open database at {}", db_path.display()))?;
 
-        // Enable WAL mode for better concurrency
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .context("Failed to enable WAL mode")?;
-
         // Wait for a writer instead of failing instantly. Two otto runs in the
         // same repo write to one database; without this, the second one gets
         // SQLITE_BUSY and silently loses its history.
+        //
+        // This goes FIRST. It used to sit after the journal_mode pragma below,
+        // which meant that pragma - the one statement that needs a brief
+        // exclusive lock - ran with the default zero timeout. Concurrent cold
+        // starts lost runs to "Failed to enable WAL mode: database is locked".
         conn.busy_timeout(BUSY_TIMEOUT)
             .context("Failed to set the database busy timeout")?;
+
+        // Enable WAL mode for better concurrency.
+        //
+        // Tolerated, not required: switching the journal mode wants an exclusive
+        // lock, and a concurrent opener can hold it. If another process already
+        // put the database in WAL, this one inherits it and there is nothing to
+        // do; failing the whole connection there would throw away the run history
+        // over a mode that is already correct.
+        // Retried, because the exclusive lock a mode switch needs is held only for
+        // the switch itself: a concurrent opener doing the same thing releases it
+        // almost immediately, and this loop outlives that window.
+        let mut last_err = None;
+        for attempt in 0..WAL_PRAGMA_ATTEMPTS {
+            match conn.pragma_update(None, "journal_mode", "WAL") {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    let mode: String = conn
+                        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                        .context("Failed to read the journal mode after WAL was refused")?;
+                    if mode.eq_ignore_ascii_case("wal") {
+                        log::debug!("journal_mode already WAL, set by a concurrent opener");
+                        last_err = None;
+                        break;
+                    }
+                    last_err = Some((e, mode));
+                    std::thread::sleep(WAL_PRAGMA_BACKOFF * (attempt + 1));
+                }
+            }
+        }
+        if let Some((e, mode)) = last_err {
+            return Err(e).context(format!(
+                "Failed to enable WAL mode after {WAL_PRAGMA_ATTEMPTS} attempts (journal_mode is {mode})"
+            ));
+        }
 
         // WAL plus NORMAL is the durability the run history needs: a crash can
         // lose the last commit, but the file is never corrupted, and every write

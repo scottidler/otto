@@ -6,6 +6,39 @@ use super::schema::{
     SCHEMA_VERSION, init_schema, migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5,
 };
 
+/// A `BEGIN IMMEDIATE` transaction over a shared `&Connection`.
+///
+/// `Connection::transaction_with_behavior` needs `&mut Connection`, which the
+/// migration path does not have, and `unchecked_transaction` only gives the
+/// deferred behavior that cannot wait on a write lock. This drives the statements
+/// directly and rolls back on drop if `commit` was never called.
+struct TransactionGuard<'c> {
+    conn: &'c Connection,
+    committed: bool,
+}
+
+impl<'c> TransactionGuard<'c> {
+    fn immediate(conn: &'c Connection) -> Result<Self> {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .context("Failed to begin an immediate transaction")?;
+        Ok(Self { conn, committed: false })
+    }
+
+    fn commit(mut self) -> Result<()> {
+        self.conn.execute_batch("COMMIT").context("Failed to commit")?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for TransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
+}
+
 pub fn get_current_version(conn: &Connection) -> Result<i64> {
     let table_exists: bool = conn
         .query_row(
@@ -40,8 +73,13 @@ fn set_version(conn: &Connection, version: i64) -> Result<()> {
         .context("Failed to get current time")?
         .as_secs() as i64;
 
+    // OR IGNORE, because `version` is the PRIMARY KEY and recording a version
+    // that is already recorded is a no-op, not an error. A bare INSERT here made
+    // two processes racing the same migration step a hard failure for the loser:
+    // `migrate()` returned Err, `try_new()` returned None, and the run executed
+    // with no history at exit 0.
     conn.execute(
-        "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",
+        "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?1, ?2)",
         [version, timestamp],
     )
     .context("Failed to set schema version")?;
@@ -55,8 +93,31 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     log::debug!("migrate: current_version={current_version} target_version={SCHEMA_VERSION}");
 
     if current_version == 0 {
-        init_schema(conn).context("Failed to initialize schema")?;
-        set_version(conn, SCHEMA_VERSION)?;
+        // Same transaction discipline as the upgrade branches below, and for a
+        // sharper reason: on a cold database every concurrent process reads
+        // version 0, every one of them runs `init_schema` (all CREATE TABLE IF
+        // NOT EXISTS, so all succeed), and every one of them then recorded the
+        // version. Measured before this fix, five concurrent runs against a cold
+        // OTTO_HOME persisted as few as 1 of 5, silently, at exit 0.
+        //
+        // The version is re-read inside the transaction because the first read
+        // happened outside it: another process may have completed the whole
+        // initialization in between, and then this one has nothing to do.
+        //
+        // BEGIN IMMEDIATE, not the default deferred transaction. A deferred
+        // transaction starts read-only and has to upgrade to a write lock on its
+        // first write, and SQLite refuses to make that upgrade wait - it returns
+        // SQLITE_BUSY at once rather than deadlock, so `busy_timeout` cannot help
+        // there. Taking the write lock up front is the case `busy_timeout` does
+        // cover. Measured: deferred gave "database is locked: Error code 5" and
+        // persisted 1-2 of 5 concurrent cold starts, worse than the bug being
+        // fixed; immediate persists 5 of 5.
+        let tx = TransactionGuard::immediate(conn)?;
+        if get_current_version(conn)? == 0 {
+            init_schema(conn).context("Failed to initialize schema")?;
+            set_version(conn, SCHEMA_VERSION)?;
+        }
+        tx.commit()?;
     } else if current_version < SCHEMA_VERSION {
         // Run migrations in order. Step and version bump go in one transaction:
         // a crash between them leaves a database whose recorded version lies
