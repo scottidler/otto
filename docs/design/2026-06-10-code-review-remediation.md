@@ -2,7 +2,7 @@
 
 **Author:** Scott A. Idler
 **Date:** 2026-06-10 (re-verified 2026-08-29)
-**Status:** In Review
+**Status:** Implemented
 **Review Passes Completed:** 8/8 (2026-06-10) + 5/5 re-verification (2026-08-29: draft, correctness, clarity, edge cases, excellence)
 **Re-verified against:** HEAD `5f127eb`, Cargo.toml `1.4.0`, tags `v1.3.0` and `v1.4.0`
 **Modules touched:** cfg, cli/parser, cli/commands, executor, executor/state, ports, makefile, tui, app/main, repo/CI
