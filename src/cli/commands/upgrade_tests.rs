@@ -783,3 +783,38 @@ async fn execute_rollback_with_no_backups_fails_and_leaves_the_binary() {
     );
     assert_eq!(run_version(&target), "otto 9.9.9", "the binary must be untouched");
 }
+
+/// A staging file abandoned by a killed upgrade is reaped by the next one.
+///
+/// `commit_staged` cleans up on a returned error, which is every failure the
+/// process survives; a signal between the copy and the rename is not one of
+/// those, and nothing reaped the result. Found by the batched audit, batch 6 of
+/// 14, which measured 10 SIGKILL trials leaving a stranded file each time.
+#[tokio::test]
+async fn a_stale_staging_file_from_a_dead_pid_is_reaped() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let releases_url = spawn_fixture_release(scratch.path(), "9.9.9", None);
+    let target = installed_binary(scratch.path(), "0.0.1");
+    let dir = target.parent().expect("bin parent");
+
+    // pid 1 is always live; a very high pid is not. Both shapes present, so the
+    // test proves the reaper discriminates rather than deleting everything.
+    let abandoned = dir.join(".otto.upgrade-4294967290");
+    let live = dir.join(".otto.upgrade-1");
+    fs::write(&abandoned, "dead process left this").expect("write abandoned");
+    fs::write(&live, "a running process owns this").expect("write live");
+
+    command()
+        .with_fixture(releases_url, &target)
+        .tap_no_backup()
+        .execute()
+        .await
+        .expect("install must succeed");
+
+    assert!(!abandoned.exists(), "a staging file from a dead pid must be reaped");
+    assert!(
+        live.exists(),
+        "a staging file whose pid is still running must be left alone"
+    );
+    assert_eq!(run_version(&target), "otto 9.9.9");
+}

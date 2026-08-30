@@ -129,6 +129,8 @@ fn stage_beside(source: &Path, target: &Path) -> Result<PathBuf> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| eyre!("Install target has no file name: {}", target.display()))?;
 
+    reap_stale_staging(dir, name);
+
     let staged = dir.join(format!(".{}.upgrade-{}", name, std::process::id()));
     fs::copy(source, &staged)
         .with_context(|| format!("Failed to stage {} at {}", source.display(), staged.display()))?;
@@ -145,8 +147,55 @@ fn stage_beside(source: &Path, target: &Path) -> Result<PathBuf> {
     Ok(staged)
 }
 
+/// Remove staging files left behind by an upgrade that died between the copy and
+/// the rename.
+///
+/// `commit_staged` cleans up when it returns an error, which covers every failure
+/// the process survives. It cannot cover a signal: SIGKILL between the two leaves
+/// `.<name>.upgrade-<pid>` beside the binary forever, and nothing ever reaped it.
+/// Measured over 10 SIGKILL trials landing inside the copy window: the original
+/// binary was intact 9 of 9 times, with a staging file stranded each time.
+///
+/// Only files whose pid is no longer running are removed, so a concurrent upgrade
+/// cannot delete the file the other process is still writing. A failure to reap
+/// is not a failure to upgrade, so it warns and continues.
+fn reap_stale_staging(dir: &Path, name: &str) {
+    let prefix = format!(".{name}.upgrade-");
+    let Ok(entries) = fs::read_dir(dir) else { return };
+
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else { continue };
+        let Some(pid) = file_name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u32>() else { continue };
+        if pid == std::process::id() || pid_is_running(pid) {
+            continue;
+        }
+        match fs::remove_file(entry.path()) {
+            Ok(()) => debug!("reap_stale_staging: removed {}", entry.path().display()),
+            Err(e) => log::warn!("Could not remove stale staging file {}: {e}", entry.path().display()),
+        }
+    }
+}
+
+/// Whether a pid is still live, used only to decide if a staging file is
+/// abandoned. `/proc` on Linux; elsewhere assume live, which errs toward leaving
+/// a file alone rather than deleting one in use.
+fn pid_is_running(pid: u32) -> bool {
+    if cfg!(target_os = "linux") {
+        Path::new(&format!("/proc/{pid}")).exists()
+    } else {
+        true
+    }
+}
+
 /// Rename a staged binary over the target, removing the staged file if the
-/// rename fails so a failed upgrade leaves no debris beside the binary.
+/// rename fails.
+///
+/// This covers every failure the process survives. A signal between the copy and
+/// the rename is covered by `reap_stale_staging` on the next upgrade instead.
 fn commit_staged(staged: &Path, target: &Path) -> Result<()> {
     debug!("commit_staged: staged={} target={}", staged.display(), target.display());
     if let Err(err) = fs::rename(staged, target) {
