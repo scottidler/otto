@@ -146,21 +146,40 @@ impl CleanCommand {
             let mut deleted_size = 0u64;
 
             for run in &runs_to_delete {
+                // Whether there is actually a directory to reclaim, checked before
+                // the delete. `delete_run` returns Ok(Some(..)) either way - it
+                // logs a warning and removes the rows when the directory is
+                // already gone - so reporting off its return value alone told the
+                // user bytes had been freed that never existed. Rows whose
+                // directory had been removed behind the database's back were
+                // printed as `Deleted ... (4.9 KB)` and counted into the total.
+                let reclaimable = run
+                    .run_dir
+                    .as_ref()
+                    .is_none_or(|dir| std::fs::symlink_metadata(dir).is_ok());
+
                 match store.delete_run(run.id, true) {
                     Ok(Some(_)) => {
-                        deleted_size += run.size_bytes.unwrap_or(0);
                         let date_time = self.format_timestamp(run.timestamp);
                         let ottofile_display = run
                             .ottofile_path
                             .as_ref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "<unknown>".to_string());
-                        self.print(&format!(
-                            "  Deleted {} - {} ({})",
-                            date_time,
-                            ottofile_display,
-                            self.format_size(run.size_bytes.unwrap_or(0))
-                        ));
+                        if reclaimable {
+                            deleted_size += run.size_bytes.unwrap_or(0);
+                            self.print(&format!(
+                                "  Deleted {} - {} ({})",
+                                date_time,
+                                ottofile_display,
+                                self.format_size(run.size_bytes.unwrap_or(0))
+                            ));
+                        } else {
+                            self.print(&format!(
+                                "  Removed database rows for {} - {} (directory was already gone)",
+                                date_time, ottofile_display
+                            ));
+                        }
                     }
                     Ok(None) => {
                         eprintln!("  Warning: Run {} not found in database", run.timestamp);
