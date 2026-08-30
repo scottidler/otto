@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+#
+# Fail the build when a NEW surviving mutant appears.
+#
+# A surviving ("missed") mutant is a change to production code that no test
+# distinguishes from the original: cargo-mutants edited a function to return a
+# different value, reran the whole suite, and everything stayed green. That is
+# the machine-checkable definition of the defect this audit kept finding by
+# hand - a test that passes for a reason unrelated to the behavior it claims to
+# pin. Five were found that way over fourteen batches, and the handoff's advice
+# to the next reviewer was to assume a sixth. This replaces the assuming.
+#
+# The gate is a ratchet, not a clean-sheet requirement. `mutants-baseline.txt`
+# records the survivors that already existed when this was introduced; the build
+# fails only on survivors that are not in it. Shrinking the baseline is a
+# reviewable diff. Growing it is too, and that is the point: it cannot happen
+# silently, which is exactly how the five got in.
+#
+# Usage:
+#   bin/mutants-gate              # gate against the committed baseline
+#   bin/mutants-gate --write      # regenerate the baseline from this run
+#   bin/mutants-gate -- <args>    # pass extra args through to cargo mutants
+#                                 # e.g. --file src/executor/scheduler.rs
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+BASELINE="mutants-baseline.txt"
+OUT_DIR="mutants.out"
+WRITE=0
+
+extra=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --write) WRITE=1; shift ;;
+        --) shift; extra=("$@"); break ;;
+        *) extra+=("$1"); shift ;;
+    esac
+done
+
+if ! command -v cargo-mutants >/dev/null 2>&1; then
+    echo "mutants-gate: cargo-mutants is not installed (cargo install cargo-mutants)" >&2
+    exit 127
+fi
+
+echo "mutants-gate: running cargo mutants (this is slow; it reruns the suite once per mutant)"
+
+# cargo-mutants exits non-zero when mutants survive, which is the normal case
+# here - the baseline decides whether that is a failure. Capture the code
+# immediately; anything between the command and `$?` loses it.
+set +e
+cargo mutants --output "$OUT_DIR" "${extra[@]+"${extra[@]}"}"
+mutants_rc=$?
+set -e
+
+MISSED="$OUT_DIR/missed.txt"
+if [[ ! -f "$MISSED" ]]; then
+    # No missed.txt means cargo-mutants did not get far enough to produce a
+    # verdict. That is a real failure, not an empty survivor set: treating a
+    # missing file as "nothing survived" is precisely the shape of criterion
+    # that cannot fail.
+    echo "mutants-gate: $MISSED does not exist; cargo mutants exited $mutants_rc without producing a verdict" >&2
+    exit 1
+fi
+
+# Sorted so the comparison is order-independent; cargo-mutants does not promise
+# a stable order between runs.
+sort -u "$MISSED" > "$OUT_DIR/missed.sorted"
+
+if [[ "$WRITE" == "1" ]]; then
+    cp "$OUT_DIR/missed.sorted" "$BASELINE"
+    echo "mutants-gate: baseline written to $BASELINE ($(wc -l < "$BASELINE") surviving mutants)"
+    exit 0
+fi
+
+if [[ ! -f "$BASELINE" ]]; then
+    echo "mutants-gate: $BASELINE is missing. Create it with: bin/mutants-gate --write" >&2
+    exit 1
+fi
+
+sort -u "$BASELINE" > "$OUT_DIR/baseline.sorted"
+
+# Lines in this run's survivors that are not in the baseline.
+new_survivors=$(comm -23 "$OUT_DIR/missed.sorted" "$OUT_DIR/baseline.sorted" || true)
+# Lines in the baseline that no longer survive: progress, reported so the
+# baseline can be tightened.
+fixed=$(comm -13 "$OUT_DIR/missed.sorted" "$OUT_DIR/baseline.sorted" || true)
+
+if [[ -n "$fixed" ]]; then
+    echo
+    echo "mutants-gate: these baseline entries no longer survive. Tighten the baseline:"
+    echo "$fixed" | sed 's/^/  - /'
+fi
+
+if [[ -n "$new_survivors" ]]; then
+    echo
+    echo "mutants-gate: FAILED. New surviving mutants - production code changed here and every test stayed green:"
+    echo "$new_survivors" | sed 's/^/  + /'
+    echo
+    echo "Each line is a real gap: write a test that fails when that mutation is applied."
+    echo "If the mutation is genuinely not worth pinning, add the line to $BASELINE with a reason in the commit message."
+    exit 1
+fi
+
+echo
+echo "mutants-gate: OK. $(wc -l < "$OUT_DIR/missed.sorted") surviving mutants, all known to $BASELINE."

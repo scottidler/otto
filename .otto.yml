@@ -183,6 +183,25 @@ tasks:
       [ "$TEST_FAILED" = "1" ] || [ "$THRESHOLD_FAILED" = "1" ] && exit 1 || true
 
   # Full CI pipeline
+  # Mutation testing: the mechanical form of "revert the fix, confirm the test
+  # goes red". Deliberately NOT in `ci`'s `before:` - it reruns the whole suite
+  # once per mutant, so it belongs on a schedule and before a release, not on
+  # every push. `bin/mutants-gate` explains the ratchet.
+  mutants:
+    help: "Find tests that pass for the wrong reason (gate against mutants-baseline.txt)"
+    params:
+      --write:
+        default: "false"
+        help: "Regenerate mutants-baseline.txt from this run instead of gating"
+      --file:
+        default: ""
+        help: "Restrict to one source file, e.g. src/executor/scheduler.rs"
+    bash: |
+      args=()
+      [ "$write" = "true" ] && args+=(--write)
+      [ -n "$file" ] && args+=(--file "$file")
+      bin/mutants-gate "${args[@]}"
+
   ci:
     help: "Full CI pipeline (lint + check + test + coverage gate)"
     # `cov`'s own `after: [cov-report]` chains the gate: cov instruments and

@@ -1,0 +1,32 @@
+# Mechanical hollow-test detection.
+#
+# This audit found five tests that passed for a reason unrelated to the fix they
+# claimed to pin, every one of them by hand, and the standing instruction to the
+# next reviewer was "assume a sixth". That is not a method. `cargo mutants`
+# changes each function's return value in turn and reruns the suite: a mutant
+# that survives is a line of production code no test distinguishes from a lie.
+#
+# Run it with `otto mutants`. The gate is in `bin/mutants-gate`, which compares
+# the surviving set against `mutants-baseline.txt` and fails on anything new.
+
+# The suite shells out to the real binary and to `script`, so per-mutant runs are
+# much slower than a unit-test-only crate. Give them room before calling a
+# timeout a kill.
+timeout_multiplier = 5.0
+minimum_test_timeout = 120
+
+# Mutating test code proves nothing about production behavior.
+exclude_globs = [
+    "tests/**",
+    "src/**/*_tests.rs",
+    "src/**/*_tests_a.rs",
+    "src/**/*_tests_b.rs",
+]
+
+# Skip functions whose only job is to render text for a human. A mutant there is
+# real but the signal-to-noise is bad enough to bury the findings that matter,
+# and the help-drift snapshot test already pins the rendered output exactly.
+exclude_re = [
+    "impl Display",
+    "fn fmt",
+]
