@@ -270,6 +270,62 @@ fn test_every_fixture_round_trips_through_config_spec() {
     }
 }
 
+/// Every fixture's conversion must load through the *real* otto, not through
+/// `serde_yaml`.
+///
+/// `test_every_fixture_round_trips_through_config_spec` deserializes the
+/// converted YAML directly, which proves serde accepts the shape and nothing
+/// more. Otto's actual load path does strictly more than deserialize: it gates
+/// on `otto.api`, rejects reserved builtin param names, and resolves the task
+/// graph. A conversion could satisfy serde and still be a file otto refuses to
+/// run, and that gap is what this test closes - by running the binary against
+/// the converted file and asking it to enumerate the tasks.
+#[test]
+fn test_every_fixture_loads_through_the_real_otto() {
+    for name in converting_fixtures() {
+        let conversion = convert_fixture(&name);
+
+        let work = TempDir::new().expect("scratch dir");
+        let ottofile = work.path().join("otto.yml");
+        fs::write(&ottofile, &conversion.yaml).expect("write converted ottofile");
+
+        let home = TempDir::new().expect("scratch OTTO_HOME");
+        let output = common::otto_std_cmd(home.path())
+            .arg("--ottofile")
+            .arg(&ottofile)
+            .arg("--tasks")
+            .arg("--format")
+            .arg("json")
+            .current_dir(work.path())
+            .output()
+            .expect("otto --tasks should run");
+
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "otto refuses to load the conversion of makefiles/{name}/Makefile \
+             (rc={:?})\nstderr:\n{stderr}\nyaml:\n{}",
+            output.status.code(),
+            conversion.yaml
+        );
+
+        // Loading is not enough on its own: otto must also see the tasks the
+        // converter claims it emitted. An empty task list would otherwise pass.
+        assert!(
+            !conversion.config.tasks.is_empty(),
+            "makefiles/{name}/Makefile converted to zero tasks"
+        );
+        for task_name in conversion.config.tasks.keys() {
+            assert!(
+                stdout.contains(task_name.as_str()),
+                "otto loaded the conversion of makefiles/{name}/Makefile but does not list \
+                 task '{task_name}':\n{stdout}"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_every_converted_dependency_names_a_real_task() {
     for name in converting_fixtures() {
