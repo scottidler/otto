@@ -17,9 +17,13 @@ use std::io::Write;
 use std::process::Stdio;
 use tempfile::TempDir;
 
-/// Every fixture that is expected to convert, with the warnings it must
-/// produce. An empty list is the strongest claim in the file: this Makefile
-/// converts with nothing lost.
+/// The warnings each converting fixture must produce. An empty list is the
+/// strongest claim in the file: this Makefile converts with nothing lost.
+///
+/// This table is a lookup keyed off `converting_fixtures()`, NOT the list of
+/// fixtures. It used to be the list, and a hand-maintained transcription of a
+/// directory silently skips whatever it forgets: a ninth fixture directory
+/// with no golden and no entry here passed the whole suite.
 const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
     ("go-build-project", &[]),
     (
@@ -66,6 +70,46 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Fixtures that must NOT convert, and so are excluded from every
+/// directory-driven loop below. `space-indented-recipe` is rejected by the
+/// parser on purpose; `test_space_indented_recipe_is_rejected_by_name` and
+/// `test_space_indented_recipe_fails_the_command_with_the_line_number` cover it.
+const NON_CONVERTING_FIXTURES: &[&str] = &["space-indented-recipe"];
+
+/// Every fixture that must convert, read from `makefiles/` rather than
+/// transcribed. The criterion this file implements says "every fixture in
+/// `makefiles/`", so the directory is the source of truth: a new fixture is
+/// enrolled in every test below by existing, and cannot opt itself out by
+/// being forgotten.
+fn converting_fixtures() -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir("makefiles")
+        .expect("makefiles/ must exist")
+        .map(|entry| entry.expect("makefiles/ entry must be readable"))
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !NON_CONVERTING_FIXTURES.contains(&name.as_str()))
+        .collect();
+    names.sort();
+    assert!(!names.is_empty(), "makefiles/ has no fixture directories");
+    names
+}
+
+/// The warnings `name` must produce, or a panic naming the fixture. A fixture
+/// with no entry is the loudest failure in the file, because it is what adding
+/// a directory forgets.
+fn expected_warnings(name: &str) -> &'static [&'static str] {
+    CONVERTING_FIXTURES
+        .iter()
+        .find(|(fixture, _)| *fixture == name)
+        .map(|(_, warnings)| *warnings)
+        .unwrap_or_else(|| {
+            panic!(
+                "makefiles/{name}/ has no entry in CONVERTING_FIXTURES; add one \
+                 (an empty warning list means it converts cleanly)"
+            )
+        })
+}
+
 struct Conversion {
     config: ConfigSpec,
     yaml: String,
@@ -103,10 +147,11 @@ fn convert_fixture(name: &str) -> Conversion {
 
 #[test]
 fn test_every_fixture_produces_exactly_its_expected_warnings() {
-    for (name, expected) in CONVERTING_FIXTURES {
-        let conversion = convert_fixture(name);
+    for name in converting_fixtures() {
+        let conversion = convert_fixture(&name);
         assert_eq!(
-            conversion.warnings, *expected,
+            conversion.warnings,
+            expected_warnings(&name),
             "warnings changed for makefiles/{name}/Makefile"
         );
     }
@@ -114,8 +159,8 @@ fn test_every_fixture_produces_exactly_its_expected_warnings() {
 
 #[test]
 fn test_no_fixture_leaks_make_syntax_into_its_output() {
-    for (name, _) in CONVERTING_FIXTURES {
-        let conversion = convert_fixture(name);
+    for name in converting_fixtures() {
+        let conversion = convert_fixture(&name);
 
         assert!(
             !conversion.yaml.contains("$(shell"),
@@ -161,18 +206,19 @@ fn make_variable_references(yaml: &str) -> Vec<String> {
 }
 
 /// Every fixture, against its committed golden - no exceptions, and no silent
-/// skip. This used to `continue` when `expected.yml` was absent, which left 5
-/// of the 7 fixtures compared against nothing while the criterion this test
-/// implements says "every fixture in `makefiles/` converts to exactly its
-/// committed `expected.yml`". A missing golden is now the loudest failure in
-/// the file: it is what a new fixture forgets.
+/// skip at either level. This used to `continue` when `expected.yml` was
+/// absent, which left 5 of the 7 fixtures compared against nothing. Making
+/// that a panic moved the skip one level up rather than removing it: the loop
+/// still walked a hand-maintained list, so a fixture directory missing from
+/// the list was never reached to panic about. The criterion says "every
+/// fixture in `makefiles/`", and now so does the loop.
 #[test]
 fn test_every_fixture_matches_its_expected_output() {
-    for (name, _) in CONVERTING_FIXTURES {
+    for name in converting_fixtures() {
         let expected_path = format!("makefiles/{name}/expected.yml");
         let expected_yaml = fs::read_to_string(&expected_path).unwrap_or_else(|e| {
             panic!(
-                "{expected_path} is missing ({e}); every fixture in CONVERTING_FIXTURES must \
+                "{expected_path} is missing ({e}); every fixture in makefiles/ must \
                  carry a golden, or this test compares it against nothing"
             )
         });
@@ -181,7 +227,7 @@ fn test_every_fixture_matches_its_expected_output() {
             serde_yaml::from_str(&expected_yaml).unwrap_or_else(|e| panic!("{expected_path} is not a ConfigSpec: {e}"));
 
         assert_eq!(
-            convert_fixture(name).config,
+            convert_fixture(&name).config,
             expected,
             "conversion of makefiles/{name}/Makefile no longer matches {expected_path}"
         );
@@ -190,8 +236,8 @@ fn test_every_fixture_matches_its_expected_output() {
 
 #[test]
 fn test_every_fixture_round_trips_through_config_spec() {
-    for (name, _) in CONVERTING_FIXTURES {
-        let conversion = convert_fixture(name);
+    for name in converting_fixtures() {
+        let conversion = convert_fixture(&name);
 
         // Loading is the real test: `ConfigSpec` denies unknown fields, so this
         // proves the converter emits keys otto actually accepts.
@@ -211,8 +257,8 @@ fn test_every_fixture_round_trips_through_config_spec() {
 
 #[test]
 fn test_every_converted_dependency_names_a_real_task() {
-    for (name, _) in CONVERTING_FIXTURES {
-        let conversion = convert_fixture(name);
+    for name in converting_fixtures() {
+        let conversion = convert_fixture(&name);
 
         for (task_name, task) in &conversion.config.tasks {
             for edge in &task.before {
@@ -232,6 +278,22 @@ fn test_every_converted_dependency_names_a_real_task() {
                 );
             }
         }
+    }
+}
+
+/// The other direction: a name in `CONVERTING_FIXTURES` with no directory
+/// behind it. `expected_warnings` catches the missing entry; nothing else
+/// catches the entry whose fixture was renamed or deleted, and a stale row
+/// would sit there asserting nothing.
+#[test]
+fn test_no_expected_warnings_entry_outlives_its_fixture() {
+    let present = converting_fixtures();
+    for (name, _) in CONVERTING_FIXTURES {
+        assert!(
+            present.iter().any(|fixture| fixture == name),
+            "CONVERTING_FIXTURES names `{name}`, but makefiles/{name}/ does not exist \
+             (or is listed in NON_CONVERTING_FIXTURES); the entry asserts nothing"
+        );
     }
 }
 
