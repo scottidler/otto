@@ -2,7 +2,6 @@
 pub mod macros;
 pub mod builtins;
 pub mod commands;
-pub mod error;
 pub mod parser;
 
 pub use builtins::{BUILTIN_COMMANDS, BUILTIN_PARAMS, is_builtin, is_builtin_param};

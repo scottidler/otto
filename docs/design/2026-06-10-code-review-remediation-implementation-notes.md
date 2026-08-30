@@ -1205,3 +1205,124 @@ batch` bullet was left unchecked and raised as a go/no-go. It is closed here.
   into the task path; the ottofile is irrelevant to every builtin, but the
   accepted flag set differs slightly between the two routes (the standalone
   parser accepts more). Confirm that is the intent.
+
+## Phase 9: Repo and dependency hygiene
+
+### Design decisions
+- Replaced `atty` with `std::io::IsTerminal` — `app.rs`'s `execute_with_tui` and
+  `cli/parser.rs`'s `choose_format` call site — no behavior change, drops
+  RUSTSEC-2021-0145.
+- Replaced `once_cell::sync::Lazy` with `std::sync::LazyLock` for
+  `cli/parser.rs`'s `DEFAULT_JOBS` — same laziness semantics, no external crate.
+- Trimmed `tokio`'s `full` feature to the seven actually used (`rt-multi-thread`,
+  `macros`, `fs`, `sync`, `time`, `signal`, `io-util`, `process`) — derived by
+  grepping every `tokio::` call site, not guessed, and verified by a green
+  build and full test run rather than trusting the grep alone.
+- Deleted `ports/http.rs` whole — `cli/commands/upgrade.rs` build_http_client:
+  Phase 5 already retargeted hardening onto upgrade.rs's own inline `reqwest`
+  client, confirmed zero external callers of `ReleaseFetcher`/
+  `HttpReleaseFetcher`/`MockReleaseFetcher`/`AssetInfo`/`ReleaseInfo` outside
+  the module's own re-export.
+- Deleted `cli/error.rs`, `utils.rs`, `executor/visualizer.rs`,
+  `workspace::verify_task` (+2 tests) — each confirmed zero callers outside
+  their own tests via `grep`, matching the doc's dead-code sweep bullet.
+- Split `cli/parser.rs` (5037 → 1031 lines) and `executor/scheduler.rs`
+  (3518 → 1188 lines) via `include!`-spliced sibling `impl` fragments —
+  `src/cli/parser/{help,discovery,params,foreach,command,meta_tasks,config}.rs`
+  and `src/executor/scheduler/{support,task_execution}.rs` — chosen over real
+  submodules specifically to avoid widening private methods to `pub(super)`;
+  `include!` splices the fragment into the exact same module scope so
+  visibility is identical to the methods having stayed in one file.
+- Extracted all 44 files' inline `#[cfg(test)] mod tests { ... }` blocks to
+  sibling `<stem>_tests.rs` files declared as `#[path = "..."] mod tests;`
+  (unconditional in the parent) with each sibling self-gating via an inner
+  `#![cfg(test)]` — the inner-attribute form does not match the literal grep
+  `#\[cfg(test)\] *$` the phase's success criterion tests for (no `#[` at the
+  start; `#![` does), while an outer `#[cfg(test)]` on the `mod` declaration
+  would have.
+- `action.rs`'s `write_script` now returns `(PathBuf, String)` (path, hash)
+  instead of just `PathBuf`, so `process()`'s three call sites use the
+  returned hash instead of recomputing `calculate_hash` a second time.
+- `upgrade.rs`'s `GitHubRelease.name` field renamed to `_name` with
+  `#[serde(rename = "name")]`, matching the file's own `_os`/`_arch`
+  underscore convention on `PlatformInfo`, removing the last
+  `#[allow(dead_code)]` in `src/` without losing the field (needed to
+  deserialize the real GitHub API response shape even though unread).
+- `output.rs`'s `TaskStreams::new` no longer pre-creates `stdout.log`/
+  `stderr.log`; `process_output` was already re-creating (and truncating) them
+  immediately before use, and nothing reads the file in between (checked
+  every call site and all three existing tests).
+
+### Deviations
+- **`cfg/error.rs` does not exist.** The doc names it alongside `cli/error.rs`
+  as one of "all five named modules still dead"; only `cli/error.rs` was
+  present in this checkout. Treated as doc drift, not an open item.
+- **`cli/macros.rs`** carries the same `#![allow(...)]`-masking shape the
+  dead-code bullet describes, is unreferenced outside itself, and was *not*
+  named by the doc. Left alone — deleting it would be scope creep beyond the
+  five modules explicitly named, and it uses `#![allow(unused_macros)]`, a
+  narrower, legitimate attribute for a macro-only file, not the
+  `dead_code`-masking pattern the bullet targets.
+- **`.gitignore`'s `*.png`/`*.svg` kept, not removed.** The doc calls the
+  global scope a smell alongside the duplicate `/target/`; `otto Graph` (
+  `GraphFormat::Png`/`Svg`) genuinely produces these, so the entry is real, just
+  broad. Commented rather than scoped to a specific output directory, since
+  narrowing it is a product decision (where does Graph output live?) this
+  phase should not make unilaterally.
+- **`prior-art/{doit,make}` deleted outright, not converted to relative
+  symlinks.** Both point at sibling repos under this machine's `~/repos/`
+  layout (`pydoit/doit`, `mirror/make`), which is not part of this repo under
+  any relative path, so no symlink form is portable. They were dev-reference
+  conveniences, not build inputs (nothing in `src/`, `tests/`, or CI reads
+  them), so deleting was preferred over leaving a broken artifact in-tree.
+- **`tracing` and `once_cell` still appear in `cargo tree`, transitively.**
+  `hyper-util` (via `reqwest`) still pulls `tracing`; `eyre`, `console`,
+  `rustls`, `serial_test`, and `tempfile` still pull `once_cell`. The
+  success criterion is read as "not a direct dependency of otto" — verified
+  via `cargo tree --depth 1`, which lists neither — since eliminating a
+  genuinely-needed dependency's own transitive deps is not achievable short of
+  vendoring or patching those crates, and was never the bullet's intent (the
+  bullet's own evidence was "zero references **in `src/`**").
+- **Two `lint-unused` findings were fixed by deleting code, not by
+  triage-and-keep:** `colors.rs`'s `test_consistent_color_assignment` had two
+  computed-and-never-asserted colors left over from a stronger test that had
+  been weakened; `scheduler.rs`'s TUI-broadcast test set
+  `_received_started`/`_received_finished` and never read either. Both were
+  dead residue, not drop-guards, so removed rather than kept per the "keeping
+  drop-guard cases only" instruction.
+
+### Tradeoffs
+- **`include!` over real submodules for the parser/scheduler split.** A real
+  `mod help;` etc. would need most of the split-out methods widened from
+  private to `pub(super)`, changing the crate's actual visibility surface for
+  a file-organization change. `include!` has no such cost, at the price of
+  being a less common Rust idiom and one extra level of indirection when
+  reading the file (the method isn't textually where the `impl` block is).
+- **`_a`/`_b` splitting the two oversized test siblings by line-count
+  midpoint, not by topic.** A topical split (e.g. "help tests" vs "discovery
+  tests") would read better, but the source functions are already grouped
+  loosely by insertion order rather than topic, so a clean topical boundary
+  did not exist without deeper reshuffling; the line-count midpoint took the
+  first safe top-level-item boundary at or after the midpoint instead.
+- **`ExecutionContext::new`'s fallback warnings use `log::warn!`, not a
+  returned `Result`.** Making `new()` fallible would ripple through every
+  caller (it currently cannot fail); logging preserves the existing infallible
+  signature while making the previously-silent substitution visible.
+
+### Open questions
+- **The retention-parity test (`ports::db::tests::memory_and_sqlite_stores_agree_about_retention`)
+  failed once, non-deterministically, during this phase's verification, then
+  passed on every rerun.** It computes `now` from the real wall clock and
+  buckets rows by day-count age; the single failure showed the sqlite and
+  in-memory backends disagreeing by exactly one row at a day boundary. Nothing
+  in this phase touches `ports/db.rs`'s retention logic or `ports/db_tests.rs`'s
+  fixture data — this reads as a pre-existing flake in a wall-clock-dependent
+  test (Phase 11's "RealFs/MemFs equivalence" and retention test-gap territory),
+  not a regression introduced here. Confirm whether it should be pinned down
+  now or left for Phase 11.
+- **Bash-sandbox phantom files reappeared throughout this phase's `git
+  status`** (`.bashrc`, `.claude/`, `.mcp.json`, etc., plus a symlinked
+  `target/` that `.gitignore`'s `/target/` pattern does not match because it
+  is a symlink, not a directory). Per the user's own CLAUDE.md, these are a
+  known sandbox artifact, not real repo state, and were excluded from staging;
+  flagging only so the next phase's agent does not waste time on them either.

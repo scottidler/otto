@@ -1,0 +1,800 @@
+#![cfg(test)]
+
+use super::*;
+use serial_test::serial;
+use std::path::PathBuf;
+use tempfile::TempDir;
+
+/// Point this test's otto home at a scratch directory. See `tests_a` for why
+/// `OTTO_DB_PATH` is cleared rather than set.
+fn setup_test_db(temp_dir: &std::path::Path) {
+    let otto_home = temp_dir.join(".otto");
+    // SAFETY: This is safe in tests because we control the execution environment
+    // and tests are isolated. The env var is set before any StateManager is created.
+    unsafe {
+        std::env::remove_var("OTTO_DB_PATH");
+        std::env::set_var("OTTO_HOME", &otto_home);
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_file_dependencies_timestamp_precision() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    // Without this the workspace lands wherever the previously-run
+    // serial test left OTTO_HOME pointing (the MemFs workspace tests set it
+    // to /otto-home and never restore it), which is not writable.
+    setup_test_db(temp_dir.path());
+    let work_dir = PathBuf::from(temp_dir.path());
+
+    let input_file = work_dir.join("input.txt");
+    let output_file = work_dir.join("output.txt");
+
+    tokio::fs::write(&input_file, "content").await?;
+
+    tokio::fs::write(&output_file, "output").await?;
+
+    let task = Task::new(
+        "timestamp_test".to_string(),
+        None,
+        vec![],
+        vec![input_file.to_string_lossy().to_string()],
+        vec![output_file.to_string_lossy().to_string()],
+        HashMap::new(),
+        HashMap::new(),
+        format!("cp {} {}", input_file.display(), output_file.display()),
+    );
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(
+        vec![task.clone()],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        2,
+        false,
+    )
+    .await?;
+
+    // When timestamps are very close, should be conservative and rebuild
+    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    // This might be true or false depending on timestamp precision, but should be consistent
+    println!("Timestamp precision test - needs rebuild: {needs_rebuild}");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_file_dependencies_empty_lists() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    // Without this the workspace lands wherever the previously-run
+    // serial test left OTTO_HOME pointing (the MemFs workspace tests set it
+    // to /otto-home and never restore it), which is not writable.
+    setup_test_db(temp_dir.path());
+    let work_dir = PathBuf::from(temp_dir.path());
+
+    // Task with no file dependencies
+    let task = Task::new(
+        "no_file_deps".to_string(),
+        None,
+        vec![],
+        vec![], // No input files
+        vec![], // No output files
+        HashMap::new(),
+        HashMap::new(),
+        "echo 'no file dependencies'".to_string(),
+    );
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(
+        vec![task.clone()],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        2,
+        false,
+    )
+    .await?;
+
+    // Should always need to run when there are no file dependencies to check
+    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    assert!(needs_rebuild, "Task with no file dependencies should always run");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_file_dependencies_directory_as_input() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    let src_dir = work_dir.join("src");
+    tokio::fs::create_dir_all(&src_dir).await?;
+    tokio::fs::write(src_dir.join("file1.txt"), "content1").await?;
+    tokio::fs::write(src_dir.join("file2.txt"), "content2").await?;
+
+    let output_file = work_dir.join("output.txt");
+
+    let task = Task::new(
+        "dir_input".to_string(),
+        None,
+        vec![],
+        vec![src_dir.to_string_lossy().to_string()], // Directory as input
+        vec![output_file.to_string_lossy().to_string()],
+        HashMap::new(),
+        HashMap::new(),
+        format!(
+            "find {} -name '*.txt' | wc -l > {}",
+            src_dir.display(),
+            output_file.display()
+        ),
+    );
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(
+        vec![task.clone()],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        2,
+        false,
+    )
+    .await?;
+
+    // Should handle directory dependencies (gets modification time of directory)
+    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    assert!(needs_rebuild, "Task should need to run when output doesn't exist");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_large_number_of_file_dependencies() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    let mut input_files = Vec::new();
+    for i in 0..100 {
+        let file = work_dir.join(format!("input_{i:03}.txt"));
+        tokio::fs::write(&file, format!("content {i}")).await?;
+        input_files.push(file.to_string_lossy().to_string());
+    }
+
+    let output_file = work_dir.join("combined.txt");
+
+    let task = Task::new(
+        "many_inputs".to_string(),
+        None,
+        vec![],
+        input_files,
+        vec![output_file.to_string_lossy().to_string()],
+        HashMap::new(),
+        HashMap::new(),
+        format!("cat input_*.txt > {}", output_file.display()),
+    );
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(
+        vec![task.clone()],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        2,
+        false,
+    )
+    .await?;
+
+    // Should handle large numbers of file dependencies efficiently
+    let start = std::time::Instant::now();
+    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let duration = start.elapsed();
+
+    assert!(needs_rebuild, "Task should need to run when output doesn't exist");
+    assert!(
+        duration.as_millis() < 1000,
+        "File dependency checking should be fast even with many files"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_file_dependencies_circular_detection() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    let file_a = work_dir.join("a.txt");
+    let file_b = work_dir.join("b.txt");
+
+    tokio::fs::write(&file_a, "content a").await?;
+    tokio::fs::write(&file_b, "content b").await?;
+
+    // Task that uses its output as input (circular dependency)
+    let task = Task::new(
+        "circular".to_string(),
+        None,
+        vec![],
+        vec![file_a.to_string_lossy().to_string()],
+        vec![file_a.to_string_lossy().to_string()], // Same file as input and output
+        HashMap::new(),
+        HashMap::new(),
+        format!("echo 'modified' >> {}", file_a.display()),
+    );
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(
+        vec![task.clone()],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        2,
+        false,
+    )
+    .await?;
+
+    // Should handle circular file dependencies gracefully
+    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    // Should be conservative when input and output are the same file
+    println!("Circular dependency test - needs rebuild: {needs_rebuild}");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_file_dependencies_integration_with_real_execution() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    let input_file = work_dir.join("source.txt");
+    let output_file = work_dir.join("result.txt");
+
+    tokio::fs::write(&input_file, "Hello, World!").await?;
+
+    let task = Task::new(
+        "real_execution".to_string(),
+        None,
+        vec![],
+        vec![input_file.to_string_lossy().to_string()],
+        vec![output_file.to_string_lossy().to_string()],
+        HashMap::new(),
+        HashMap::new(),
+        format!("cp {} {}", input_file.display(), output_file.display()),
+    );
+
+    let workspace = Workspace::new(work_dir.clone()).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(
+        vec![task.clone()],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        2,
+        false,
+    )
+    .await?;
+
+    let needs_rebuild_1 = scheduler.needs_rebuild(&task).await?;
+    assert!(needs_rebuild_1, "Should need to run initially");
+
+    scheduler.execute_all().await?;
+
+    let status = scheduler.get_task_status("real_execution").await;
+    assert_eq!(status, TaskStatus::Completed);
+    assert!(output_file.exists(), "Output file should exist after execution");
+
+    let output_content = tokio::fs::read_to_string(&output_file).await?;
+    assert_eq!(output_content, "Hello, World!", "Output should match input");
+
+    let needs_rebuild_2 = scheduler.needs_rebuild(&task).await?;
+    assert!(!needs_rebuild_2, "Should not need to run when output is up-to-date");
+
+    // Modify input file to trigger rebuild
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    tokio::fs::write(&input_file, "Modified content!").await?;
+
+    let needs_rebuild_3 = scheduler.needs_rebuild(&task).await?;
+    assert!(needs_rebuild_3, "Should need to run when input is modified");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_parallel_execution_limit() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = temp_dir.path().to_path_buf();
+    setup_test_db(&work_dir);
+
+    let mut tasks = vec![];
+    for i in 1..=4 {
+        let task = Task::new(
+            format!("task{i}"),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            format!("sleep 0.1 && echo task{i}"),
+        );
+        tasks.push(task);
+    }
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+
+    let scheduler = TaskScheduler::new(tasks, Arc::new(workspace), ExecutionContext::new(), 2, false).await?;
+
+    assert_eq!(scheduler.semaphore.available_permits(), 2);
+
+    // Execute all tasks
+    scheduler.execute_all().await?;
+
+    for i in 1..=4 {
+        let status = scheduler.get_task_status(&format!("task{i}")).await;
+        assert_eq!(status, TaskStatus::Completed);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_scheduler_respects_max_parallel() -> Result<()> {
+    // Test with different job limits
+    for max_parallel in [1, 2, 4, 8] {
+        let temp_dir = TempDir::new()?;
+        let work_dir = temp_dir.path().to_path_buf();
+        setup_test_db(&work_dir);
+
+        let workspace = Workspace::new(work_dir).await?;
+        workspace.init().await?;
+
+        let tasks = vec![Task::new(
+            "test".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo test".to_string(),
+        )];
+
+        let scheduler =
+            TaskScheduler::new(tasks, Arc::new(workspace), ExecutionContext::new(), max_parallel, false).await?;
+
+        assert_eq!(
+            scheduler.semaphore.available_permits(),
+            max_parallel,
+            "Scheduler should have {max_parallel} permits"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_task_skipped_when_outputs_up_to_date() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    let input_file = work_dir.join("input.txt");
+    let output_file = work_dir.join("output.txt");
+
+    // Create input and output, with output newer than input
+    tokio::fs::write(&input_file, "input content").await?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    tokio::fs::write(&output_file, "output content").await?;
+
+    let task = Task::new(
+        "skip_test".to_string(),
+        None,
+        vec![],
+        vec![input_file.to_string_lossy().to_string()],
+        vec![output_file.to_string_lossy().to_string()],
+        HashMap::new(),
+        HashMap::new(),
+        "echo should be skipped".to_string(),
+    );
+
+    let workspace = Workspace::new(work_dir.clone()).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(
+        vec![task.clone()],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        2,
+        false,
+    )
+    .await?;
+
+    // Execute should skip the task
+    scheduler.execute_all().await?;
+
+    let status = scheduler.get_task_status("skip_test").await;
+    assert_eq!(
+        status,
+        TaskStatus::Skipped(SkipKind::UpToDate),
+        "Task should be skipped as up-to-date when outputs are current"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_tui_mode_message_broadcasting() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    let task = Task::new(
+        "tui_test".to_string(),
+        None,
+        vec![],
+        vec![],
+        vec![],
+        HashMap::new(),
+        HashMap::new(),
+        "echo testing tui".to_string(),
+    );
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+
+    let mut scheduler = TaskScheduler::new(
+        vec![task],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        2,
+        true, // TUI mode enabled
+    )
+    .await?;
+
+    // Set up message channel
+    let (tx, mut rx) = tokio::sync::broadcast::channel(100);
+    scheduler.set_message_channel(tx);
+
+    // Execute task
+    let exec_handle = tokio::spawn(async move { scheduler.execute_all().await });
+
+    // Collect messages
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            TaskMessage::Started { task_name, .. } => {
+                assert_eq!(task_name, "tui_test");
+            }
+            TaskMessage::Finished {
+                task_name,
+                status,
+                duration_ms,
+                ..
+            } => {
+                assert_eq!(task_name, "tui_test");
+                assert_eq!(status, TuiTaskStatus::Completed);
+                assert!(duration_ms > 0, "Duration should be tracked");
+            }
+            _ => {}
+        }
+    }
+
+    exec_handle.await??;
+
+    // Note: Messages might be dropped if we don't subscribe early enough
+    // This test mainly verifies the broadcasting mechanism works
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_duration_tracking_accuracy() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    let task = Task::new(
+        "duration_test".to_string(),
+        None,
+        vec![],
+        vec![],
+        vec![],
+        HashMap::new(),
+        HashMap::new(),
+        "sleep 0.2".to_string(),
+    );
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+
+    let mut scheduler = TaskScheduler::new(vec![task], Arc::new(workspace), ExecutionContext::new(), 2, true).await?;
+
+    // Set up message channel to capture duration
+    let (tx, mut rx) = tokio::sync::broadcast::channel(100);
+    scheduler.set_message_channel(tx);
+
+    let start = std::time::Instant::now();
+
+    let exec_handle = tokio::spawn(async move { scheduler.execute_all().await });
+
+    let mut captured_duration_ms = None;
+
+    // Wait for task to complete and capture duration
+    loop {
+        match tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await {
+            Ok(Ok(TaskMessage::Finished { duration_ms, .. })) => {
+                captured_duration_ms = Some(duration_ms);
+                break;
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(_)) => break, // Channel closed
+            Err(_) => break,     // Timeout
+        }
+    }
+
+    exec_handle.await??;
+
+    let total_elapsed = start.elapsed().as_millis() as u64;
+
+    // Verify duration was captured and is reasonable
+    if let Some(duration_ms) = captured_duration_ms {
+        assert!(
+            duration_ms >= 200,
+            "Duration should be at least 200ms, got {}",
+            duration_ms
+        );
+        assert!(
+            duration_ms <= total_elapsed + 100,
+            "Duration should not exceed total time"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_file_dependency_check_error_handling() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    // Create a task with a file dependency in a path that will cause issues
+    let task = Task::new(
+        "error_test".to_string(),
+        None,
+        vec![],
+        vec!["/dev/null/impossible/path".to_string()],
+        vec![work_dir.join("output.txt").to_string_lossy().to_string()],
+        HashMap::new(),
+        HashMap::new(),
+        "echo handled error".to_string(),
+    );
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(vec![task], Arc::new(workspace), ExecutionContext::new(), 2, false).await?;
+
+    // Should handle the error gracefully and still run the task
+    let result = scheduler.execute_all().await;
+
+    // The task should complete despite file dependency check errors
+    assert!(result.is_ok(), "Should handle file dependency errors gracefully");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_multiple_tasks_with_mixed_states() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    // Create files for skip test
+    let input1 = work_dir.join("input1.txt");
+    let output1 = work_dir.join("output1.txt");
+    tokio::fs::write(&input1, "content").await?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    tokio::fs::write(&output1, "output").await?;
+
+    let tasks = vec![
+        // Task that will be skipped (output up to date)
+        Task::new(
+            "skip_task".to_string(),
+            None,
+            vec![],
+            vec![input1.to_string_lossy().to_string()],
+            vec![output1.to_string_lossy().to_string()],
+            HashMap::new(),
+            HashMap::new(),
+            "echo skipped".to_string(),
+        ),
+        // Task that will run
+        Task::new(
+            "run_task".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo running".to_string(),
+        ),
+        // Task with dependency on both
+        Task::new(
+            "dependent_task".to_string(),
+            None,
+            vec![
+                crate::executor::task::TaskEdge::success("skip_task"),
+                crate::executor::task::TaskEdge::success("run_task"),
+            ],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo dependent".to_string(),
+        ),
+    ];
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(tasks, Arc::new(workspace), ExecutionContext::new(), 2, false).await?;
+
+    scheduler.execute_all().await?;
+
+    let skip_status = scheduler.get_task_status("skip_task").await;
+    let run_status = scheduler.get_task_status("run_task").await;
+    let dep_status = scheduler.get_task_status("dependent_task").await;
+
+    assert_eq!(skip_status, TaskStatus::Skipped(SkipKind::UpToDate));
+    assert_eq!(run_status, TaskStatus::Completed);
+    assert_eq!(dep_status, TaskStatus::Completed);
+
+    Ok(())
+}
+
+// ------------------------------------------------------------------
+// Phase 7: tty: true
+// ------------------------------------------------------------------
+
+/// An ordinary task takes one permit; a tty task takes the semaphore's whole
+/// initial count, which is the entire mechanism behind "runs exclusively".
+#[test]
+fn test_permits_for_tty_takes_the_whole_semaphore() {
+    for max_parallel in [1usize, 2, 4, 32] {
+        assert_eq!(permits_for(false, max_parallel).unwrap(), 1);
+        assert_eq!(
+            permits_for(true, max_parallel).unwrap(),
+            u32::try_from(max_parallel).unwrap(),
+            "a tty task must request all {max_parallel} permits"
+        );
+    }
+}
+
+/// A permit count that cannot be expressed as a u32 is a loud error, not a
+/// silently clamped request that would fail to be exclusive.
+#[test]
+fn test_permits_for_rejects_counts_beyond_u32() {
+    let err = permits_for(true, usize::MAX).unwrap_err().to_string();
+    assert!(
+        err.contains("exceeds the semaphore\'s permit limit"),
+        "unexpected error: {err}"
+    );
+}
+
+/// The scheduler keeps the count it was built with; `available_permits()` is
+/// the count free *right now*, which is the wrong number to hand acquire_many.
+#[tokio::test]
+#[serial]
+async fn test_scheduler_records_its_initial_permit_count() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = temp_dir.path().to_path_buf();
+    setup_test_db(&work_dir);
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(vec![], Arc::new(workspace), ExecutionContext::new(), 7, false).await?;
+
+    assert_eq!(scheduler.max_parallel, 7);
+    let _held = scheduler.semaphore.acquire_many(3).await?;
+    assert_eq!(scheduler.semaphore.available_permits(), 4);
+    assert_eq!(
+        scheduler.max_parallel, 7,
+        "max_parallel must not track live availability"
+    );
+
+    Ok(())
+}
+
+/// A tty task never opens TaskStreams, so nothing else would create these
+/// files. History records both paths at task start; empty files would claim a
+/// silent task.
+#[tokio::test]
+async fn test_tty_log_markers_are_written() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let tasks_dir = temp_dir.path().join("tasks");
+
+    write_tty_log_markers(&tasks_dir, "login").await?;
+
+    for file in ["stdout.log", "stderr.log"] {
+        let content = tokio::fs::read_to_string(tasks_dir.join("login").join(file)).await?;
+        assert_eq!(content, format!("{TTY_LOG_MARKER}\n"), "{file} marker");
+    }
+
+    Ok(())
+}
+
+/// End-to-end through the real scheduler: a tty task's output is not captured
+/// (marker only), while a plain task in the same run still is.
+#[tokio::test]
+#[serial]
+async fn test_tty_task_logs_carry_the_marker_and_plain_tasks_still_capture() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = temp_dir.path().to_path_buf();
+    setup_test_db(&work_dir);
+
+    let mut tty_task = Task::new(
+        "interactive".to_string(),
+        None,
+        vec![],
+        vec![],
+        vec![],
+        HashMap::new(),
+        HashMap::new(),
+        "echo from-the-tty-task".to_string(),
+    );
+    tty_task.tty = true;
+    let plain_task = Task::new(
+        "plain".to_string(),
+        None,
+        vec![],
+        vec![],
+        vec![],
+        HashMap::new(),
+        HashMap::new(),
+        "echo from-the-plain-task".to_string(),
+    );
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    let tasks_dir = workspace.run().join("tasks");
+    let scheduler = TaskScheduler::new(
+        vec![tty_task, plain_task],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        4,
+        false,
+    )
+    .await?;
+
+    scheduler.execute_all().await?;
+
+    assert_eq!(scheduler.get_task_status("interactive").await, TaskStatus::Completed);
+    assert_eq!(scheduler.get_task_status("plain").await, TaskStatus::Completed);
+
+    let tty_log = tokio::fs::read_to_string(tasks_dir.join("interactive").join("stdout.log")).await?;
+    assert_eq!(tty_log, format!("{TTY_LOG_MARKER}\n"));
+    assert!(
+        !tty_log.contains("from-the-tty-task"),
+        "a tty task must not be captured: {tty_log}"
+    );
+
+    let plain_log = tokio::fs::read_to_string(tasks_dir.join("plain").join("stdout.log")).await?;
+    assert!(
+        plain_log.contains("from-the-plain-task"),
+        "a plain task must still be captured: {plain_log}"
+    );
+
+    Ok(())
+}

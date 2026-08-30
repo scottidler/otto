@@ -7,7 +7,6 @@ pub mod pruning;
 pub mod scheduler;
 pub mod state;
 pub mod task;
-pub mod visualizer;
 pub mod workspace;
 
 pub use action::{ActionProcessor, BashProcessor, ProcessedAction, PythonProcessor, ScriptProcessor};
@@ -22,5 +21,4 @@ pub use state::{
     TaskStatus as DbTaskStatus,
 };
 pub use task::{DAG, Task};
-pub use visualizer::OutputVisualizer;
 pub use workspace::Workspace;
