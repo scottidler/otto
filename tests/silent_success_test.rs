@@ -383,4 +383,138 @@ tasks:
         stdout.contains("wrongcase=[]"),
         "a key the producer never wrote must miss, not alias onto one it did:\n{stdout}"
     );
+    // The miss must also be audible. An earlier version of this test asserted
+    // only the empty value, which meant a file whose whole purpose is the
+    // silent-success class was defending a silent miss.
+    assert!(
+        format!("{stdout}{stderr}").contains("no input 'producer.mixed_case'"),
+        "the miss must name the key it could not find:\n{stdout}{stderr}"
+    );
+}
+
+/// A task name containing `.` lost every one of its outputs, silently, at
+/// exit 0.
+///
+/// The writer folds both `-` and `.` into `_` when building
+/// `OTTO_INPUT_<TASK>_<KEY>`; the bash reader folded only `-`, so it built the
+/// prefix `OTTO_INPUT_PRO.DUCER_`, matched nothing, and left `OTTO_INPUT`
+/// empty. Total, silent, whole-task data loss - and it survived the commit that
+/// rewrote this very function, because nothing in the tree has a dotted task
+/// name. The dashed task is the control: it always worked, which is what
+/// isolates the missing `.` fold as the cause.
+#[test]
+fn a_dotted_task_name_still_delivers_its_outputs() {
+    let (dir, otto_home) = project(
+        r#"
+otto:
+  api: 1
+  tasks: [consumer]
+tasks:
+  pro.ducer:
+    output: [x]
+    bash: otto_set_output "x" "FROM_DOTTED_TASK"
+  pro-ducer:
+    output: [x]
+    bash: otto_set_output "x" "FROM_DASHED_TASK"
+  consumer:
+    before: [pro.ducer, pro-ducer]
+    input: [pro.ducer.x, pro-ducer.x]
+    bash: |
+      echo "DOTTED=[$(otto_get_input pro.ducer.x)]"
+      echo "DASHED=[$(otto_get_input pro-ducer.x)]"
+"#,
+    );
+
+    let (code, stdout, stderr) = run_otto(dir.path(), &otto_home, &["consumer"]);
+
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("DOTTED=[FROM_DOTTED_TASK]"),
+        "a dotted task name must not lose its outputs:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("DASHED=[FROM_DASHED_TASK]"),
+        "control: the dashed form was never broken:\n{stdout}"
+    );
+}
+
+/// Distinct output keys that fold onto one shell variable must all survive.
+///
+/// Shell identifiers hold neither `-` nor `.`, so `a-b`, `a.b` and `A_B` all
+/// become `..._A_B`. Every one used to be emitted under that single name, so
+/// the last assignment won and the other two values disappeared at exit 0.
+/// This qualifies "the JSON key is the contract": it is the contract only if
+/// no two keys in a task collapse, so the writer now suffixes a collision and
+/// the companion key variable is suffixed with it.
+#[test]
+fn output_keys_that_collide_as_shell_variables_all_survive() {
+    let (dir, otto_home) = project(
+        r#"
+otto:
+  api: 1
+  tasks: [consumer]
+tasks:
+  producer:
+    output: [a-b, a.b, A_B]
+    bash: |
+      otto_set_output "a-b" "DASH"
+      otto_set_output "a.b" "DOT"
+      otto_set_output "A_B" "UPPER"
+  consumer:
+    before: [producer]
+    input: [producer.a-b, producer.a.b, producer.A_B]
+    bash: |
+      echo "DASH=[$(otto_get_input producer.a-b)]"
+      echo "DOT=[$(otto_get_input producer.a.b)]"
+      echo "UPPER=[$(otto_get_input producer.A_B)]"
+"#,
+    );
+
+    let (code, stdout, stderr) = run_otto(dir.path(), &otto_home, &["consumer"]);
+
+    assert_eq!(code, 0, "stderr: {stderr}");
+    for expected in ["DASH=[DASH]", "DOT=[DOT]", "UPPER=[UPPER]"] {
+        assert!(
+            stdout.contains(expected),
+            "three distinct keys must yield three values, not one; missing {expected}:\n{stdout}"
+        );
+    }
+}
+
+/// A key nobody produced is a miss, and it says so on stderr and in the exit
+/// code. It used to print an empty line at exit 0, indistinguishable from a key
+/// whose value really is empty.
+#[test]
+fn a_missing_input_key_is_audible_and_non_zero() {
+    let (dir, otto_home) = project(
+        r#"
+otto:
+  api: 1
+  tasks: [consumer]
+tasks:
+  producer:
+    output: [real]
+    bash: otto_set_output "real" "value"
+  consumer:
+    before: [producer]
+    input: [producer.real]
+    bash: |
+      echo "HIT=[$(otto_get_input producer.real)]"
+      # Deliberately NOT redirected: the diagnostic is half of what this pins,
+      # and an earlier draft of this test sent it to /dev/null and then
+      # asserted on it.
+      if otto_get_input producer.nope > /dev/null; then echo "RC=zero"; else echo "RC=nonzero"; fi
+"#,
+    );
+
+    let (code, stdout, stderr) = run_otto(dir.path(), &otto_home, &["consumer"]);
+    let output = format!("{stdout}{stderr}");
+
+    assert_eq!(code, 0, "the task itself still succeeds: {stderr}");
+    assert!(stdout.contains("HIT=[value]"), "{stdout}");
+    assert!(stdout.contains("RC=nonzero"), "a miss must be non-zero:\n{stdout}");
+    assert!(
+        output.contains("no input 'producer.nope'") && output.contains("available: producer.real"),
+        "the miss must name the key AND what was available:\n{output}"
+    );
 }

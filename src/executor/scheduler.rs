@@ -293,11 +293,35 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
     lines.push(String::new());
 
     if let Some(obj) = json.as_object() {
+        // Shell identifiers cannot hold `-` or `.`, so distinct JSON keys can
+        // fold onto one variable name: `a-b`, `a.b` and `A_B` all become
+        // `..._A_B`. Every one of them used to be emitted under that single
+        // name, so the last assignment won and the other values disappeared
+        // with nothing said. Measured before this: three keys in, one value
+        // out, `otto_get_input producer.a-b` -> `[]` at exit 0.
+        //
+        // Suffixing a collision keeps every value reachable rather than merely
+        // reporting the loss. The reader does not care what the variable is
+        // called - it recovers the real key from the companion
+        // `OTTO_INPUTKEY_` variable, which is suffixed in lockstep.
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for (key, value) in obj {
             // Create variable name: OTTO_INPUT_<TASK>_<KEY> (uppercase, safe chars only)
             let safe_task = task_name.to_uppercase().replace(['-', '.'], "_");
             let safe_key = key.to_uppercase().replace(['-', '.'], "_");
-            let var_name = format!("OTTO_INPUT_{safe_task}_{safe_key}");
+            let base = format!("OTTO_INPUT_{safe_task}_{safe_key}");
+            let mut var_name = base.clone();
+            let mut disambiguator = 1;
+            while !used.insert(var_name.clone()) {
+                disambiguator += 1;
+                var_name = format!("{base}_{disambiguator}");
+            }
+            if var_name != base {
+                log::warn!(
+                    "task '{task_name}' output keys collide as shell variables: '{key}' folds onto                      {base}, which is taken; it is carried as {var_name} instead"
+                );
+            }
 
             // Convert value to string and escape for bash
             let str_value = match value {
@@ -325,7 +349,8 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
             // for the prefix `OTTO_INPUT_<TASK>_`, and a task literally named
             // `key` would collide with the latter.
             let escaped_key = key.replace('\'', "'\\''");
-            lines.push(format!("OTTO_INPUTKEY_{safe_task}_{safe_key}='{escaped_key}'"));
+            let key_var = var_name.replacen("OTTO_INPUT_", "OTTO_INPUTKEY_", 1);
+            lines.push(format!("{key_var}='{escaped_key}'"));
         }
     }
 

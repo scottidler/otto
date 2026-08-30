@@ -436,8 +436,19 @@ otto_deserialize_input() {
         source "$env_file"
 
         # Build the expected variable prefix: OTTO_INPUT_<TASK>_
+        #
+        # This MUST fold exactly what the writer folds. `json_to_env`
+        # (executor/scheduler.rs) does `to_uppercase().replace(['-', '.'], "_")`,
+        # and this side used to fold only `-`. A task named `pro.ducer` therefore
+        # had its values written under OTTO_INPUT_PRO_DUCER_ while the reader
+        # looked for OTTO_INPUT_PRO.DUCER_, matched nothing, and left OTTO_INPUT
+        # empty: every output of that task vanished, silently, at exit 0.
+        # Parameter expansion rather than `tr`, so the two folds are spelled the
+        # same way as the writer's and cannot drift apart again unnoticed.
         local task_upper
-        task_upper=$(echo "$task_name" | tr '[:lower:]-' '[:upper:]_')
+        task_upper="${task_name^^}"
+        task_upper="${task_upper//-/_}"
+        task_upper="${task_upper//./_}"
         local prefix="OTTO_INPUT_${task_upper}_"
         local prefix_len=${#prefix}
 
@@ -518,6 +529,7 @@ otto_serialize_output() {
 otto_get_input() {
     local key="$1"
     local result=""
+    local found=0
 
     # Safely search through array (handles empty array with set -u)
     set +u  # Temporarily disable for array operations
@@ -525,11 +537,33 @@ otto_get_input() {
         for item in "${OTTO_INPUT[@]}"; do
             if [[ "$item" == "$key="* ]]; then
                 result="${item#*=}"  # Extract value after first =
+                found=1
                 break
             fi
         done
     fi
     set -u  # Re-enable after array operations
+
+    # A key nobody produced is a miss, and it says so.
+    #
+    # This used to print an empty line and return 0, which is indistinguishable
+    # from a key whose value really is the empty string - so a typo'd or
+    # renamed key read as "the producer gave me nothing" forever. Non-zero is
+    # the shell's way of saying "no such thing", and it composes: a caller that
+    # wants a default writes `x=$(otto_get_input k) || x=fallback`, which is the
+    # same affordance the Python builtin already offers as `default=`.
+    if [ "$found" -eq 0 ]; then
+        local available=""
+        set +u
+        if [ "${#OTTO_INPUT[@]}" -gt 0 ]; then
+            for item in "${OTTO_INPUT[@]}"; do
+                available="${available}${available:+, }${item%%=*}"
+            done
+        fi
+        set -u
+        echo "otto: no input '${key}'; available: ${available:-<none>}" >&2
+        return 1
+    fi
 
     echo "$result"
 }
