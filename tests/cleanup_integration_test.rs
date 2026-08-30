@@ -96,6 +96,7 @@ fn test_clean_with_keep_last_flag() -> Result<()> {
         .arg("2")
         .arg("--dry-run")
         .env("HOME", home_dir)
+        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -145,6 +146,7 @@ fn test_clean_with_keep_failed_flag() -> Result<()> {
         .arg("45")
         .arg("--dry-run")
         .env("HOME", home_dir)
+        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -186,6 +188,7 @@ fn test_clean_with_no_db_fallback() -> Result<()> {
         .arg("--no-db")
         .arg("--dry-run")
         .env("HOME", home_dir)
+        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -224,6 +227,7 @@ fn test_clean_database_mode_vs_filesystem_mode() -> Result<()> {
         .arg("30")
         .arg("--dry-run")
         .env("HOME", home_dir)
+        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let db_stdout = String::from_utf8_lossy(&db_output.stdout);
@@ -236,6 +240,7 @@ fn test_clean_database_mode_vs_filesystem_mode() -> Result<()> {
         .arg("--no-db")
         .arg("--dry-run")
         .env("HOME", home_dir)
+        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let fs_stdout = String::from_utf8_lossy(&fs_output.stdout);
@@ -289,6 +294,7 @@ fn test_clean_actually_deletes_with_database() -> Result<()> {
         .arg("--keep-days")
         .arg("30")
         .env("HOME", home_dir)
+        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     assert!(output.status.success(), "Clean command should succeed");
@@ -331,6 +337,7 @@ fn test_clean_keep_last_in_filesystem_mode() -> Result<()> {
         .arg("--no-db")
         .arg("--dry-run")
         .env("HOME", home_dir)
+        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -377,6 +384,7 @@ fn test_clean_with_project_filter_and_database() -> Result<()> {
         .arg("abc123")
         .arg("--dry-run")
         .env("HOME", home_dir)
+        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -415,6 +423,7 @@ fn test_clean_graceful_fallback_when_database_corrupt() -> Result<()> {
         .arg("30")
         .arg("--dry-run")
         .env("HOME", home_dir)
+        .env("OTTO_HOME", &otto_home)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);

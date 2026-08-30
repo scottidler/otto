@@ -139,3 +139,67 @@ one section per phase.
   most likely culprit given what's testable from here is a runner-environment
   difference `otto quick`/`cargo install --path .` doesn't reproduce locally
   (e.g. `dtolnay/rust-toolchain`'s exact `cargo`/`~/.cargo/bin` PATH setup).
+
+## Phase 0 follow-up: `OTTO_HOME` coupling (supersedes the Phase 0 "environment-coupled clean tests" entry above)
+
+The Phase 0 fix was verified green and committed as `1f9a33f`, but it was not
+green. The clean tests were still environment-coupled; only the variable
+changed, from `HOME` to `OTTO_HOME`.
+
+### Design decisions
+
+- **Every spawned-binary test in `tests/cleanup_integration_test.rs` now pins
+  `OTTO_HOME` explicitly** (9 call sites, each `cargo_bin_cmd!("otto")` chain
+  gains `.env("OTTO_HOME", &otto_home)` alongside the existing
+  `.env("HOME", home_dir)`). Each test already computed
+  `otto_home = home_dir.join(".otto")`, which is exactly what `HOME=home_dir`
+  was meant to resolve to, so this states the intended target directly rather
+  than relying on a derivation the resolver can re-rank.
+
+### Deviations
+
+- None from the design doc. The doc's bullet sanctioned "env override or
+  constructor param"; the env override stands, and this makes the tests
+  declare their own value instead of inheriting the caller's.
+
+### Tradeoffs
+
+- **Pin `OTTO_HOME` per test vs. `.env_remove("OTTO_HOME")`.** Removing the
+  var would also pass, by falling back through `HOME`. Pinning was chosen
+  because it tests the resolution path the binary actually takes in production
+  and cannot silently start depending on `HOME` again.
+- **Fix the tests vs. re-rank `HOME` above `OTTO_HOME` in `resolve_otto_home`.**
+  Re-ranking was rejected: `OTTO_HOME`-wins is the documented contract
+  (`src/executor/pruning.rs:10-11`) and is what `workspace.rs`, `action.rs`,
+  and `scheduler.rs` already assume. The defect was in the tests, not the
+  resolver.
+
+### Open questions
+
+- None.
+
+### Root cause, recorded because it is this document's own subject matter
+
+`resolve_otto_home()` reads `OTTO_HOME` first and `HOME` second. The tests
+spawn the real binary and set `HOME` on the child, but the child **inherits**
+the parent process's `OTTO_HOME`, which then outranks the injected `HOME`, so
+the temp directory was ignored. Reproduced against `1f9a33f`:
+`env -u OTTO_HOME cargo test --test cleanup_integration_test` gave
+`8 passed; 0 failed`, while `OTTO_HOME=/tmp/ottohome-probe` on the same commit
+gave `4 passed; 4 failed`.
+
+A GitHub-hosted runner has `OTTO_HOME` unset, so CI would have reported green
+on a suite that is red for any developer who exports it. That is the same
+green-on-the-runner / red-elsewhere split Phase 0 exists to close, inverted:
+`test_help_global_flags_no_drift` was green locally and red on the runner;
+this was green on the runner and red locally. Both were found only by running
+the suite under more than one environment, which is now the standard for
+calling a phase green in this plan.
+
+**Verified after the fix**, both conditions, full pipeline, sandbox disabled so
+`sccache` can run:
+
+```
+env -u OTTO_HOME otto ci            -> exit 0, [ci] ✅ All CI checks passed!
+OTTO_HOME=/tmp/ottohome-final2 otto ci -> exit 0, [ci] ✅ All CI checks passed!
+```
