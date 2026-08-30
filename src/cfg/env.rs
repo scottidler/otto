@@ -8,6 +8,7 @@ pub fn evaluate_envs(
     envs: &HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
 ) -> Result<HashMap<String, String>> {
+    log::debug!("cfg::evaluate_envs: keys={} working_dir={working_dir:?}", envs.len());
     let mut evaluated = HashMap::new();
     let mut pending: Vec<String> = envs.keys().cloned().collect();
     let mut iterations = 0;

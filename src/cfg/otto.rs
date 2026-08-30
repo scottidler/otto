@@ -153,6 +153,14 @@ pub struct RetentionSpec {
     pub prune_interval_hours: u64,
 }
 
+impl RetentionSpec {
+    /// True when every retention knob is still at its default, so the block
+    /// can be omitted on serialize.
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 impl Default for RetentionSpec {
     fn default() -> Self {
         Self {
@@ -166,18 +174,45 @@ impl Default for RetentionSpec {
 }
 
 #[must_use]
+/// The default `otto:` block.
+///
+/// Delegates to `OttoSpec::default()` so the two cannot drift; they were
+/// duplicated field-for-field, which meant adding a field to `OttoSpec`
+/// silently left one of them wrong.
 pub fn default_otto() -> OttoSpec {
-    OttoSpec {
-        name: default_name(),
-        about: default_about(),
-        api: default_api(),
-        jobs: default_jobs(),
-        home: default_home(),
-        tasks: default_tasks(),
-        verbosity: default_verbosity(),
-        envs: HashMap::new(),
-        retention: RetentionSpec::default(),
-    }
+    OttoSpec::default()
+}
+
+// Serialization predicates. A field whose value still equals its own default
+// is omitted, so round-tripping an ottofile that wrote no `otto:` block does
+// not hand back a 17-line one. `api` has no predicate on purpose: it is the
+// schema version and is always worth emitting.
+fn is_default_name(v: &String) -> bool {
+    *v == default_name()
+}
+
+fn is_default_about(v: &String) -> bool {
+    *v == default_about()
+}
+
+fn is_default_jobs(v: &usize) -> bool {
+    *v == default_jobs()
+}
+
+fn is_default_home(v: &String) -> bool {
+    *v == default_home()
+}
+
+fn is_default_verbosity(v: &u8) -> bool {
+    *v == default_verbosity()
+}
+
+// `default_tasks()` is `["*"]`, not `[]` - `Vec::is_empty` would leave the
+// default value emitted on every partially-customized `otto:` block (e.g.
+// one that sets only `jobs:`), which is exactly the null-noise this bullet
+// exists to remove.
+fn is_default_tasks(v: &[String]) -> bool {
+    v == default_tasks()
 }
 
 /// `deny_unknown_fields` turns a stale or misplaced `otto:` key into a loud
@@ -188,31 +223,31 @@ pub fn default_otto() -> OttoSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OttoSpec {
-    #[serde(default = "default_name")]
+    #[serde(default = "default_name", skip_serializing_if = "is_default_name")]
     pub name: String,
 
-    #[serde(default = "default_about")]
+    #[serde(default = "default_about", skip_serializing_if = "is_default_about")]
     pub about: String,
 
     #[serde(default = "default_api")]
     pub api: String,
 
-    #[serde(default = "default_jobs")]
+    #[serde(default = "default_jobs", skip_serializing_if = "is_default_jobs")]
     pub jobs: usize,
 
-    #[serde(default = "default_home")]
+    #[serde(default = "default_home", skip_serializing_if = "is_default_home")]
     pub home: String,
 
-    #[serde(default = "default_tasks")]
+    #[serde(default = "default_tasks", skip_serializing_if = "is_default_tasks")]
     pub tasks: Vec<String>,
 
-    #[serde(default = "default_verbosity")]
+    #[serde(default = "default_verbosity", skip_serializing_if = "is_default_verbosity")]
     pub verbosity: u8,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub envs: HashMap<String, String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "RetentionSpec::is_default")]
     pub retention: RetentionSpec,
 }
 

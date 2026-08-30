@@ -79,26 +79,26 @@ pub struct ParamSpec {
     #[serde(skip)]
     pub param_type: ParamType,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metavar: Option<String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<String>,
 
     // ParamSpec has no struct-level kebab rename, so the on-disk `choices-command`
     // key needs an explicit one here. It must apply to BOTH directions: a
     // deserialize-only rename would parse the ottofile and then re-emit
     // `choices_command`, which is the asymmetry tests/roundtrip.rs pins.
-    #[serde(default, rename = "choices-command")]
+    #[serde(default, rename = "choices-command", skip_serializing_if = "Option::is_none")]
     pub choices_command: Option<String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Nargs::is_one")]
     pub nargs: Nargs,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
 
     // Runtime state, populated after CLI parsing — never part of the on-disk
@@ -235,6 +235,15 @@ pub enum Nargs {
     OneOrMore,
     ZeroOrMore,
     Range(usize, usize),
+}
+
+impl Nargs {
+    /// True for the implicit `nargs: '1'`, which is what a param that never
+    /// mentions `nargs` deserializes to. Serialization skips it so a minimal
+    /// param does not gain a key its ottofile never wrote.
+    fn is_one(&self) -> bool {
+        matches!(self, Self::One)
+    }
 }
 
 impl Serialize for Nargs {
@@ -392,6 +401,7 @@ pub fn deserialize_param_map<'de, D>(deserializer: D) -> Result<ParamSpecs, D::E
 where
     D: Deserializer<'de>,
 {
+    log::debug!("cfg::deserialize_param_map: entering");
     struct ParamMap;
 
     impl<'de> Visitor<'de> for ParamMap {
@@ -642,6 +652,29 @@ mod tests {
         // Positional parameter
         let input_file = task_spec.params.get("input_file").unwrap();
         assert_eq!(input_file.param_type, ParamType::POS);
+    }
+
+    /// Zero `skip_serializing_if` in `src/cfg/` meant a minimal param (only
+    /// `help:` set) re-emitted every other field as an explicit null/empty
+    /// value: `metavar: null, default: null, choices: [], choices-command:
+    /// null, nargs: '1'`. None of those should appear when unset.
+    #[test]
+    fn a_minimal_param_serializes_with_no_null_valued_keys() {
+        use crate::cfg::task::TaskSpec;
+        let yaml = "params:\n  filename:\n    help: Input file\nbash: echo hi\n";
+        let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+        let emitted = serde_yaml::to_string(&task_spec).unwrap();
+        for absent in ["metavar", "default", "choices-command", "nargs"] {
+            assert!(!emitted.contains(absent), "must not emit unset `{absent}`:\n{emitted}");
+        }
+        assert!(
+            !emitted.contains("choices: []"),
+            "must not emit an empty choices list:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("help: Input file"),
+            "must still emit the set field:\n{emitted}"
+        );
     }
 
     /// Documents the contract that rich_key() is a *pure function of the

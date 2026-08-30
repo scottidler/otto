@@ -310,3 +310,28 @@ tasks:
         "an unset tty must not be emitted as false:\n{emitted}"
     );
 }
+
+/// A minimal config serializes to exactly what it was written as: no
+/// null-valued param keys, no `choices: []`, no implicit `nargs: '1'`, and no
+/// 17-line default `otto:` block that the ottofile never wrote.
+///
+/// Before `skip_serializing_if` landed in `src/cfg/`, one param with only a
+/// `help:` emitted `metavar: null`, `default: null`, `choices: []`,
+/// `choices-command: null`, and `nargs: '1'`, and every config gained a full
+/// default `otto:` block on the way out.
+#[test]
+fn a_minimal_config_round_trips_without_gaining_keys() {
+    let yaml = "tasks:\n  build:\n    params:\n      -v|--verbose:\n        help: be loud\n    bash: echo hi\n";
+
+    let config: ConfigSpec = serde_yaml::from_str(yaml).expect("parse");
+    let out = serde_yaml::to_string(&config).expect("serialize");
+
+    assert_eq!(out, yaml, "round-trip must be byte-identical;\ngot:\n{out}");
+
+    for noise in ["null", "choices: []", "nargs:", "otto:"] {
+        assert!(
+            !out.contains(noise),
+            "serialized form must not contain {noise:?};\ngot:\n{out}"
+        );
+    }
+}

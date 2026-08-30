@@ -946,3 +946,66 @@ OTTO_HOME=/tmp/ottohome-final2 otto ci -> exit 0, [ci] ✅ All CI checks passed!
 ### Open questions
 
 - None.
+
+## Phase 6 follow-up: the cfg minors batch
+
+The phase's criteria-bearing bullets landed in `18a1cd4`; the `cfg minors
+batch` bullet was left unchecked and raised as a go/no-go. It is closed here.
+
+### Design decisions
+
+- **Go, not defer.** The decision was already made by the document, not by
+  this run: Alternative 1 was rejected with "the hygiene tail IS the disease
+  vector here" and "No-deferments is the operating rule; every finding gets a
+  phase." A bullet with no success criterion of its own is the reason hygiene
+  gets skipped everywhere else, which is what this plan exists to stop.
+- **Gave the bullet the criterion it shipped without** and wrote it into the
+  doc, so the next reader is not in the same position: minimal `ParamSpec`
+  round-trips byte-identically, no phantom `otto:` block, zero `Regex::new` in
+  `src/cfg/`, no `src/cfg/error.rs`.
+- **`api` keeps no `skip_serializing_if` predicate** — `src/cfg/otto.rs`. It
+  is the schema version; emitting it always is worth the one line.
+
+### Deviations
+
+- **`namify` was not inlined** (`cfg/task.rs:801`, single call site `:834`).
+  The bullet observes one call site; that does not make inlining an
+  improvement. `task_spec.name = namify(&name)` reads better than four lines
+  of `split('|')`/`map_or_else` inline, and `namify` has its own test at `:809`
+  that inlining would delete. Judgment, recorded rather than silently skipped.
+
+### Tradeoffs
+
+- **Per-field `is_default_*` predicates vs. a derive or a wrapper.** Five
+  small functions in `cfg/otto.rs` beat pulling in a derive crate for eight
+  fields, and they read at the field they govern.
+- **`RetentionSpec::is_default` compares against `Self::default()`** rather
+  than checking five knobs by hand, so adding a retention key cannot leave the
+  predicate stale.
+
+### Open questions
+
+- None.
+
+### Two sub-items were already moot, recorded rather than invented into work
+
+- *`Value` bool/number support*: `18a1cd4` deleted `dest` and `constant`, and
+  with them `deserialize_value` and `impl Deserialize for Value`. There is no
+  deserializer left to teach about bools. Verified: `git grep -c
+  deserialize_value src/` returns nothing.
+- *`LazyLock` for the `env.rs` regexes*: Phase 3 already removed both when it
+  rewrote `resolve_env_variables` as a single pass. Verified: `git grep -c
+  'Regex::new' src/cfg/` returns 0. The quadratic behavior the doc measured
+  (12.1s at 100-deep, 45.0s at 200) was addressed there, not here.
+
+### Correction found while verifying this follow-up
+
+- **`OttoSpec.tasks`'s `skip_serializing_if` predicate was `Vec::is_empty`,
+  but `default_tasks()` is `["*"]`, not `[]`.** That left `tasks: ["*"]`
+  emitted on any partially-customized `otto:` block (e.g. one that sets only
+  `jobs:`) even though it was never written - exactly the null-noise this
+  bullet exists to remove, just for one field. Replaced with
+  `is_default_tasks`, comparing against `default_tasks()` like every sibling
+  predicate. Round-trip equality was never at risk (deserialize's own default
+  is the same `["*"]`), so no test caught it; it was a redundant-emission gap,
+  not a correctness bug.

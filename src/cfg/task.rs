@@ -700,6 +700,7 @@ impl TaskSpec {
     /// Expand a foreach task into multiple concrete subtasks.
     /// Returns the original task in a vec if there's no foreach configuration.
     pub fn expand_foreach(&self, cwd: &Path) -> Result<Vec<TaskSpec>> {
+        log::debug!("cfg::expand_foreach: task={} cwd={cwd:?}", self.name);
         let foreach = match &self.foreach {
             Some(f) => f,
             None => return Ok(vec![self.clone()]),
@@ -716,6 +717,11 @@ impl TaskSpec {
     /// the guards after this point - duplicate identifiers, variable injection -
     /// are identical for every source.
     pub fn expand_foreach_with_items(&self, items: &[ForeachItem]) -> Result<Vec<TaskSpec>> {
+        log::debug!(
+            "cfg::expand_foreach_with_items: task={} items={}",
+            self.name,
+            items.len()
+        );
         let foreach = match &self.foreach {
             Some(f) => f,
             None => return Ok(vec![self.clone()]),
@@ -798,6 +804,18 @@ impl TaskSpec {
     }
 }
 
+/// Derive a task's display name from its params-map-style key (e.g.
+/// `-g|--greeting`), the same rich-key idea `divine()` uses for params: the
+/// long form wins if present, else the first segment with its leading
+/// dashes stripped.
+///
+/// Has exactly one call site (`deserialize_task_map` below), and stays a
+/// named function rather than being inlined there: `task_spec.name =
+/// namify(&name)` reads better at the call site than the
+/// `split('|')`/`map_or_else` chain would inline to, and keeping it named
+/// keeps its own unit test (`test_namify`) attached to the behavior instead
+/// of losing coverage to a config-level test that would only exercise it
+/// indirectly.
 fn namify(name: &str) -> String {
     name.split('|').find(|&part| part.starts_with("--")).map_or_else(
         || name.split('|').next().unwrap().trim_start_matches('-').to_string(),

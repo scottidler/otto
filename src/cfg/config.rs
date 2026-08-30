@@ -12,10 +12,18 @@ pub use crate::cfg::task::{TaskSpec, TaskSpecs, deserialize_task_map};
 /// Per `borg/src/config.rs:281-285`. Does not reach `tasks`' free-form task
 /// names: the attribute governs `ConfigSpec`'s own field names, not the
 /// contents of `deserialize_task_map`'s value type.
+/// True when `otto` is exactly what an absent `otto:` block deserializes to.
+/// Serialization skips the field in that case, so a config that never wrote
+/// `otto:` does not gain the full 17-line default block (all nine `OttoSpec`
+/// fields plus the five nested `RetentionSpec` fields) on re-emit.
+fn otto_is_default(otto: &OttoSpec) -> bool {
+    *otto == OttoSpec::default()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigSpec {
-    #[serde(default = "default_otto")]
+    #[serde(default = "default_otto", skip_serializing_if = "otto_is_default")]
     pub otto: OttoSpec,
 
     #[serde(default, deserialize_with = "deserialize_task_map")]
