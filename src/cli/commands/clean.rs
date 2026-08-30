@@ -279,6 +279,12 @@ impl CleanCommand {
         } else {
             self.print("\nDeleting runs...\n");
             let mut deleted_size = 0u64;
+            // Counted, not just printed. `continue` alone let Clean refuse a
+            // deletion, say so on stderr, and still exit 0 - a script driving it
+            // could not tell a clean sweep from one that skipped a run it was
+            // told to remove.
+            let mut refused = 0usize;
+            let mut failed = 0usize;
 
             for run in &runs_to_delete {
                 // Never delete through a link and never delete outside the root
@@ -287,6 +293,7 @@ impl CleanCommand {
                 // user can change in between.
                 if let Err(e) = ensure_deletable_under_root(&run.path, otto_home) {
                     eprintln!("  Refusing to delete {}: {}", run.path.display(), e);
+                    refused += 1;
                     continue;
                 }
                 match fs::remove_dir_all(&run.path) {
@@ -308,11 +315,18 @@ impl CleanCommand {
                     }
                     Err(e) => {
                         eprintln!("  Failed to delete {}: {}", run.path.display(), e);
+                        failed += 1;
                     }
                 }
             }
 
             self.print(&format!("\nFreed {} of disk space", self.format_size(deleted_size)));
+
+            if refused > 0 || failed > 0 {
+                return Err(eyre::eyre!(
+                    "clean did not remove every run it selected: {refused} refused, {failed} failed"
+                ));
+            }
         }
 
         Ok(())
