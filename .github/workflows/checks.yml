@@ -26,7 +26,16 @@ jobs:
     name: Checks
     runs-on: ubuntu-latest
     steps:
+    # Full history and tags: `build.rs` bakes `git describe` into GIT_DESCRIBE,
+    # and the upgrade tests parse it as a semver. A shallow, tagless checkout
+    # makes `git describe` fall back to a bare commit id, so the tests read
+    # `4263b4d` as a version, take `4263` as the major, and die on the `b`.
+    # release-and-publish.yml already fetches tags; this workflow did not, which
+    # is why it failed on a runner and passed on every developer machine.
     - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        fetch-tags: true
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
@@ -70,7 +79,16 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
+    # Full history and tags: `build.rs` bakes `git describe` into GIT_DESCRIBE,
+    # and the upgrade tests parse it as a semver. A shallow, tagless checkout
+    # makes `git describe` fall back to a bare commit id, so the tests read
+    # `4263b4d` as a version, take `4263` as the major, and die on the `b`.
+    # release-and-publish.yml already fetches tags; this workflow did not, which
+    # is why it failed on a runner and passed on every developer machine.
     - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        fetch-tags: true
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master

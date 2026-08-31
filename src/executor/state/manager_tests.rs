@@ -386,9 +386,38 @@ fn test_full_metadata_recording() -> Result<()> {
 
 #[test]
 fn test_try_new_graceful_failure() {
-    // This test verifies that try_new() returns None for invalid paths
-    // We can't easily test this without mocking, but we can at least verify it compiles
-    let _result = StateManager::try_new();
+    // Both branches of `try_new`, under an OTTO_HOME this test owns.
+    //
+    // This used to call `StateManager::try_new()` and throw the result away,
+    // with a comment conceding it only "verified it compiles". It asserted
+    // nothing, and worse, it read whatever `OTTO_HOME` happened to be set to by
+    // whichever other test was running at the time - several `--lib` tests set
+    // it process-globally. On a developer machine some other test usually had it
+    // pointed somewhere harmless; on a fresh CI runner it did not, so `try_new`
+    // resolved to `$HOME/.otto/otto.db` and tripped the guard in `db.rs` that
+    // exists precisely to catch a test opening the real database. Green locally,
+    // red on the first runner that ever saw it.
+    let temp_dir = TempDir::new().unwrap();
+
+    // Usable home -> Some, and the store it opened is the one we named.
+    let opened = with_otto_home(temp_dir.path(), StateManager::try_new);
+    assert!(opened.is_some(), "try_new must succeed against a writable OTTO_HOME");
+    assert!(
+        temp_dir.path().join("otto.db").exists(),
+        "try_new must have created its database under the OTTO_HOME it was given"
+    );
+
+    // Unusable home -> None rather than a panic or a propagated error. The path
+    // is a regular file, so the directory underneath the database cannot be
+    // created.
+    let blocker = TempDir::new().unwrap();
+    let not_a_dir = blocker.path().join("occupied");
+    std::fs::write(&not_a_dir, b"this is a file, not a directory").unwrap();
+    let refused = with_otto_home(&not_a_dir, StateManager::try_new);
+    assert!(
+        refused.is_none(),
+        "try_new must degrade to None when the database cannot be opened, not fail the run"
+    );
 }
 
 #[test]
