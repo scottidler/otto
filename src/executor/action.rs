@@ -443,10 +443,15 @@ otto_deserialize_input() {
         # had its values written under OTTO_INPUT_PRO_DUCER_ while the reader
         # looked for OTTO_INPUT_PRO.DUCER_, matched nothing, and left OTTO_INPUT
         # empty: every output of that task vanished, silently, at exit 0.
-        # Parameter expansion rather than `tr`, so the two folds are spelled the
-        # same way as the writer's and cannot drift apart again unnoticed.
+        #
+        # The case fold is `tr`, NOT the case-fold parameter expansion, which
+        # is bash 4.0+. macOS ships /bin/bash 3.2.57 and always will (Apple
+        # froze it at the last GPLv2 release), so that spelling aborted every
+        # bash task with a dependency on "bad substitution" before its body ran.
+        # LC_ALL=C keeps `tr` on the ASCII fold; task names are ASCII.
+        # The `-`/`.` folds stay as parameter expansion, valid in 3.2.
         local task_upper
-        task_upper="${task_name^^}"
+        task_upper=$(printf '%s' "$task_name" | LC_ALL=C tr '[:lower:]' '[:upper:]')
         task_upper="${task_upper//-/_}"
         task_upper="${task_upper//./_}"
         local prefix="OTTO_INPUT_${task_upper}_"
@@ -529,6 +534,19 @@ otto_serialize_output() {
         echo ""
     } > "$env_file"
 
+    # Escape a single quote as '\'' - closing quote, escaped quote, reopening
+    # quote - so the value can be written inside a single-quoted assignment
+    # the reader `source`s back.
+    #
+    # Both the pattern and the replacement come from variables, and neither
+    # holds a backslash that bash has to interpret. Spelling them inline as
+    # ${value//\'/\'\\\'\'} is NOT portable: bash 3.2 leaves the replacement's
+    # backslashes literal where bash 4+ consumes them, so on macOS every value
+    # containing an apostrophe was written malformed and the consumer read back
+    # a truncated string at exit 0 - `it's quoted` arrived as `it\`.
+    local otto_sq="'"
+    local otto_esc_sq="'\''"
+
     # Check if OTTO_OUTPUT has any items (safely handle set -u)
     set +u  # Temporarily disable unbound variable check
     local output_count="${#OTTO_OUTPUT[@]}"
@@ -539,8 +557,7 @@ otto_serialize_output() {
             local key="${item%%=*}"    # Extract key (everything before first =)
             local value="${item#*=}"   # Extract value (everything after first =)
 
-            # Escape single quotes for bash single-quoted string
-            local escaped="${value//\'/\'\\\'\'}"
+            local escaped="${value//$otto_sq/$otto_esc_sq}"
 
             # Write key='escaped_value'
             echo "${key}='${escaped}'" >> "$env_file"

@@ -399,3 +399,105 @@ async fn a_torn_cache_entry_is_rewritten_rather_than_reused() -> Result<()> {
 
     Ok(())
 }
+
+/// macOS ships /bin/bash 3.2.57 and always will: Apple froze it at the last
+/// GPLv2 release. The builtins prelude is `source`d into every bash task, so
+/// one bash-4-only construct in it aborts the task before its body runs, with
+/// nothing but `bad substitution` to go on. `${task_name^^}` shipped in
+/// v2.0.0-v2.0.3 and did exactly that to every task with a dependency.
+///
+/// This is a text scan, not an execution test, on purpose: neither
+/// `bash --posix` nor `BASH_COMPAT=3.1` rejects `${x^^}` under a bash 5
+/// binary, so there is no way to reproduce the failure on a Linux runner.
+#[tokio::test]
+#[serial]
+async fn builtins_contain_no_bash_4_only_constructs() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    setup_test_db(temp_dir.path());
+    let workspace = Arc::new(Workspace::new(temp_dir.path().to_path_buf()).await?);
+    workspace.init().await?;
+
+    let processor = BashProcessor::new(workspace.clone(), "test_task");
+    processor.create_builtins()?;
+    let builtins = std::fs::read_to_string(workspace.task_dir("test_task").join("builtins.sh"))?;
+
+    // (needle, what it is, the 3.2-safe spelling)
+    let bash_4_only = [
+        (
+            "^^}",
+            "case-fold parameter expansion",
+            "printf | LC_ALL=C tr '[:lower:]' '[:upper:]'",
+        ),
+        (
+            "^}",
+            "case-fold parameter expansion",
+            "printf | LC_ALL=C tr '[:lower:]' '[:upper:]'",
+        ),
+        (
+            ",,}",
+            "case-fold parameter expansion",
+            "printf | LC_ALL=C tr '[:upper:]' '[:lower:]'",
+        ),
+        ("declare -A", "associative array", "two indexed arrays"),
+        ("local -A", "associative array", "two indexed arrays"),
+        ("mapfile", "mapfile builtin", "while IFS= read -r"),
+        ("readarray", "readarray builtin", "while IFS= read -r"),
+        ("wait -n", "wait -n", "wait on collected pids"),
+        ("${EPOCHSECONDS", "EPOCHSECONDS", "date +%s"),
+        ("${BASH_ARGV0", "BASH_ARGV0", "$0"),
+    ];
+
+    for (needle, what, instead) in bash_4_only {
+        assert!(
+            !builtins.contains(needle),
+            "builtins.sh uses the bash-4-only {what} (`{needle}`), which fails on \
+             macOS /bin/bash 3.2.57 with `bad substitution`. Use {instead} instead."
+        );
+    }
+
+    Ok(())
+}
+
+/// The reader's fold must land on the byte-identical prefix the writer wrote.
+/// `json_to_env` (executor/scheduler.rs) does
+/// `to_uppercase().replace(['-', '.'], "_")`; the builtins do it in shell.
+/// The two spellings are no longer the same characters, so this pins them
+/// together by result rather than by looking alike.
+#[test]
+fn builtins_input_fold_matches_the_writer_fold() {
+    let shell_fold = r#"
+        task_name="$1"
+        task_upper=$(printf '%s' "$task_name" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+        task_upper="${task_upper//-/_}"
+        task_upper="${task_upper//./_}"
+        printf '%s' "OTTO_INPUT_${task_upper}_"
+    "#;
+
+    for name in [
+        "build",
+        "Build",
+        "BUILD",
+        "pro.ducer",
+        "my-task",
+        "my-task.v2",
+        "a-b.c-d",
+        "task_9",
+    ] {
+        let writer = format!("OTTO_INPUT_{}_", name.to_uppercase().replace(['-', '.'], "_"));
+
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(shell_fold)
+            .arg("bash")
+            .arg(name)
+            .output()
+            .expect("bash is on PATH");
+        assert!(out.status.success(), "shell fold failed for {name}: {out:?}");
+        let reader = String::from_utf8(out.stdout).expect("utf8");
+
+        assert_eq!(
+            reader, writer,
+            "reader and writer folds disagree for task name {name:?}"
+        );
+    }
+}

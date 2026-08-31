@@ -65,6 +65,10 @@ fn find_log(otto_home: &Path, task: &str, file: &str) -> String {
 
 const MARKER: &str = "otto: tty task, output not captured";
 
+/// A microsecond wall-clock stamp for the timeline fixtures. See
+/// `timeline_fixture` for why it is neither `date` nor `EPOCHREALTIME`.
+const STAMP: &str = r#"$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000000')"#;
+
 /// A `tty: true` task that reports what its stdin/stdout are attached to, beside
 /// an ordinary task. Both self-terminate.
 const TTY_FIXTURE: &str = r#"
@@ -160,19 +164,23 @@ fn tty_output_is_unprefixed_while_plain_tasks_keep_their_prefix() {
 /// start and end into one shared timeline file. The task carrying `tty: true` is
 /// named by `tty_task`; `None` produces the control fixture.
 ///
-/// Stamps come from bash's `EPOCHREALTIME` (fixed-width microseconds), not from
-/// `date`: this box ships uutils coreutils 0.8.0, whose `date` ignores the `%3N`
-/// width modifier and emits variable-length nanoseconds, so the stamps would not
-/// be comparable as integers.
+/// Stamps come from `perl -MTime::HiRes`, not from `date` and not from bash's
+/// `EPOCHREALTIME`. `date` is out because this box ships uutils coreutils 0.8.0,
+/// whose `date` ignores the `%3N` width modifier and emits variable-length
+/// nanoseconds, so the stamps would not be comparable as integers.
+/// `EPOCHREALTIME` is out because it is bash 5.0+, and macOS runs these tasks
+/// under /bin/bash 3.2.57, where it expands to nothing and every timeline line
+/// arrives with a missing field. perl is on the base install of both.
 fn timeline_fixture(timeline: &Path, tty_task: Option<&str>) -> String {
+    let stamp = STAMP;
     let body = |name: &str, sleep: &str| {
         let tty_line = if tty_task == Some(name) { "    tty: true\n" } else { "" };
         format!(
             r#"  {name}:
 {tty_line}    bash: |
-      echo "{name} start ${{EPOCHREALTIME/[.,]/}}" >> {timeline}
+      echo "{name} start {stamp}" >> {timeline}
       sleep {sleep}
-      echo "{name} end ${{EPOCHREALTIME/[.,]/}}" >> {timeline}
+      echo "{name} end {stamp}" >> {timeline}
 "#,
             timeline = timeline.display()
         )
@@ -379,11 +387,12 @@ tasks:
       as: svc
       parallel: true
     bash: |
-      echo "${{svc}} start ${{EPOCHREALTIME/[.,]/}}" >> {timeline}
+      echo "${{svc}} start {stamp}" >> {timeline}
       sleep 0.3
-      echo "${{svc}} end ${{EPOCHREALTIME/[.,]/}}" >> {timeline}
+      echo "${{svc}} end {stamp}" >> {timeline}
 "#,
-            timeline = timeline.display()
+            timeline = timeline.display(),
+            stamp = STAMP,
         ),
     );
 
