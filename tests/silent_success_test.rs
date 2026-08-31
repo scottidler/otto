@@ -392,6 +392,112 @@ tasks:
     );
 }
 
+/// One task's inputs silently took another task's values, at exit 0.
+///
+/// The sibling of the dotted-name bug below, in the same function, and worse:
+/// that one produced nothing, this produced a confident wrong answer. The reader
+/// decided which values belonged to a task by matching the variable-name prefix
+/// `OTTO_INPUT_<TASK>_`, and a prefix is not a fence - `OTTO_INPUT_PRO_` matches
+/// `OTTO_INPUT_PRO_DUCER_X`. With `pro` and `pro_ducer` both producing `x`,
+/// `otto_get_input pro.x` returned `pro_ducer`'s value.
+///
+/// Any pair where one folded name is a prefix of another plus `_` collides:
+/// build/build_all, test/test.unit.
+#[test]
+fn one_tasks_inputs_do_not_absorb_another_tasks_values() {
+    let (dir, otto_home) = project(
+        r#"
+otto:
+  api: 1
+  tasks: [consumer]
+tasks:
+  pro:
+    output: [x]
+    bash: otto_set_output "x" "THE_REAL_PRO_X"
+  pro_ducer:
+    output: [x]
+    bash: otto_set_output "x" "FROM_PRO_DUCER"
+  consumer:
+    before: [pro_ducer, pro]
+    input: [pro.x, pro_ducer.x]
+    bash: |
+      echo "SHORT=[$(otto_get_input pro.x)]"
+      echo "LONG=[$(otto_get_input pro_ducer.x)]"
+"#,
+    );
+
+    let (code, stdout, stderr) = run_otto(dir.path(), &otto_home, &["consumer"]);
+
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // The regression: this returned FROM_PRO_DUCER.
+    assert!(
+        stdout.contains("SHORT=[THE_REAL_PRO_X]"),
+        "`pro` absorbed `pro_ducer`'s value:\n{stdout}"
+    );
+    // The control. It was never broken, and asserting it keeps a fix that
+    // simply stopped reading the longer name from passing.
+    assert!(
+        stdout.contains("LONG=[FROM_PRO_DUCER]"),
+        "control: the longer task name must still deliver its own value:\n{stdout}"
+    );
+}
+
+/// Two tasks whose (task, key) pairs encode to the same variable name still each
+/// get their own value.
+///
+/// Task `pro` with key `ducer_x`, and task `pro_ducer` with key `x`, both encode
+/// to `OTTO_INPUT_PRO_DUCER_X`. Both dependency orderings are driven, because the
+/// two values pass through one variable name and order is what would decide a
+/// last-write-wins bug.
+///
+/// What this actually pins, established by mutation rather than assumed: the
+/// `OTTO_INPUTKEY_` companion round trip. Corrupt the key the writer records and
+/// this goes red. It does NOT pin the `OTTO_INPUTTASK_` verification beside it -
+/// it stays green with that removed from either side, because the two values
+/// arrive in separate `input.<task>.env` files and the key companion is what
+/// recovers each one. The prefix-collision leak is pinned by
+/// `one_tasks_inputs_do_not_absorb_another_tasks_values` above, which is the test
+/// that goes red when the verification is removed. Said explicitly because an
+/// earlier draft of this comment claimed this test covered the verification, and
+/// a test whose comment overstates it is how the last five hollow tests survived.
+#[test]
+fn tasks_whose_key_encodings_collide_each_get_their_own_value() {
+    for order in ["[pro_ducer, pro]", "[pro, pro_ducer]"] {
+        let (dir, otto_home) = project(&format!(
+            r#"
+otto:
+  api: 1
+  tasks: [consumer]
+tasks:
+  pro:
+    output: [ducer_x]
+    bash: otto_set_output "ducer_x" "PRO_KEY_DUCER_X"
+  pro_ducer:
+    output: [x]
+    bash: otto_set_output "x" "PRODUCER_KEY_X"
+  consumer:
+    before: {order}
+    input: [pro.ducer_x, pro_ducer.x]
+    bash: |
+      echo "A=[$(otto_get_input pro.ducer_x)]"
+      echo "B=[$(otto_get_input pro_ducer.x)]"
+"#
+        ));
+
+        let (code, stdout, stderr) = run_otto(dir.path(), &otto_home, &["consumer"]);
+
+        assert_eq!(code, 0, "order {order}, stderr: {stderr}");
+        assert!(
+            stdout.contains("A=[PRO_KEY_DUCER_X]"),
+            "order {order}: task `pro` key `ducer_x` got the wrong value:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("B=[PRODUCER_KEY_X]"),
+            "order {order}: task `pro_ducer` key `x` got the wrong value:\n{stdout}"
+        );
+    }
+}
+
 /// A task name containing `.` lost every one of its outputs, silently, at
 /// exit 0.
 ///

@@ -478,8 +478,33 @@ otto_deserialize_input() {
             # The fallback keeps an input .env written by an older otto working:
             # no companion variable means the old lowercase guess, which is
             # exactly what that file's reader would have done anyway.
-            local suffix key_var
+            local suffix key_var task_var
             suffix="${var_name:$prefix_len}"
+
+            # Does this variable actually belong to THIS task?
+            #
+            # The prefix match above is not a fence. `OTTO_INPUT_PRO_` matches
+            # `OTTO_INPUT_PRO_DUCER_X`, so with tasks `pro` and `pro_ducer` both
+            # producing key `x`, `compgen -v` hands this loop the other task's
+            # variable - including one a previous `otto_deserialize_input` call
+            # sourced into this same shell. The consumer got
+            # `pro.x=WRONG_FROM_PRO_DUCER` at exit 0. Right-anchoring cannot
+            # settle it either: `OTTO_INPUT_PRO_DUCER_X` is an equally valid
+            # encoding of task `pro` key `ducer_x`.
+            #
+            # So the name is not asked. The writer records the producing task in
+            # a companion `OTTO_INPUTTASK_` variable and this compares against it.
+            # A mismatch means the variable belongs to a different task; skip it.
+            #
+            # No companion means an input .env written by an older otto, which
+            # had no such variable to write. Accept it, matching what that file's
+            # own reader would have done - the ambiguity needs two tasks in one
+            # run dir, and a run dir is written by a single otto.
+            task_var="OTTO_INPUTTASK_${task_upper}_${suffix}"
+            if [ -n "${!task_var+set}" ] && [ "${!task_var}" != "$task_name" ]; then
+                continue
+            fi
+
             key_var="OTTO_INPUTKEY_${task_upper}_${suffix}"
             if [ -n "${!key_var+set}" ]; then
                 key="${!key_var}"

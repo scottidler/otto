@@ -351,6 +351,27 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
             let escaped_key = key.replace('\'', "'\\''");
             let key_var = var_name.replacen("OTTO_INPUT_", "OTTO_INPUTKEY_", 1);
             lines.push(format!("{key_var}='{escaped_key}'"));
+
+            // The producing task's real name, carried alongside the value for the
+            // same reason the key is.
+            //
+            // The reader used to decide which values belonged to a task by
+            // matching the variable-name prefix `OTTO_INPUT_<TASK>_`, and that
+            // prefix is not a fence: `OTTO_INPUT_PRO_` matches
+            // `OTTO_INPUT_PRO_DUCER_X`. Two tasks `pro` and `pro_ducer` both
+            // producing key `x`, read in one shell, gave the consumer
+            // `pro.x=WRONG_FROM_PRO_DUCER` at exit 0 - not a missing value, a
+            // confidently wrong one. Any pair where one folded name is a prefix
+            // of another plus `_` collides: build/build_all, test/test.unit.
+            //
+            // Right-anchoring the scan does not fix it, because the name really is
+            // ambiguous: `OTTO_INPUT_PRO_DUCER_X` is equally a valid encoding of
+            // task `pro` key `ducer_x`. The name cannot answer the question, so
+            // the writer answers it instead and the reader verifies rather than
+            // infers.
+            let escaped_task = task_name.replace('\'', "'\\''");
+            let task_var = var_name.replacen("OTTO_INPUT_", "OTTO_INPUTTASK_", 1);
+            lines.push(format!("{task_var}='{escaped_task}'"));
         }
     }
 
