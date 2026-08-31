@@ -162,6 +162,58 @@ ignored, key.
 Phase 6): both parsed and serialized but had zero readers outside
 `cfg/param.rs` itself.
 
+## Passing data between tasks: `otto_set_output` and `otto_get_input`
+
+Otto defines two shell functions inside every `bash:`/`action:` body.
+
+```bash
+otto_set_output "<key>" "<value>"   # in the producing task
+otto_get_input  "<task>.<key>"      # in a task that declares `before: [<task>]`
+```
+
+A consumer only sees a producer's outputs if it declares the dependency; there
+is no ambient sharing.
+
+```yaml
+otto:
+  api: 1
+tasks:
+  generate:
+    bash: otto_set_output "stamp" "$(date +%s)"
+  consume:
+    before: ["generate"]
+    bash: echo "got $(otto_get_input "generate.stamp")"
+```
+
+### What happens when the key is not there
+
+`otto_get_input` prints a diagnostic naming the key and what *was* available, and
+returns non-zero:
+
+```
+otto: no input 'generate.missing'; available: generate.stamp
+```
+
+**Read the message, not the exit status.** The message is emitted in every case;
+the non-zero return only reaches your script in one of the three common shapes,
+because bash discards the status of a command substitution in the other two:
+
+| Shape | Exit status | Result |
+|---|---|---|
+| `x=$(otto_get_input k)` under `set -e` | task fails, rc 1 | the assignment *is* the command, so `set -e` sees the failure |
+| `local x=$(otto_get_input k)` | rc 0 | `local` succeeds; its status replaces the substitution's |
+| `echo "[$(otto_get_input k)]"` | rc 0 | `echo` succeeds; the empty value is interpolated |
+
+If you want a default rather than a failure, ask for one explicitly:
+
+```bash
+value=$(otto_get_input "generate.stamp") || value="fallback"
+```
+
+Keys keep the spelling the producer wrote: `otto_get_input "gen.MixedCase"` needs
+that exact case. Task names containing `.` or `-` work, and two tasks whose names
+differ only by a separator (`build` and `build_all`) do not collide.
+
 ## Variable interpolation in `envs`, `input`, and `output`
 
 Otto expands variable references in these values *before* the shell ever sees

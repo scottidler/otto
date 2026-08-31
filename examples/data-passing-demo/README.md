@@ -232,7 +232,17 @@ ls -la final_report/input.*.json
 
 ## Common Issues
 
-### Issue: `otto_get_input` returns empty
+### Issue: `otto_get_input` reports `no input '<key>'`
+
+Otto prints `otto: no input '<key>'; available: <the keys that are there>` and
+returns non-zero. It used to return empty at exit 0, which said nothing; the
+diagnostic replaced that, so read the `available:` list first - it usually names
+the key you meant, with different spelling.
+
+Note the non-zero status only fails the task in the form
+`x=$(otto_get_input k)` under `set -e`. In `local x=$(...)` and
+`echo "$(...)"`, bash discards it. The printed message is the reliable signal.
+See `docs/commands/ottofile-reference.md` for the full table.
 
 **Cause:** Task dependency not declared in `before:`
 
