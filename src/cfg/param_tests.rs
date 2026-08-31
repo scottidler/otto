@@ -2,6 +2,7 @@
 
 use super::*;
 use std::collections::HashMap;
+use tempfile::TempDir;
 
 #[test]
 fn test_boolean_flag_detection_true_default() {
@@ -513,8 +514,9 @@ fn resolve_choices_command_returns_trimmed_non_empty_lines() {
             "#,
         "svc",
     );
+    let cwd = TempDir::new().unwrap();
     let values = spec
-        .resolve_choices_command("switch", std::path::Path::new("."), &HashMap::new())
+        .resolve_choices_command("switch", cwd.path(), &HashMap::new())
         .unwrap();
     assert_eq!(values, vec!["alpha".to_string(), "beta".to_string()]);
 }
@@ -529,8 +531,9 @@ fn resolve_choices_command_nonzero_exit_names_task_param_and_command() {
             "#,
         "svc",
     );
+    let cwd = TempDir::new().unwrap();
     let err = spec
-        .resolve_choices_command("switch", std::path::Path::new("."), &HashMap::new())
+        .resolve_choices_command("switch", cwd.path(), &HashMap::new())
         .unwrap_err()
         .to_string();
     assert!(err.contains("switch"), "{err}");
@@ -549,8 +552,9 @@ fn resolve_choices_command_zero_lines_is_an_error_unlike_foreach() {
             "#,
         "svc",
     );
+    let cwd = TempDir::new().unwrap();
     let err = spec
-        .resolve_choices_command("switch", std::path::Path::new("."), &HashMap::new())
+        .resolve_choices_command("switch", cwd.path(), &HashMap::new())
         .unwrap_err()
         .to_string();
     assert!(err.contains("switch"), "{err}");
