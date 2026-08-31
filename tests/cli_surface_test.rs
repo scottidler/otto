@@ -183,14 +183,8 @@ fn a_builtin_routes_from_behind_the_tui_flag() {
         "otto:\n  api: 1\n  tasks: [build]\ntasks:\n  build:\n    bash: echo built\n",
     );
 
-    let mut cmd = std::process::Command::new("script");
-    cmd.args([
-        "-q",
-        "-e",
-        "-c",
-        &format!("{} -o {} --tui Graph", common::OTTO_BIN, ottofile.display()),
-        "/dev/null",
-    ]);
+    let ottofile_arg = ottofile.display().to_string();
+    let mut cmd = common::pty_cmd(&[common::OTTO_BIN, "-o", &ottofile_arg, "--tui", "Graph"]);
     let output = common::isolate(&mut cmd, &home)
         .current_dir(temp.path())
         .output()

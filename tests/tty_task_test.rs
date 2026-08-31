@@ -13,7 +13,7 @@ mod common;
 use common::{OTTO_BIN, isolate, otto_cmd};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Output};
+use std::process::Output;
 use tempfile::TempDir;
 
 fn write_ottofile(dir: &Path, contents: &str) -> PathBuf {
@@ -100,17 +100,11 @@ fn tty_task_sees_a_real_tty_on_stdout_under_a_pty() {
     let temp = TempDir::new().unwrap();
     let otto_home = temp.path().join("otto-home");
     let ottofile = write_ottofile(temp.path(), TTY_FIXTURE);
-    // `script` runs the command through a shell, so otto inherits `script`'s
-    // environment: isolating the outer process isolates the inner otto.
-    let inner_cmd = format!("{OTTO_BIN} -o {} interactive", ottofile.display());
-    let mut script = StdCommand::new("script");
-    isolate(&mut script, &otto_home);
-    let output = script
-        .arg("-qec")
-        .arg(&inner_cmd)
-        .arg("/dev/null")
+    let ottofile_arg = ottofile.display().to_string();
+    let mut cmd = common::pty_cmd(&[OTTO_BIN, "-o", &ottofile_arg, "interactive"]);
+    let output = isolate(&mut cmd, &otto_home)
         .output()
-        .expect("failed to run `script` (util-linux) for the pty test");
+        .expect("failed to run `script` for the pty test");
 
     let out = stdout(&output);
     assert!(output.status.success(), "otto failed under the pty: {out}");

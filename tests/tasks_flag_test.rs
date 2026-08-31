@@ -9,7 +9,6 @@ mod common;
 
 use serde_json::Value as JsonValue;
 use std::fs;
-use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
 fn write_ottofile(dir: &std::path::Path, contents: &str) -> std::path::PathBuf {
@@ -211,17 +210,11 @@ tasks:
 fn tasks_defaults_to_yaml_on_a_real_tty() {
     let temp = TempDir::new().unwrap();
     let ottofile = write_ottofile(temp.path(), FIXTURE);
-    // `script` runs the command through a shell, so otto inherits `script`'s
-    // environment: isolating the outer process isolates the inner otto.
-    let inner_cmd = format!("{} --tasks -o {}", common::OTTO_BIN, ottofile.display());
-    let mut script = StdCommand::new("script");
-    common::isolate(&mut script, temp.path());
-    let output = script
-        .arg("-qec")
-        .arg(&inner_cmd)
-        .arg("/dev/null")
+    let ottofile_arg = ottofile.display().to_string();
+    let mut cmd = common::pty_cmd(&[common::OTTO_BIN, "--tasks", "-o", &ottofile_arg]);
+    let output = common::isolate(&mut cmd, temp.path())
         .output()
-        .expect("failed to run `script` (util-linux) for the pty test");
+        .expect("failed to run `script` for the pty test");
 
     assert!(
         output.status.success(),
@@ -230,14 +223,22 @@ fn tasks_defaults_to_yaml_on_a_real_tty() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout = common::pty_stdout(&output.stdout);
     // A tty must yield YAML: it must not parse as JSON's `{...}` object shape,
     // and it must parse as YAML with the same key set --tasks always reports.
     assert!(
         !stdout.trim_start().starts_with('{'),
         "expected YAML on a tty, got JSON-shaped output: {stdout}"
     );
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&stdout).expect("tty output must be valid YAML");
+    // On a parse failure, show the bytes. A pty run picks up whatever the host's
+    // `script` writes around the child's output, and "control characters are not
+    // allowed" with no bytes attached is unactionable from a CI log.
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "tty output must be valid YAML: {e}\nfirst 120 bytes: {:?}",
+            &output.stdout[..output.stdout.len().min(120)]
+        )
+    });
     let mut keys: Vec<String> = yaml
         .as_mapping()
         .expect("top-level value must be a mapping")
