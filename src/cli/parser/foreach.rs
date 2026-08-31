@@ -153,10 +153,9 @@ impl Parser {
         // Collect subtasks for foreach parent tasks
         // Only expand subtasks if this is a parent task (no colon in name)
         // If user requests "install:td", don't also collect install:ts, install:cs
-        if !task_name.contains(':') {
-            let prefix = format!("{}:", task_name);
+        if !crate::naming::is_subtask(task_name) {
             for subtask_name in task_specs.keys() {
-                if subtask_name.starts_with(&prefix) {
+                if crate::naming::is_subtask_of(subtask_name, task_name) {
                     Self::collect_transitive_deps(subtask_name, task_deps, task_specs, collected)?;
                 }
             }

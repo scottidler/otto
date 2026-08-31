@@ -69,3 +69,17 @@ fn degenerate_names_split_without_panicking() {
     assert_eq!(split_subtask(":a"), Some(("", "a")));
     assert_eq!(split_subtask(""), None);
 }
+
+#[test]
+fn is_subtask_of_matches_only_the_named_parent() {
+    assert!(is_subtask_of("build:web", "build"));
+    assert!(is_subtask_of("build:1:10", "build"));
+    assert!(is_subtask_of("build.web:a", "build.web"));
+
+    // The prefix hazard, asserted rather than assumed: a longer parent name that
+    // merely starts with the same characters is not a match.
+    assert!(!is_subtask_of("build_all:web", "build"));
+    assert!(!is_subtask_of("buildweb:x", "build"));
+    // A top-level task is nobody's subtask, including its own.
+    assert!(!is_subtask_of("build", "build"));
+}

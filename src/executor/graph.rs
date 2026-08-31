@@ -531,7 +531,7 @@ impl DagVisualizer {
                         .map(|t| {
                             t.task_deps
                                 .iter()
-                                .filter(|d| !d.task.starts_with(&format!("{}:", parent)))
+                                .filter(|d| !crate::naming::is_subtask_of(&d.task, parent))
                                 .map(|d| d.task.clone())
                                 .collect()
                         })

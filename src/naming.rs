@@ -58,6 +58,21 @@ pub fn parent_or_self(name: &str) -> &str {
     parent_of(name).unwrap_or(name)
 }
 
+/// Whether `name` is a subtask of `parent`.
+///
+/// The prefix-match form, which several call sites hand-coded as
+/// `name.starts_with(&format!("{parent}:"))`. Correct as written - the separator
+/// cannot occur inside a parent name, so the prefix is unambiguous here - but
+/// spelled out once so a change to the separator reaches every reader of it.
+///
+/// Contrast the shell side, where the same prefix idiom over *folded* names
+/// (`.`/`-` collapsed to `_`) was genuinely unsound and handed one task another
+/// task's values.
+#[must_use]
+pub fn is_subtask_of(name: &str, parent: &str) -> bool {
+    parent_of(name) == Some(parent)
+}
+
 /// Whether `name` is a foreach subtask name.
 #[must_use]
 pub fn is_subtask(name: &str) -> bool {
