@@ -475,10 +475,18 @@ fn classify_edge_skip_provenance_matrix() {
 }
 
 /// Every gate that decides "may this task start, given the state of its source"
-/// must run the same ladder. There are three: the scheduler's edge admission
+/// must reach the same answer. There are three: the scheduler's edge admission
 /// (`classify_edge`), the worker's terminal-status double-check
 /// (`edge_satisfied_by_status`), and the serial chain's ordering gate
 /// (`SerialGroups::classify`).
+///
+/// Two of them *run* the shared ladder: `classify_edge` and `SerialGroups::classify`
+/// both call `classify_source`. The worker's is a separate `match` on `TaskStatus`
+/// and cannot call it without an adapter, because it reads a terminal status
+/// rather than the runtime sets. So for that one this test asserts **agreement,
+/// not shared execution** - it is the thing standing between the two spellings.
+/// Stated exactly, because the commit that introduced this test (`21e0fb6`) said
+/// "all three gates run it", which a review panel correctly called overstated.
 ///
 /// The nine-cell matrix test above covers the skipped rows. This covers the
 /// whole lattice (skipped for each kind, completed, failed, and
