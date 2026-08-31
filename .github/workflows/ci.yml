@@ -89,5 +89,8 @@ jobs:
     - name: Confirm the pin took
       run: bash --version | head -1
 
+    # `--no-fail-fast`: cargo stops after the first failing test binary, so a
+    # platform difference in one target hides every other one behind it. This
+    # job exists to find them, so it runs them all.
     - name: Test
-      run: cargo test --locked
+      run: cargo test --locked --no-fail-fast

@@ -14,7 +14,7 @@
 //! test binary under `script`, which allocates a pty, with an env var that
 //! selects the child role.
 
-use std::process::Command;
+mod common;
 
 /// Selects the child role. Set only by the parent test below.
 const CHILD_ROLE_VAR: &str = "OTTO_TEST_TUI_PANIC_CHILD";
@@ -46,18 +46,18 @@ fn a_panic_with_the_terminal_taken_over_restores_it() {
 
     // Parent role: re-run this same test, as a child, under a pty.
     let exe = std::env::current_exe().expect("current test binary");
-    let inner = format!(
-        "{} --exact a_panic_with_the_terminal_taken_over_restores_it --nocapture",
-        exe.display()
-    );
 
-    let output = Command::new("script")
-        .args(["-q", "-e", "-c", &inner, "/dev/null"])
-        .env(CHILD_ROLE_VAR, "1")
-        // The child panics on purpose; its backtrace is noise here.
-        .env("RUST_BACKTRACE", "0")
-        .output()
-        .expect("script should run the child under a pty");
+    let output = common::pty_cmd(&[
+        &exe.display().to_string(),
+        "--exact",
+        "a_panic_with_the_terminal_taken_over_restores_it",
+        "--nocapture",
+    ])
+    .env(CHILD_ROLE_VAR, "1")
+    // The child panics on purpose; its backtrace is noise here.
+    .env("RUST_BACKTRACE", "0")
+    .output()
+    .expect("script should run the child under a pty");
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

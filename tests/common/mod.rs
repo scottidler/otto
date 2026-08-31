@@ -69,3 +69,38 @@ pub fn isolated_state_manager(home: &Path) -> otto::executor::state::StateManage
     otto::executor::state::StateManager::with_db_path(home.join("otto.db"))
         .expect("failed to open scratch StateManager")
 }
+
+/// Build a `script` invocation that runs `argv` under a real pty, in the
+/// dialect the host's `script` actually speaks.
+///
+/// The two `script` implementations share a name and nothing else:
+///
+/// - util-linux (Linux): `script -qec "<one shell string>" /dev/null`
+/// - BSD (macOS): `script -q /dev/null <program> <args...>`
+///
+/// Every pty test here hardcoded the util-linux form, so on macOS `script`
+/// rejected the arguments, produced no output, and the tests failed on their
+/// own vacuous-pass guards ("the child never entered the alternate screen").
+/// That is the guards working: the pty was never allocated. The dialect is the
+/// only thing that was wrong.
+///
+/// util-linux takes ONE string that a shell parses, so the argv is joined and
+/// single-quoted here. BSD takes the argv directly, which needs no quoting.
+/// `script` starts the command itself, so the child inherits `script`'s
+/// environment: pass the returned command through [`isolate`] when the child
+/// is otto.
+pub fn pty_cmd(argv: &[&str]) -> std::process::Command {
+    let mut cmd = std::process::Command::new("script");
+    if cfg!(target_os = "macos") {
+        cmd.arg("-q").arg("/dev/null").args(argv);
+    } else {
+        let joined = argv.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
+        cmd.arg("-qec").arg(joined).arg("/dev/null");
+    }
+    cmd
+}
+
+/// Single-quote one argv element for the shell `script -c` hands the string to.
+fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', r"'\''"))
+}

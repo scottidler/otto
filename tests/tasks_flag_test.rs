@@ -9,7 +9,6 @@ mod common;
 
 use serde_json::Value as JsonValue;
 use std::fs;
-use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
 fn write_ottofile(dir: &std::path::Path, contents: &str) -> std::path::PathBuf {
@@ -211,17 +210,11 @@ tasks:
 fn tasks_defaults_to_yaml_on_a_real_tty() {
     let temp = TempDir::new().unwrap();
     let ottofile = write_ottofile(temp.path(), FIXTURE);
-    // `script` runs the command through a shell, so otto inherits `script`'s
-    // environment: isolating the outer process isolates the inner otto.
-    let inner_cmd = format!("{} --tasks -o {}", common::OTTO_BIN, ottofile.display());
-    let mut script = StdCommand::new("script");
-    common::isolate(&mut script, temp.path());
-    let output = script
-        .arg("-qec")
-        .arg(&inner_cmd)
-        .arg("/dev/null")
+    let ottofile_arg = ottofile.display().to_string();
+    let mut cmd = common::pty_cmd(&[common::OTTO_BIN, "--tasks", "-o", &ottofile_arg]);
+    let output = common::isolate(&mut cmd, temp.path())
         .output()
-        .expect("failed to run `script` (util-linux) for the pty test");
+        .expect("failed to run `script` for the pty test");
 
     assert!(
         output.status.success(),
