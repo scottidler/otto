@@ -1970,7 +1970,7 @@ dependencies = [
 
 [[package]]
 name = "otto"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "assert_cmd",
  "assert_fs",
@@ -1995,6 +1995,7 @@ dependencies = [
  "indexmap",
  "indicatif",
  "levenshtein",
+ "libc",
  "log",
  "num_cpus",
  "predicates",

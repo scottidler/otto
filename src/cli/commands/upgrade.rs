@@ -198,14 +198,35 @@ fn reap_stale_staging(dir: &Path, name: &str) {
 }
 
 /// Whether a pid is still live, used only to decide if a staging file is
-/// abandoned. `/proc` on Linux; elsewhere assume live, which errs toward leaving
-/// a file alone rather than deleting one in use.
+/// abandoned.
+///
+/// `kill(pid, 0)` sends no signal and only asks the kernel whether the pid
+/// exists: `EPERM` means it exists and belongs to somebody else, so only
+/// `ESRCH` means gone. This used to read `/proc/<pid>` on Linux and return
+/// `true` unconditionally everywhere else, which meant macOS never reaped
+/// anything: `otto Upgrade` accumulated a `.otto.upgrade-<pid>` file next to
+/// the binary for every upgrade a signal ever interrupted, forever.
 fn pid_is_running(pid: u32) -> bool {
-    if cfg!(target_os = "linux") {
-        Path::new(&format!("/proc/{pid}")).exists()
-    } else {
-        true
+    // Only a strictly positive pid names a process. `kill` reads 0 as "my own
+    // process group" and a negative number as "that process group", so a
+    // filename carrying a pid that does not fit a positive `pid_t` must never
+    // reach the syscall: casting 4294967290 lands on -6 and asks about process
+    // group 6, which is a different question with a different answer.
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
     }
+    // SAFETY: `kill` with signal 0 performs the existence and permission check
+    // and delivers nothing, so there is no process state to corrupt.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    // Anything other than "no such process" leaves the file alone: a live pid
+    // owned by another user reports EPERM, and guessing wrong here deletes a
+    // file an upgrade is using.
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 /// Rename a staged binary over the target, removing the staged file if the

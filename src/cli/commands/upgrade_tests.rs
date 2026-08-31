@@ -145,7 +145,13 @@ fn command() -> UpgradeCommand {
 /// by wall clock and not by an attempt count, and when the budget expires the
 /// error says what happened. The previous code returned a bare
 /// "Failed to execute new binary" after an unmeasured 500ms.
-#[cfg(unix)]
+///
+/// Linux only, not `unix`: XNU does not set the text-busy bit from an ordinary
+/// write descriptor, so on macOS the exec succeeds and the test's own
+/// precondition is absent. It fails loudly rather than passing vacuously,
+/// which is correct, and the honest answer is that the platform has nothing
+/// here to test.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_binary_held_open_for_writing_fails_within_the_budget_and_names_the_cause() {
     use std::io::Write;
@@ -978,5 +984,31 @@ fn help_never_renders_the_github_token_value() {
     assert!(
         help.contains("github-token"),
         "the flag itself must still be documented:\n{help}"
+    );
+}
+
+/// `pid_is_running` decides whether a `.otto.upgrade-<pid>` file is abandoned,
+/// so it has to answer a pid, not a process group. The reaper's own fixture
+/// uses 4294967290, which is exactly the value that casts to -6 and turns the
+/// question into "is process group 6 alive". This pins both ends.
+///
+/// It also pins the platform: the old implementation read `/proc/<pid>` and
+/// returned `true` for everything on non-Linux, so macOS never reaped a file.
+#[test]
+fn pid_is_running_answers_a_pid_and_never_a_process_group() {
+    assert!(
+        pid_is_running(std::process::id()),
+        "this very process must read as running"
+    );
+    assert!(pid_is_running(1), "pid 1 must read as running");
+
+    assert!(
+        !pid_is_running(4294967290),
+        "a pid that cannot fit a positive pid_t must read as not running, \
+         not be cast into a negative process-group id"
+    );
+    assert!(
+        !pid_is_running(0),
+        "pid 0 means the caller's own process group to kill(2); it is never a pid to reap against"
     );
 }
