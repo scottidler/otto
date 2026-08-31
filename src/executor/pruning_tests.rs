@@ -91,7 +91,11 @@ fn age_out(path: &Path) {
 #[test]
 fn prune_orphaned_cache_grace_period_is_fifteen_minutes() {
     for (label, age, expect_kept) in [
-        ("five minutes: inside the grace period", Duration::from_secs(5 * 60), true),
+        (
+            "five minutes: inside the grace period",
+            Duration::from_secs(5 * 60),
+            true,
+        ),
         ("twenty minutes: past it", Duration::from_secs(20 * 60), false),
     ] {
         let temp_dir = TempDir::new().unwrap();
