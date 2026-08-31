@@ -230,7 +230,15 @@ fn tasks_defaults_to_yaml_on_a_real_tty() {
         !stdout.trim_start().starts_with('{'),
         "expected YAML on a tty, got JSON-shaped output: {stdout}"
     );
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&stdout).expect("tty output must be valid YAML");
+    // On a parse failure, show the bytes. A pty run picks up whatever the host's
+    // `script` writes around the child's output, and "control characters are not
+    // allowed" with no bytes attached is unactionable from a CI log.
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "tty output must be valid YAML: {e}\nfirst 120 bytes: {:?}",
+            &output.stdout[..output.stdout.len().min(120)]
+        )
+    });
     let mut keys: Vec<String> = yaml
         .as_mapping()
         .expect("top-level value must be a mapping")

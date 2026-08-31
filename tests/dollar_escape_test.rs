@@ -121,8 +121,19 @@ tasks:
         .expect("otto single");
     let single_out = String::from_utf8_lossy(&single.stdout).to_string();
 
-    assert!(doubled.status.success(), "doubled failed:\n{doubled_out}");
-    assert!(single.status.success(), "single failed:\n{single_out}");
+    // Both stdout AND stderr: otto sends task failure detail to stderr, so a
+    // bare stdout dump reports an empty string for exactly the case that needs
+    // explaining.
+    assert!(
+        doubled.status.success(),
+        "doubled failed:\nstdout:\n{doubled_out}\nstderr:\n{}",
+        String::from_utf8_lossy(&doubled.stderr)
+    );
+    assert!(
+        single.status.success(),
+        "single failed:\nstdout:\n{single_out}\nstderr:\n{}",
+        String::from_utf8_lossy(&single.stderr)
+    );
 
     // `$1` is the first field, which is what a user wants.
     assert!(
