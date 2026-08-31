@@ -316,11 +316,26 @@ fn test_every_fixture_loads_through_the_real_otto() {
             !conversion.config.tasks.is_empty(),
             "makefiles/{name}/Makefile converted to zero tasks"
         );
+
+        // Exact key membership, not `stdout.contains(task_name)`.
+        //
+        // The substring form was hollow and a review panel proved it: `--tasks
+        // --format json` keys the object by task name, so renaming every key to
+        // `<name>-shadow` leaves the original name a substring of the new one and
+        // the assertion green. Parsing and comparing the key set is the only form
+        // that distinguishes "otto lists this task" from "these characters appear
+        // somewhere in the output".
+        let listed: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("otto --tasks --format json is not JSON for makefiles/{name}: {e}\n{stdout}"));
+        let listed = listed
+            .as_object()
+            .unwrap_or_else(|| panic!("otto --tasks --format json is not an object for makefiles/{name}:\n{stdout}"));
         for task_name in conversion.config.tasks.keys() {
             assert!(
-                stdout.contains(task_name.as_str()),
+                listed.contains_key(task_name.as_str()),
                 "otto loaded the conversion of makefiles/{name}/Makefile but does not list \
-                 task '{task_name}':\n{stdout}"
+                 task '{task_name}'. listed: {:?}",
+                listed.keys().collect::<Vec<_>>()
             );
         }
     }
@@ -479,6 +494,39 @@ fn run_convert(makefile: &str, args: &[&str]) -> (i32, String, String) {
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+/// `.PHONY: $(TARGETS)` must not make `--strict` reject a correct Makefile.
+///
+/// The file-rule warning fires on `!target.is_phony`, and `.PHONY` is not
+/// variable-expanded by this parser, so every target declared through a variable
+/// looked non-phony. A review panel found it: three correct lines, two wrong
+/// warnings, exit 1 under `--strict`.
+///
+/// Both directions are driven in one test, because the fix is only correct if it
+/// suppresses the false positive *without* suppressing the true one - and
+/// "stop warning" is the trivially wrong way to make the first half pass.
+#[test]
+fn an_unresolvable_phony_suppresses_the_file_rule_warning_but_a_literal_one_does_not() {
+    let variable_phony = "TARGETS = build test\n\n.PHONY: $(TARGETS)\n\nbuild: dep\n\techo building\n\ntest: dep\n\techo testing\n\ndep:\n\techo dep\n";
+    let (code, _stdout, stderr) = run_convert(variable_phony, &["--strict"]);
+    assert_eq!(
+        code, 0,
+        "`.PHONY: $(TARGETS)` is a correct Makefile and must convert under --strict:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("is not `.PHONY` and has prerequisites"),
+        "phony-ness is unknown here, so the heuristic must not assert it:\n{stderr}"
+    );
+
+    // The control: a literal `.PHONY` leaves the set complete, so a genuine file
+    // rule must still be reported.
+    let literal_phony = ".PHONY: clean\n\napp.tar.gz: src.txt\n\ttar czf app.tar.gz src.txt\n\nsrc.txt:\n\techo hi > src.txt\n\nclean:\n\trm -f app.tar.gz\n";
+    let (_code, _stdout, stderr) = run_convert(literal_phony, &[]);
+    assert!(
+        stderr.contains("`app.tar.gz` is not `.PHONY` and has prerequisites"),
+        "a real file rule under a literal .PHONY must still warn:\n{stderr}"
+    );
 }
 
 #[test]

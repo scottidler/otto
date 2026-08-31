@@ -136,6 +136,13 @@ impl MakefileParser {
 
             // Check for .PHONY declaration
             if let Some(phony_targets) = is_phony_declaration(&trimmed) {
+                // `.PHONY: $(TARGETS)` is a variable reference make expands and
+                // this parser does not. The names are unknowable here, so record
+                // that `phony_targets` is incomplete rather than letting a later
+                // "not in the set" test read as "not phony".
+                if phony_targets.iter().any(|t| t.contains("$(") || t.contains("${")) {
+                    ast.phony_unresolved = true;
+                }
                 for target in phony_targets {
                     ast.phony_targets.insert(target);
                 }

@@ -6,6 +6,12 @@ pub struct MakefileAst {
     pub variables: Vec<Variable>,
     pub default_goal: Option<String>,
     pub phony_targets: HashSet<String>,
+    /// A `.PHONY` line named a variable (`.PHONY: $(TARGETS)`) that this parser
+    /// does not expand, so `phony_targets` is known to be incomplete.
+    ///
+    /// Anything that reasons from "this target is NOT in `phony_targets`" must
+    /// check this first: with it set, absence means unknown, not false.
+    pub phony_unresolved: bool,
     pub targets: Vec<Target>,
 }
 
@@ -15,6 +21,7 @@ impl MakefileAst {
             variables: Vec::new(),
             default_goal: None,
             phony_targets: HashSet::new(),
+            phony_unresolved: false,
             targets: Vec::new(),
         }
     }

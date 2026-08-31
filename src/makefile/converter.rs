@@ -189,7 +189,17 @@ impl OttoConverter {
             // alone). make still checks existence there, but nothing in the rule
             // distinguishes it from a plain task name, and guessing from the
             // name is what this replaced.
-            if !target.is_phony && !target.dependencies.is_empty() && !target.commands.is_empty() {
+            // `!target.is_phony` only means "not phony" when `.PHONY` was fully
+            // resolvable. `.PHONY: $(TARGETS)` is a variable this parser does not
+            // expand, so every target it covers looks non-phony and warns - and
+            // under `--strict` that is exit 1 on a correct Makefile. Measured
+            // before this guard: a three-line Makefile with `.PHONY: $(TARGETS)`
+            // failed `otto Convert --strict` with two warnings, both wrong.
+            if !self.ast.phony_unresolved
+                && !target.is_phony
+                && !target.dependencies.is_empty()
+                && !target.commands.is_empty()
+            {
                 self.warn(
                     target.line,
                     format!(
