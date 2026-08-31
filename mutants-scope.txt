@@ -14,3 +14,4 @@
 # scheduler's gates, env interpolation, the parser surface.
 
 src/naming.rs
+src/executor/pruning.rs
