@@ -96,7 +96,13 @@ tasks:
 #[test]
 fn action_bodies_are_not_interpolated_so_dollar_dollar_is_not_an_escape_there() {
     let temp = TempDir::new().expect("tempdir");
-    std::fs::write(temp.path().join("data.txt"), "alpha beta\ngamma delta\n").expect("write data");
+    // Field 1 is a NUMBER on purpose. `$$1` is awk's `$($1)`, and that is only
+    // well defined across awks when field 1 reads as a field index: gawk coerces
+    // a non-numeric "alpha" to 0 and prints `$0`, while the BWK awk macOS ships
+    // rejects it outright ("illegal field $(alpha)"). With `2` there, both awks
+    // agree that `$($1)` is field 2, and the two task bodies still differ
+    // observably, which is the whole point of the test.
+    std::fs::write(temp.path().join("data.txt"), "2 alpha beta\n2 gamma delta\n").expect("write data");
     let ottofile = write_ottofile(
         temp.path(),
         r#"
@@ -136,21 +142,24 @@ tasks:
     );
 
     // `$1` is the first field, which is what a user wants.
+    assert!(single_out.contains('2'), "`$1` must print field 1:\n{single_out}");
     assert!(
-        single_out.contains("alpha"),
-        "`$1` must print the first field:\n{single_out}"
-    );
-    assert!(
-        !single_out.contains("alpha beta"),
-        "`$1` must not print the whole line:\n{single_out}"
+        !single_out.contains("alpha"),
+        "`$1` must print field 1 and nothing else:\n{single_out}"
     );
 
-    // `$$1` reaches awk verbatim and is read as `$($1)`, printing the whole
-    // line. If otto ever interpolated action bodies, this would print `alpha`
-    // and match `single` instead.
+    // `$$1` reaches awk verbatim and is read as `$($1)`, so it prints field 2.
+    // If otto ever interpolated action bodies, `$$` would collapse to `$` and
+    // this would print field 1, matching `single` instead. The difference is
+    // the assertion.
     assert!(
-        doubled_out.contains("alpha beta"),
+        doubled_out.contains("alpha"),
         "`$$1` in an action must reach awk verbatim, not be escaped by otto:\n{doubled_out}"
+    );
+    assert_ne!(
+        doubled_out.trim(),
+        single_out.trim(),
+        "an interpolated action body would make these agree; they must not"
     );
 }
 

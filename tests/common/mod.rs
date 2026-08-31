@@ -104,3 +104,20 @@ pub fn pty_cmd(argv: &[&str]) -> std::process::Command {
 fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', r"'\''"))
 }
+
+/// The child's own output from a [`pty_cmd`] run, with the pty's echo stripped.
+///
+/// BSD `script` forwards its own stdin to the pty, and `cargo test` gives it no
+/// terminal, so it reads EOF immediately and the pty echoes the EOF character
+/// before the child writes anything: the stream opens with the four bytes
+/// `^D\x08\x08`, the terminal's rendering of a control-D it then erases.
+/// util-linux `script` does not do this. That prefix is `script` talking, not
+/// the program under test, and it made a YAML parse fail at position 2 with
+/// "control characters are not allowed" on macOS only.
+///
+/// `\r` goes too: a pty terminates lines with CRLF on both platforms.
+pub fn pty_stdout(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let text = text.strip_prefix("^D").unwrap_or(&text).trim_start_matches('\u{8}');
+    text.replace('\r', "")
+}

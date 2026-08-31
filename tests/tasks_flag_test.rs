@@ -223,7 +223,7 @@ fn tasks_defaults_to_yaml_on_a_real_tty() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout = common::pty_stdout(&output.stdout);
     // A tty must yield YAML: it must not parse as JSON's `{...}` object shape,
     // and it must parse as YAML with the same key set --tasks always reports.
     assert!(
