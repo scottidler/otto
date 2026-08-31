@@ -68,12 +68,10 @@ impl StatsCommand {
         };
 
         let mut table = Table::new();
-        table
-            .load_style(UTF8_FULL.with_rounded_corners())
-            .set_header(vec![
-                Cell::new("Metric").set_alignment(CellAlignment::Left),
-                Cell::new("Value").set_alignment(CellAlignment::Right),
-            ]);
+        table.load_style(UTF8_FULL.with_rounded_corners()).set_header(vec![
+            Cell::new("Metric").set_alignment(CellAlignment::Left),
+            Cell::new("Value").set_alignment(CellAlignment::Right),
+        ]);
 
         table.add_row(vec![
             Cell::new("Total Runs").set_alignment(CellAlignment::Left),
@@ -118,17 +116,15 @@ impl StatsCommand {
             println!("\n{}", format!("Top {} Tasks by Execution Count", self.limit).bold());
 
             let mut task_table = Table::new();
-            task_table
-                .load_style(UTF8_FULL.with_rounded_corners())
-                .set_header(vec![
-                    Cell::new("Project").set_alignment(CellAlignment::Left),
-                    Cell::new("Task").set_alignment(CellAlignment::Left),
-                    Cell::new("Total").set_alignment(CellAlignment::Right),
-                    Cell::new("Success").set_alignment(CellAlignment::Right),
-                    Cell::new("Failed").set_alignment(CellAlignment::Right),
-                    Cell::new("Success Rate").set_alignment(CellAlignment::Right),
-                    Cell::new("Avg Duration").set_alignment(CellAlignment::Right),
-                ]);
+            task_table.load_style(UTF8_FULL.with_rounded_corners()).set_header(vec![
+                Cell::new("Project").set_alignment(CellAlignment::Left),
+                Cell::new("Task").set_alignment(CellAlignment::Left),
+                Cell::new("Total").set_alignment(CellAlignment::Right),
+                Cell::new("Success").set_alignment(CellAlignment::Right),
+                Cell::new("Failed").set_alignment(CellAlignment::Right),
+                Cell::new("Success Rate").set_alignment(CellAlignment::Right),
+                Cell::new("Avg Duration").set_alignment(CellAlignment::Right),
+            ]);
 
             for task in &task_stats {
                 let total_attempted = task.successful_executions + task.failed_executions;
@@ -186,12 +182,10 @@ impl StatsCommand {
             };
 
             let mut table = Table::new();
-            table
-                .load_style(UTF8_FULL.with_rounded_corners())
-                .set_header(vec![
-                    Cell::new("Metric").set_alignment(CellAlignment::Left),
-                    Cell::new("Value").set_alignment(CellAlignment::Right),
-                ]);
+            table.load_style(UTF8_FULL.with_rounded_corners()).set_header(vec![
+                Cell::new("Metric").set_alignment(CellAlignment::Left),
+                Cell::new("Value").set_alignment(CellAlignment::Right),
+            ]);
 
             table.add_row(vec![
                 Cell::new("Project").set_alignment(CellAlignment::Left),
@@ -277,16 +271,14 @@ impl StatsCommand {
         } else {
             // Multiple projects - show table view
             let mut table = Table::new();
-            table
-                .load_style(UTF8_FULL.with_rounded_corners())
-                .set_header(vec![
-                    Cell::new("Project").set_alignment(CellAlignment::Left),
-                    Cell::new("Total").set_alignment(CellAlignment::Right),
-                    Cell::new("Success").set_alignment(CellAlignment::Right),
-                    Cell::new("Failed").set_alignment(CellAlignment::Right),
-                    Cell::new("Success Rate").set_alignment(CellAlignment::Right),
-                    Cell::new("Avg Duration").set_alignment(CellAlignment::Right),
-                ]);
+            table.load_style(UTF8_FULL.with_rounded_corners()).set_header(vec![
+                Cell::new("Project").set_alignment(CellAlignment::Left),
+                Cell::new("Total").set_alignment(CellAlignment::Right),
+                Cell::new("Success").set_alignment(CellAlignment::Right),
+                Cell::new("Failed").set_alignment(CellAlignment::Right),
+                Cell::new("Success Rate").set_alignment(CellAlignment::Right),
+                Cell::new("Avg Duration").set_alignment(CellAlignment::Right),
+            ]);
 
             for stat in &stats {
                 let total_attempted = stat.successful_executions + stat.failed_executions;

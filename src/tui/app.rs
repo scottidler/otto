@@ -60,26 +60,27 @@ impl TuiApp {
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
         loop {
             // Draw UI
-            terminal.draw(|f| {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),    // Main content area
-                        Constraint::Length(3), // Status bar (3 lines with border)
-                    ])
-                    .split(f.area());
+            terminal
+                .draw(|f| {
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Min(1),    // Main content area
+                            Constraint::Length(3), // Status bar (3 lines with border)
+                        ])
+                        .split(f.area());
 
-                // Render main content
-                if self.fullscreen_mode {
-                    self.layout.render_fullscreen(f, chunks[0]);
-                } else {
-                    self.layout.render(f, chunks[0]);
-                }
+                    // Render main content
+                    if self.fullscreen_mode {
+                        self.layout.render_fullscreen(f, chunks[0]);
+                    } else {
+                        self.layout.render(f, chunks[0]);
+                    }
 
-                // Render status bar
-                self.render_status_bar(f, chunks[1]);
-            })
-            .map_err(|e| io::Error::other(e.to_string()))?;
+                    // Render status bar
+                    self.render_status_bar(f, chunks[1]);
+                })
+                .map_err(|e| io::Error::other(e.to_string()))?;
 
             // Handle events with timeout
             let timeout = self
