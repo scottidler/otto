@@ -112,16 +112,35 @@ if [[ "$outcome_total" -eq 0 ]]; then
     exit 1
 fi
 
-# cargo-mutants announces "Found N mutants to test" before it starts. If the
-# outcomes do not add up to N the run did not finish, however it exited.
-found=$(grep -oE 'Found [0-9]+ mutants to test' "$RESULTS/debug.log" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || true)
-if [[ -n "$found" && "$outcome_total" -ne "$found" ]]; then
+# Reconcile against cargo-mutants' own total. If the outcomes do not add up, the
+# run did not finish, however it exited.
+#
+# Read from outcomes.json, not from the console log. The first version of this
+# grepped debug.log for "Found N mutants to test", a string that is not in it -
+# so `found` was always empty, the comparison was always skipped, and the check
+# could never fire. A check that cannot fire is the same defect this whole gate
+# exists to catch, and it is the third time in this audit that a grep looking in
+# the wrong place read as a clean result. Hence: a structured field, and a hard
+# failure when it is absent rather than a skip.
+OUTCOMES="$RESULTS/outcomes.json"
+if [[ ! -f "$OUTCOMES" ]]; then
+    echo "mutants-gate: $OUTCOMES does not exist; cannot confirm the run was complete" >&2
+    exit 1
+fi
+
+found=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["total_mutants"])' "$OUTCOMES" 2>/dev/null || true)
+if [[ -z "$found" ]]; then
+    echo "mutants-gate: $OUTCOMES has no total_mutants field; cannot confirm the run was complete" >&2
+    exit 1
+fi
+
+if [[ "$outcome_total" -ne "$found" ]]; then
     echo "mutants-gate: incomplete run. cargo-mutants found $found mutants but only $outcome_total have outcomes." >&2
     echo "  A partial run cannot clear the gate; rerun without a wall-clock cap." >&2
     exit 1
 fi
 
-echo "mutants-gate: $outcome_total mutants accounted for (${found:-unknown} found)"
+echo "mutants-gate: $outcome_total of $found mutants accounted for"
 
 # Sorted so the comparison is order-independent; cargo-mutants does not promise
 # a stable order between runs.

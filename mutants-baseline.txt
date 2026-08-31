@@ -1,0 +1,2 @@
+src/executor/pruning.rs:230:24: replace < with <= in written_recently
+src/executor/pruning.rs:72:16: replace < with <= in auto_prune

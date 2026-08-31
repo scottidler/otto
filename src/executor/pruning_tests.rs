@@ -76,6 +76,40 @@ fn age_out(path: &Path) {
     filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
 }
 
+/// The grace period's actual value, not just its sign.
+///
+/// `CACHE_PRUNE_GRACE` is `15 * 60`, and `cargo mutants` showed that `15 + 60`
+/// survived the whole suite: every cache test backdates with `age_out`, which
+/// subtracts the grace period *plus* a minute, so an entry is "aged" under a
+/// 900-second grace and a 75-second one alike, and the fresh-entry test writes at
+/// the current instant, which is fresh under both. The constant was free to be
+/// almost anything.
+///
+/// Two ages either side of a wrong-but-plausible value pin it: 5 minutes must be
+/// spared (it is inside 15 minutes, but outside 75 seconds) and 20 minutes must
+/// be removed. A grace of 75 seconds prunes the 5-minute entry and fails here.
+#[test]
+fn prune_orphaned_cache_grace_period_is_fifteen_minutes() {
+    for (label, age, expect_kept) in [
+        ("five minutes: inside the grace period", Duration::from_secs(5 * 60), true),
+        ("twenty minutes: past it", Duration::from_secs(20 * 60), false),
+    ] {
+        let temp_dir = TempDir::new().unwrap();
+        let entry = cache_fixture(temp_dir.path(), "abc123.sh", false);
+        let backdated = SystemTime::now() - age;
+        filetime::set_file_mtime(&entry, filetime::FileTime::from_system_time(backdated)).unwrap();
+
+        prune_orphaned_cache(temp_dir.path()).unwrap();
+
+        assert_eq!(
+            entry.exists(),
+            expect_kept,
+            "{label}: an unreferenced cache entry aged {age:?} should have been {}",
+            if expect_kept { "spared" } else { "removed" }
+        );
+    }
+}
+
 #[test]
 fn prune_orphaned_cache_removes_an_aged_unreferenced_entry() {
     let temp_dir = TempDir::new().unwrap();
