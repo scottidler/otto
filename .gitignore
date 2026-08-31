@@ -33,3 +33,6 @@ examples/*/target/
 lcov.info
 tarpaulin-report.html
 examples/_test_broken/
+
+# cargo-mutants working output (see bin/mutants-gate)
+/mutants.out/
