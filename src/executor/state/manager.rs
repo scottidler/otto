@@ -466,23 +466,25 @@ impl StateManager {
     /// Get overall system statistics
     pub fn get_overall_stats(&self) -> Result<OverallStats> {
         self.db.with_connection(|conn| {
-            let total_runs: u64 = conn.query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))?;
+            let total_runs: u64 =
+                conn.query_row("SELECT COUNT(*) FROM runs", [], |row| row.get::<_, i64>(0))? as u64;
 
             let successful_runs: u64 =
                 conn.query_row("SELECT COUNT(*) FROM runs WHERE status = 'success'", [], |row| {
-                    row.get(0)
-                })?;
+                    row.get::<_, i64>(0)
+                })? as u64;
 
             let failed_runs: u64 = conn.query_row("SELECT COUNT(*) FROM runs WHERE status = 'failed'", [], |row| {
-                row.get(0)
-            })?;
+                row.get::<_, i64>(0)
+            })? as u64;
 
             let running_runs: u64 =
                 conn.query_row("SELECT COUNT(*) FROM runs WHERE status = 'running'", [], |row| {
-                    row.get(0)
-                })?;
+                    row.get::<_, i64>(0)
+                })? as u64;
 
-            let total_tasks: u64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
+            let total_tasks: u64 =
+                conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))? as u64;
 
             // These used to be `unwrap_or(0)` / `unwrap_or(0.0)`: a broken stats
             // query reported a healthy zero instead of an error, so "no disk
@@ -564,8 +566,8 @@ impl StateManager {
                      JOIN runs r ON t.run_id = r.id
                      WHERE t.name = ?1 AND r.project_id = ?2",
                     params![task_name, project_id],
-                    |row| row.get(0),
-                )?;
+                    |row| row.get::<_, i64>(0),
+                )? as u64;
 
                 let successful_executions: u64 = conn.query_row(
                     "SELECT COUNT(*)
@@ -573,8 +575,8 @@ impl StateManager {
                      JOIN runs r ON t.run_id = r.id
                      WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'completed'",
                     params![task_name, project_id],
-                    |row| row.get(0),
-                )?;
+                    |row| row.get::<_, i64>(0),
+                )? as u64;
 
                 let failed_executions: u64 = conn.query_row(
                     "SELECT COUNT(*)
@@ -582,8 +584,8 @@ impl StateManager {
                      JOIN runs r ON t.run_id = r.id
                      WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'failed'",
                     params![task_name, project_id],
-                    |row| row.get(0),
-                )?;
+                    |row| row.get::<_, i64>(0),
+                )? as u64;
 
                 let skipped_executions: u64 = conn.query_row(
                     "SELECT COUNT(*)
@@ -591,8 +593,8 @@ impl StateManager {
                      JOIN runs r ON t.run_id = r.id
                      WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'skipped'",
                     params![task_name, project_id],
-                    |row| row.get(0),
-                )?;
+                    |row| row.get::<_, i64>(0),
+                )? as u64;
 
                 let avg_duration_seconds: Option<f64> = conn
                     .query_row(
@@ -726,8 +728,8 @@ impl StateManager {
                      JOIN runs r ON t.run_id = r.id
                      WHERE t.name = ?1 AND r.project_id = ?2",
                     params![&task_name, project_id],
-                    |row| row.get(0),
-                )?;
+                    |row| row.get::<_, i64>(0),
+                )? as u64;
 
                 if total_executions == 0 {
                     continue;
@@ -739,8 +741,8 @@ impl StateManager {
                      JOIN runs r ON t.run_id = r.id
                      WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'completed'",
                     params![&task_name, project_id],
-                    |row| row.get(0),
-                )?;
+                    |row| row.get::<_, i64>(0),
+                )? as u64;
 
                 let failed_executions: u64 = conn.query_row(
                     "SELECT COUNT(*)
@@ -748,8 +750,8 @@ impl StateManager {
                      JOIN runs r ON t.run_id = r.id
                      WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'failed'",
                     params![&task_name, project_id],
-                    |row| row.get(0),
-                )?;
+                    |row| row.get::<_, i64>(0),
+                )? as u64;
 
                 let skipped_executions: u64 = conn.query_row(
                     "SELECT COUNT(*)
@@ -757,8 +759,8 @@ impl StateManager {
                      JOIN runs r ON t.run_id = r.id
                      WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'skipped'",
                     params![&task_name, project_id],
-                    |row| row.get(0),
-                )?;
+                    |row| row.get::<_, i64>(0),
+                )? as u64;
 
                 let avg_duration_seconds: Option<f64> = conn
                     .query_row(

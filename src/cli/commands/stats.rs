@@ -1,6 +1,6 @@
 use chrono::{DateTime, Local, TimeZone, Utc};
 use colored::Colorize;
-use comfy_table::{Cell, CellAlignment, Table, modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL};
+use comfy_table::{Cell, CellAlignment, Table, presets::UTF8_FULL};
 use eyre::Result;
 use std::sync::Arc;
 
@@ -69,8 +69,7 @@ impl StatsCommand {
 
         let mut table = Table::new();
         table
-            .load_preset(UTF8_FULL)
-            .apply_modifier(UTF8_ROUND_CORNERS)
+            .load_style(UTF8_FULL.with_rounded_corners())
             .set_header(vec![
                 Cell::new("Metric").set_alignment(CellAlignment::Left),
                 Cell::new("Value").set_alignment(CellAlignment::Right),
@@ -120,8 +119,7 @@ impl StatsCommand {
 
             let mut task_table = Table::new();
             task_table
-                .load_preset(UTF8_FULL)
-                .apply_modifier(UTF8_ROUND_CORNERS)
+                .load_style(UTF8_FULL.with_rounded_corners())
                 .set_header(vec![
                     Cell::new("Project").set_alignment(CellAlignment::Left),
                     Cell::new("Task").set_alignment(CellAlignment::Left),
@@ -189,8 +187,7 @@ impl StatsCommand {
 
             let mut table = Table::new();
             table
-                .load_preset(UTF8_FULL)
-                .apply_modifier(UTF8_ROUND_CORNERS)
+                .load_style(UTF8_FULL.with_rounded_corners())
                 .set_header(vec![
                     Cell::new("Metric").set_alignment(CellAlignment::Left),
                     Cell::new("Value").set_alignment(CellAlignment::Right),
@@ -281,8 +278,7 @@ impl StatsCommand {
             // Multiple projects - show table view
             let mut table = Table::new();
             table
-                .load_preset(UTF8_FULL)
-                .apply_modifier(UTF8_ROUND_CORNERS)
+                .load_style(UTF8_FULL.with_rounded_corners())
                 .set_header(vec![
                     Cell::new("Project").set_alignment(CellAlignment::Left),
                     Cell::new("Total").set_alignment(CellAlignment::Right),

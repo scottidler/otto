@@ -151,7 +151,7 @@ impl<F: FileSystem> Workspace<F> {
 
         let mut hasher = Sha256::new();
         hasher.update(root.to_string_lossy().as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = hex::encode(hasher.finalize());
         let hash = hash[..8].to_string();
 
         Self::new_with_hash_and_fs(root, name, hash, fs).await

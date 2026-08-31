@@ -78,7 +78,8 @@ impl TuiApp {
 
                 // Render status bar
                 self.render_status_bar(f, chunks[1]);
-            })?;
+            })
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
             // Handle events with timeout
             let timeout = self
