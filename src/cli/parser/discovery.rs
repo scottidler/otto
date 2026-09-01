@@ -224,7 +224,7 @@ impl Parser {
 
         // Step 0.5: Expand foreach tasks into subtasks
         let mut deferred_foreach: HashSet<String> = HashSet::new();
-        let (mut expanded_tasks, serial_membership) =
+        let (mut expanded_tasks, serial_membership, display_order) =
             self.expand_foreach_tasks_with_serial(&serial_tasks, requested_tasks, &mut deferred_foreach)?;
 
         // Step 0.6: Desugar `on-failure:` into synthetic `after:` edges.
@@ -368,6 +368,13 @@ impl Parser {
             if let Some((group, index)) = serial_membership.get(task_name) {
                 task.serial_group = Some(group.clone());
                 task.serial_index = *index;
+            }
+
+            // Carry the buffered-foreach display-order map through to the
+            // scheduler; read only by the Phase 4 replay cursor. Present only
+            // for a foreach virtual parent, keyed by the same task_name.
+            if let Some(subtask_names) = display_order.get(task_name) {
+                task.foreach_display_order = Some(subtask_names.clone());
             }
 
             cli_provided_params.insert(task_name.clone(), cli_provided);

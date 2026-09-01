@@ -60,6 +60,12 @@ pub struct Task {
     /// no `[task]` prefix, and the whole semaphore held for its duration so no
     /// other task runs alongside it.
     pub tty: bool,
+    /// For a foreach virtual parent (buffered or not): its subtask names, in
+    /// declared item order. `None` for every non-foreach task. Additive;
+    /// carried from `cli::parser::Task::foreach_display_order` and read only
+    /// by the Phase 4 replay cursor (design doc
+    /// `2026-08-31-buffered-foreach-computed-envs-required-params.md`, Phase 3).
+    pub foreach_display_order: Option<Vec<String>>,
 }
 
 impl Task {
@@ -101,6 +107,7 @@ impl Task {
             serial_group: None,
             serial_index: 0,
             tty: false,
+            foreach_display_order: None,
         }
     }
 
@@ -254,6 +261,7 @@ impl From<crate::cli::parser::Task> for Task {
         task.serial_group = parser_task.serial_group;
         task.serial_index = parser_task.serial_index;
         task.tty = parser_task.tty;
+        task.foreach_display_order = parser_task.foreach_display_order;
         task
     }
 }

@@ -47,6 +47,7 @@ impl Default for ForeachSpec {
             var_name: default_as(),
             parallel: default_parallel(),
             max_items: default_max_items(),
+            buffer: false,
         }
     }
 }
@@ -91,6 +92,17 @@ pub struct ForeachSpec {
     /// Maximum number of items before erroring (default: 1000)
     #[serde(default = "default_max_items")]
     pub max_items: usize,
+
+    /// Run subtasks concurrently but print each subtask's output as one
+    /// contiguous block, in foreach item order (design doc
+    /// `2026-08-31-buffered-foreach-computed-envs-required-params.md`, Phase 3).
+    /// This phase is schema-only: the key loads and is validated, but nothing
+    /// yet changes emission order (Phase 4). `buffer: true` combined with
+    /// `tty: true` on the same task is rejected at load
+    /// (`Parser::validate_foreach_buffer`): a tty task owns the terminal
+    /// exclusively, so there is nothing to buffer.
+    #[serde(default)]
+    pub buffer: bool,
 }
 
 /// Represents a single item from foreach expansion

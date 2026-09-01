@@ -942,6 +942,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         var_name: _,
         parallel: _,
         max_items: _,
+        buffer: _,
     } = ForeachSpec::default();
     let TaskSpecHelper {
         help: _,
@@ -1009,7 +1010,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         ),
         (
             "ForeachSpec",
-            7,
+            8,
             expected_keys_from_deny_unknown_fields::<ForeachSpec>,
             foreach_path,
         ),
@@ -1054,8 +1055,8 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         total += keys.len();
     }
     assert_eq!(
-        total, 44,
-        "total on-disk key count drifted from the design doc's count of 44"
+        total, 45,
+        "total on-disk key count drifted from the design doc's count of 45"
     );
 
     // The per-key loop above only proves each key *name* appears somewhere on

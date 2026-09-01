@@ -260,6 +260,7 @@ fn create_test_task(name: &str) -> Task {
         serial_group: None,
         serial_index: 0,
         tty: false,
+        foreach_display_order: None,
     }
 }
 

@@ -29,6 +29,13 @@ impl Parser {
     /// different things, and edges are the latter (see the Phase 4 design bullet in
     /// docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md).
     ///
+    /// A third map, `DisplayOrderMap`, records `parent task name -> subtask names`
+    /// in declared foreach item order, for every foreach expansion (parallel and
+    /// serial alike, mirroring `OTTO_FOREACH_INDEX`). It is additive and carries no
+    /// scheduling meaning of its own; the buffered-foreach replay cursor (design
+    /// doc `2026-08-31-buffered-foreach-computed-envs-required-params.md`,
+    /// Phase 4) is its only reader.
+    ///
     /// `requested_tasks` gates command-sourced foreach: a task the run can't
     /// reach is left unexpanded so its command never runs (`otto build` must
     /// not execute an unrelated `up` task's command source). `deferred`
@@ -39,9 +46,10 @@ impl Parser {
         serial_tasks: &HashSet<String>,
         requested_tasks: &[String],
         deferred: &mut HashSet<String>,
-    ) -> Result<(TaskSpecs, SerialMembership)> {
+    ) -> Result<(TaskSpecs, SerialMembership, DisplayOrderMap)> {
         let mut expanded: TaskSpecs = TaskSpecs::new();
         let mut membership: SerialMembership = HashMap::new();
+        let mut display_order: DisplayOrderMap = HashMap::new();
         let reachable = self.reachable_task_names(requested_tasks);
 
         for (name, spec) in &self.config_spec.tasks {
@@ -67,6 +75,11 @@ impl Parser {
                     // Zero matches - just keep the virtual parent for dependency tracking
                     log::warn!("foreach task '{}' expanded to 0 subtasks", name);
                 }
+
+                // Record display order before `subtasks` is consumed below.
+                // Declared item order here is the same order `expand_foreach_with_items`
+                // assigned each subtask's `OTTO_FOREACH_INDEX` in, so the two never drift.
+                display_order.insert(name.clone(), subtasks.iter().map(|st| st.name.clone()).collect());
 
                 // Check if this task should run serially (CLI --Serial flag OR config parallel: false)
                 let run_serial = serial_tasks.contains(name) || spec.foreach.as_ref().is_some_and(|f| !f.parallel);
@@ -117,7 +130,7 @@ impl Parser {
             }
         }
 
-        Ok((expanded, membership))
+        Ok((expanded, membership, display_order))
     }
 
     /// Collect all tasks needed to run a given task, including:

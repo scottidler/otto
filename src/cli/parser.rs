@@ -431,6 +431,14 @@ impl std::error::Error for OttofileNotFound {}
 /// Serial foreach group membership: subtask name -> (group name, order index).
 type SerialMembership = HashMap<String, (String, usize)>;
 
+/// Buffered-foreach display order: parent task name -> subtask names in
+/// declared foreach item order (design doc
+/// `2026-08-31-buffered-foreach-computed-envs-required-params.md`, Phase 3).
+/// Additive: built alongside `SerialMembership` at the same enumeration site
+/// and read only by the Phase 4 replay cursor. Unlike the serial-ordering
+/// fields above, this covers every foreach expansion, not just serial ones.
+type DisplayOrderMap = HashMap<String, Vec<String>>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Task {
     pub name: String,
@@ -454,6 +462,12 @@ pub struct Task {
     /// Carried from `TaskSpec::tty` so the `--tui` conflict is decidable before
     /// anything runs (`app::execute_tasks`).
     pub tty: bool,
+    /// For a foreach virtual parent (buffered or not): its subtask names, in
+    /// declared item order, mirroring each subtask's own `OTTO_FOREACH_INDEX`.
+    /// `None` for every non-foreach task. Additive; read only by the Phase 4
+    /// replay cursor, which needs it only when `buffer: true` (design doc,
+    /// Phase 3).
+    pub foreach_display_order: Option<Vec<String>>,
 }
 
 impl Task {
@@ -481,6 +495,7 @@ impl Task {
             serial_group: None,
             serial_index: 0,
             tty: false,
+            foreach_display_order: None,
         }
     }
 

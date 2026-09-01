@@ -120,7 +120,7 @@ here too.
 | `tasks.<name>.after[].task` | string | none (**required**) | Name of the task this edge refers to. Same key at `tasks.<name>.before[].task`. |
 | `tasks.<name>.after[].when` | string: `success`\|`failure`\|`always` | `success` | Condition under which this edge fires. Same key at `tasks.<name>.before[].when`. |
 
-## `tasks.<name>.foreach:` (`ForeachSpec`) — 7 keys
+## `tasks.<name>.foreach:` (`ForeachSpec`) — 8 keys
 
 | key | type | default | notes |
 |---|---|---|---|
@@ -131,6 +131,7 @@ here too.
 | `tasks.<name>.foreach.as` | string | `"item"` | **Kebab-shaped on disk** (the Rust field is `var_name`, renamed). Variable name bound to the current item in each subtask. |
 | `tasks.<name>.foreach.parallel` | boolean | `true` | Whether subtasks run concurrently or serially. This is the key that must live HERE, not one level up on the task — the motivating bug for this whole design doc was `parallel:` written beside `foreach:` instead of inside it. |
 | `tasks.<name>.foreach.max_items` | integer | `1000` | Maximum item count before erroring. |
+| `tasks.<name>.foreach.buffer` | boolean | `false` | Run subtasks concurrently but print each subtask's output as one contiguous block, in item order. Rejected at load if the task also sets `tty: true` (a tty task owns the terminal exclusively). |
 
 ## `tasks.<name>.params.<title>:` (`ParamSpec`) — 7 keys
 
@@ -297,10 +298,10 @@ accept arbitrary keys:
 3. **`params:` (`tasks.<name>.params`)** — keys are rich param titles parsed
    by `divine()`, values are `tasks.<name>.params.<title>:`.
 
-## Total: 44 fixed keys across the seven structs
+## Total: 45 fixed keys across the seven structs
 
-`ConfigSpec` 2 + `OttoSpec` 8 + `RetentionSpec` 5 + `ForeachSpec` 7 +
-`TaskSpecHelper` 13 + `ParamSpec` 7 + `EdgeSpec` 2 = **44**. This count, and
+`ConfigSpec` 2 + `OttoSpec` 8 + `RetentionSpec` 5 + `ForeachSpec` 8 +
+`TaskSpecHelper` 13 + `ParamSpec` 7 + `EdgeSpec` 2 = **45**. This count, and
 every key name above, is pinned by an automated drift test
 (`ottofile_reference_key_inventory_is_exhaustive`, in
 `src/cfg/task.rs`'s `#[cfg(test)]` module): it destructures a live instance of
@@ -309,7 +310,7 @@ gains or loses a field, before any test even runs) and separately recovers
 each struct's real on-disk key list from its "unknown field" error message
 (fed a deliberately bogus key — `deny_unknown_fields`'s derive-generated
 error for the six Architecture-table structs, `EdgeSpec`'s hand-written
-`visit_map` error for the seventh), then asserts every one of those 44
+`visit_map` error for the seventh), then asserts every one of those 45
 recovered keys is mentioned, verbatim, on this page. The stated total and the
 per-struct arithmetic in this section are pinned by the same test, so a wrong
 count here is a red build rather than a footnote nobody re-adds up. If this

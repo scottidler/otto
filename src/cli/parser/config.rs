@@ -65,6 +65,10 @@ impl Parser {
             // Shape-only, executes nothing.
             Self::validate_required_params(&config_spec)?;
 
+            // Reject `foreach.buffer: true` combined with `tty: true` on the
+            // same task. Shape-only, executes nothing.
+            Self::validate_foreach_buffer(&config_spec)?;
+
             Ok((config_spec, hash, Some(ottofile)))
         } else {
             Err(eyre!("{}", ottofile_not_found_message()))
@@ -106,6 +110,27 @@ impl Parser {
                 } else {
                     last_optional_positional = Some(param_spec.name.as_str());
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// `foreach.buffer: true` together with `tty: true` on the same task is a
+    /// load error: a `tty` task owns the terminal exclusively and runs
+    /// exclusively (design doc `2026-08-31-buffered-foreach-computed-envs-
+    /// required-params.md`, Phase 3), so there is nothing left to buffer.
+    /// `tty: true` on a foreach task WITHOUT `buffer` is unaffected and keeps
+    /// printing its today's unprefixed contiguous blocks.
+    fn validate_foreach_buffer(config: &ConfigSpec) -> Result<()> {
+        for (task_name, task_spec) in &config.tasks {
+            let Some(foreach) = &task_spec.foreach else {
+                continue;
+            };
+            if foreach.buffer && task_spec.tty == Some(true) {
+                return Err(eyre!(
+                    "Task '{task_name}': foreach.buffer cannot be combined with tty; \
+                     a tty task owns the terminal exclusively, so there is nothing to buffer"
+                ));
             }
         }
         Ok(())
