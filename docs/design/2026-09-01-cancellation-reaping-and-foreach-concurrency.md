@@ -2,8 +2,8 @@
 
 **Author:** Scott A. Idler
 **Date:** 2026-09-01
-**Status:** Draft
-**Review Passes Completed:** 4/5 (draft, correctness, clarity, edge cases; excellence pass not run)
+**Status:** In Review
+**Review Passes Completed:** 4/5 (draft, correctness, clarity, edge cases; excellence pass not run), plus review-panel round 1 (Architect + Staff Engineer), all findings dispositioned below
 
 ## Summary
 
@@ -81,7 +81,7 @@ otto: unsupported api version '2' (this otto supports: 1). upgrade otto.
 
 - **A general job-control or process-supervision layer.** One grace period, one group signal. Excluded, not parked.
 - **Changing what `-j`/`otto.jobs` mean globally.** The new key is an override at one seam, not a redefinition.
-- **Retrofitting the good upgrade message onto already-released binaries.** Impossible: v2.0.5 is published. Parked with a revisit condition: none, it is physics.
+- **Retrofitting the good upgrade message onto already-released binaries.** Impossible: v2.0.5 is published, and no otto change reaches it. That gap is covered on the otto-dev side by the `bin/ttv` floor check. Excluded, not parked.
 - **Windows.** otto's process-group handling is already `#[cfg(unix)]`. Excluded.
 - **`--tasks` laziness.** See Alternatives; the resolution is contractual, not waste.
 
@@ -95,30 +95,45 @@ Three otto changes and two otto-dev changes, in that dependency order.
 |---|---|---|
 | 1 | otto | Reap the task's process group on cancel: SIGTERM to `-pgid`, grace, SIGKILL to `-pgid` |
 | 2 | otto | `tasks.<name>.foreach.jobs: all \| <N>` |
-| 3 | otto | `SUPPORTED_API_VERSIONS` gains `"2"`; the unknown-field error names the upgrade |
-| 4 | otto-dev | Version floor check in `bin/ttv` before `exec`; `otto.api: 2`; `foreach.jobs: all` on `logs`; `lib.sh` comment corrected |
+| 3 | otto | The unknown-field parse error names the upgrade (NOT an api bump: see Resolved Decisions) |
+| 4 | otto-dev | Version floor check in `bin/ttv` before `exec`; `foreach.jobs: all` on `logs`; the stale comment corrected in BOTH `scripts/lib.sh:132-135` and `CLAUDE.md:49-52` |
 | 5 | both | Correct the release post's teardown sentence |
 
 ### Architecture
 
 **Group reaping.** The child handles live inside the spawned task bodies, not in the scheduler, so the scheduler cannot reach them today. Add a live-child registry the body writes into:
 
-- `Arc<Mutex<HashMap<String, ChildHandle>>>` on the scheduler, where `ChildHandle { pid: u32, own_group: bool }`.
+- `Arc<Mutex<HashMap<String, ChildHandle>>>` hung off `ActiveTasks`, where `ChildHandle { pid: u32, own_group: bool }`. Conceptually it belongs there rather than as disconnected bookkeeping: `ActiveTasks` is already the answer to "what is in flight".
 - The body inserts after spawn and removes on exit, in both the success and failure paths.
-- `abandon_run` walks the registry before `abort_all`: for each `own_group` entry, `killpg(pid, SIGTERM)`; sleep `CANCEL_GRACE`; `killpg(pid, SIGKILL)` for anything still present. Entries with `own_group: false` (a `tty: true` task, which deliberately stays in otto's group) get a direct `kill(pid, ...)`, never a group signal: otto is in that group and would signal itself.
+- **`abandon_run` takes a SNAPSHOT of the registry before signalling anything, and both passes iterate the snapshot.** For each `own_group` entry: `killpg(pid, SIGTERM)`; sleep `CANCEL_GRACE`; `killpg(pid, SIGKILL)` over **the same snapshot**, not over whatever is still in the live registry. Entries with `own_group: false` (a `tty: true` task, which deliberately stays in otto's group) get a direct `kill(pid, ...)`, never a group signal: otto is in that group and would signal itself.
 - `abort_all` still runs after, so `kill_on_drop` remains the backstop rather than the mechanism.
+
+**Why the snapshot, spelled out, because the obvious version is wrong.** Panel round 1, both seats independently: if the SIGKILL pass asks the live registry for "anything still present", it misses the exact case the pass exists for. The `CANCEL_GRACE` sleep yields to the executor; the direct child (which took the SIGTERM) exits; its body wakes and removes its own registry entry; a SIGTERM-ignoring grandchild is still alive in a process group that is still valid. The second pass then finds an empty registry and signals nothing. The fix is free: capture the pgid list once, up front, and use it twice.
+
+A process group outliving its leader is fine and was measured by the staff seat: leader 9, child 10, `pgid 9`; after the leader exits the child is still in group 9; `kill -TERM -9` then reaps it. So the only ordering hazard is the registry one above, not a stale-pgid one. Pid reuse inside `CANCEL_GRACE` remains theoretically possible and is accepted: the window is one grace period on a pid otto itself created and has not reaped.
+
+Signal errors: `ESRCH` on the second pass is the expected success case (the group already died) and is ignored. `EPERM` is loud, since it means otto is signalling something it does not own.
 
 `CANCEL_GRACE` is a hard-coded const beside `OUTPUT_PROCESSING_TIMEOUT_SECS` (`scheduler.rs:35`), matching that precedent. It is teardown timing, not a user tunable.
 
-**Per-group concurrency.** The scheduler gates on one `Semaphore::new(max_parallel)` (`scheduler.rs:884`), and a `tty: true` task acquires all `max_parallel` permits to make itself exclusive (`permits_for`, `:326-337`). A group override must not break that exclusivity, so:
+**Per-group concurrency.** There are TWO gates, not one, and the first draft of this doc addressed only the second. Panel round 1, staff seat, confirmed at file:line:
 
-- A foreach parent carrying `jobs` acquires **one** permit from the shared semaphore for the group as a whole.
-- Its items acquire from a per-group semaphore instead: `Semaphore::new(N)`, or `Semaphore::new(item_count)` for `all`.
-- Net effect: a `tty` task is still exclusive against the group (the group holds a shared permit), and the group's items are bounded by their own number rather than by `-j`.
+1. An outer launch cap: `while active_tasks.len() < max_concurrent` (`scheduler.rs:1021`). Nothing past `-j` is ever spawned.
+2. A `Semaphore::new(max_parallel)` (`scheduler.rs:884`) acquired inside each task body (`task_execution.rs:54`), where a `tty: true` task takes all `max_parallel` permits to make itself exclusive (`permits_for`, `:326-337`).
 
-**API generation 2.** `SUPPORTED_API_VERSIONS` becomes `["1", "2"]`. Generation 2 means "may use the key set introduced in v2.1.0" (`otto.envs-command`, `foreach.buffer`, `params.<name>.required`) plus `foreach.jobs` from this doc. `api: 1` files keep working unchanged on every binary. This buys nothing for v2.0.5 users pulling otto-dev today, and everything for the next time otto adds a key.
+Moving foreach items onto a per-group semaphore fixes gate 2 and leaves gate 1 in place, so 10 items under `-j 2` would still spawn 2. Measured by the seat: `started_count=2`.
 
-Separately, the strict-parse failure path gets a wrapper: an `unknown field` serde error is re-emitted with a trailing line naming the likely cause and the fix. That helps from this release forward.
+**The "group holds one shared permit" idea from the first draft is dead, and it was false.** Both seats killed it the same way: the virtual parent is not concurrent with its items. `foreach.rs:98` replaces the parent's `before:` with `When::Always` edges to every subtask, so the scheduler queues the parent only after all subtasks are terminal. There is no running group owner to hold anything.
+
+What replaces it:
+
+- Items of a group carrying `jobs` are **exempt from both gates**: they do not count against `active_tasks.len() < max_concurrent`, and they acquire from a per-group `Semaphore::new(N)` (or `Semaphore::new(item_count)` for `all`) instead of the shared one.
+- Exclusivity is kept by a counter, not a permit: an `AtomicUsize` of in-flight exempt items. `permits_for`'s tty path additionally waits for that counter to reach zero before it takes its permits, and an exempt item refuses to start while a tty task holds the semaphore. Two conditions, one invariant, no fake permit.
+- **Consequence, stated rather than discovered later:** a `jobs: all` group of never-exiting items blocks a later `tty: true` task for as long as the group runs, which for `otto logs` is forever. This is not a regression. A single never-exiting task holds a shared permit forever today and starves a later tty task identically. It is the cost of asking for the exemption, and `logs` is the last task in a run by construction.
+
+**An actionable unknown-field error, and NO api bump.** The strict-parse failure path gets a wrapper: an `unknown field` serde error is re-emitted with a trailing line naming the likely cause and the fix. That is the whole of the otto-side change, and it helps from this release forward.
+
+The first draft also proposed `SUPPORTED_API_VERSIONS = ["1", "2"]`. Dropped, see Resolved Decisions: this repo already has a written policy forbidding it, at `src/cfg/otto.rs:20-26`.
 
 ### Data Model
 
@@ -173,33 +188,33 @@ No Phase 0. The one environmental assumption this design rests on (that a Ctrl+C
 - `abandon_run` walks it: `killpg` SIGTERM -> `CANCEL_GRACE` -> `killpg` SIGKILL, direct `kill` for the `tty` case.
 - `CANCEL_GRACE` const beside `OUTPUT_PROCESSING_TIMEOUT_SECS`, with the rationale in a doc comment.
 - Update the `task_execution.rs:200-204` comment: it currently describes a reachability the code does not use, which is what hid this for two releases.
-- **Success criteria:** (a) a pty test spawns a parallel foreach whose bodies each fork a `sleep 600` grandchild, interrupts with a literal `0x03`, and asserts every recorded grandchild pid is gone (checked by `/proc/<pid>/cmdline`, not pid liveness alone, since pids recycle); (b) break-the-code: with the `killpg` call removed the same test fails, and the grandchildren survive; (c) a `tty: true` task's cancellation does not signal otto itself, asserted by otto reaching its normal non-zero exit rather than dying of its own SIGTERM.
+- Snapshot the pgid list before the first signal; both passes iterate the snapshot. `ESRCH` ignored on the second pass, `EPERM` loud.
+- **Success criteria:** (a) a pty test spawns a parallel foreach whose bodies each fork a `sleep 600` grandchild, interrupts with a literal `0x03`, and asserts every recorded grandchild pid is gone (checked by `/proc/<pid>/cmdline`, not pid liveness alone, since pids recycle); (b) break-the-code: with the `killpg` call removed the same test fails, and the grandchildren survive; (c) a `tty: true` task's cancellation does not signal otto itself, asserted by otto reaching its normal non-zero exit rather than dying of its own SIGTERM; (d) **the grace-window case**: the direct child exits on SIGTERM while a grandchild traps and ignores it, so the body deregisters during `CANCEL_GRACE`; the grandchild is still reaped, which fails if the SIGKILL pass reads the live registry instead of the snapshot.
 
 #### Phase 2: `foreach.jobs` schema and validation
 **Model:** sonnet
 - `ForeachJobs` enum, `ForeachSpec::jobs`, `deny_unknown_fields` intact.
 - The four load-time rejections above, each naming the task path.
-- `docs/commands/ottofile-reference.md` key inventory updated; `ottofile_reference_key_inventory_is_exhaustive` goes 45 -> 46.
-- **Success criteria:** (a) each of the four rejected shapes fails the load with an error naming the param path, and none panics; (b) `otto --tasks --format json` on an ottofile setting none of the new keys is byte-identical to its pre-change output; (c) the inventory test passes at 46 without hand-editing the count into the assertion.
+- `docs/commands/ottofile-reference.md` key inventory updated; `ottofile_reference_key_inventory_is_exhaustive` goes 45 -> 46. **Two literals must be edited**, not one: the per-struct expected count (`src/cfg/task_tests.rs:992`) and the total (`:1057`, currently `assert_eq!(total, 45, ...)`). The first draft of this criterion claimed the test passes "without hand-editing the count", which is false; the test is deliberately built so adding a key fails the build until both the page and the counts are updated.
+- **Success criteria:** (a) each of the four rejected shapes fails the load with an error naming the task path, and none panics; (b) `otto --tasks --format json` on an ottofile setting none of the new keys is byte-identical to its pre-change output, which holds because `jobs` carries `skip_serializing_if = "Option::is_none"`; (c) the inventory test passes at 46, with both literals updated in the same commit as the schema change.
 
 #### Phase 3: Scheduler honors `foreach.jobs`
 **Model:** opus
-- Group acquires one shared permit; items acquire from a per-group semaphore.
-- `tty` exclusivity preserved against an overridden group.
-- **Success criteria:** (a) 10 items, `parallel: true`, `jobs: all`, global `-j 2`, each body blocking on a fifo: all 10 write their start marker (today 2 do); (b) the same fixture with `jobs: 4` starts exactly 4; (c) a `tty: true` task and a `jobs: all` group in one run never overlap, proved by a barrier file rather than timing.
+- Exempt the group's items from BOTH gates: the outer `active_tasks.len() < max_concurrent` launch cap (`scheduler.rs:1021`) and the shared semaphore acquire (`task_execution.rs:54`). Fixing only the semaphore leaves the launch cap in force and changes nothing.
+- Items acquire from a per-group `Semaphore::new(N)` / `Semaphore::new(item_count)`.
+- `tty` exclusivity via an `AtomicUsize` of in-flight exempt items, checked in both directions.
+- **Success criteria:** (a) 10 items, `parallel: true`, `jobs: all`, global `-j 2`, each body blocking on a fifo: all 10 write their start marker. `Observed on main` for the unguarded shape: `started_count=2`; (b) the same fixture with `jobs: 4` starts exactly 4 and the fifth only after one exits; (c) a `tty: true` task and a `jobs: all` group in one run never overlap, proved by a barrier file rather than timing, **with `max_parallel = 1`**, which is the case where a fake permit would have looked correct; (d) a `tty: true` task that becomes ready WHILE an exempt group is in flight waits for it, rather than starting alongside it.
 
-#### Phase 4: API generation 2 and an actionable unknown-field error
+#### Phase 4: An actionable unknown-field error
 **Model:** sonnet
-- `SUPPORTED_API_VERSIONS = ["1", "2"]`, with a doc comment defining what generation 2 means.
-- Wrap the strict-parse `unknown field` error with a line naming the likely cause and `otto Upgrade`.
-- `docs/commands/ottofile-reference.md` documents both generations and when to declare 2.
-- **Success criteria:** (a) an `api: 2` ottofile loads and runs on this binary; (b) the v2.0.5 binary on that same file still prints `unsupported api version '2' ... upgrade otto.` and exits non-zero, which is the whole point and is verified against the built v2.0.5 worktree, not asserted; (c) an ottofile with a genuinely misspelled key still fails, and its message names both the misspelling and the upgrade possibility.
+- Wrap the strict-parse `unknown field` error with a line naming the likely cause and `otto Upgrade`. No api bump: see Resolved Decisions.
+- **Success criteria:** (a) an ottofile using a key this binary does not know fails with a message that names the key AND names upgrading, and still exits non-zero; (b) an ottofile with a genuinely misspelled key (`tsaks:`) gets the same treatment without the wrapper claiming the user is out of date as the only possibility; (c) `SUPPORTED_API_VERSIONS` is unchanged, asserted by a test so a later phase cannot quietly grow it against the policy at `src/cfg/otto.rs:20-26`.
 
 #### Phase 5: Docs, example, and the release-post correction
 **Model:** sonnet
 - `docs/commands/buffered-foreach.md` gains a `jobs` section; `examples/foreach-buffer/otto.yml` gains a commented `jobs:` line.
-- Correct the v2.1.0 marquee post's teardown sentence: descendants were not reaped before Phase 1.
-- **Success criteria:** (a) `otto examples` passes; (b) the reference page's key count matches the schema, enforced by the existing inventory test rather than by reading.
+- Correct the v2.1.0 marquee post's teardown sentence: descendants were not reaped before Phase 1. Post: `https://marquee.internal.tatari.dev/p/~scott-idler/otto-v2-1-0-i-built-all-three-the-bone-is-clean/`, section 5, the bullet reading "They die from `kill_on_drop(true)` when `abandon_run` aborts them."
+- **Success criteria:** (a) `otto examples` passes; (b) the reference page's key count matches the schema, enforced by the existing inventory test rather than by reading; (c) `marquee read <the URL above> | grep -c 'They die from'` returns 0 and the replacement sentence names the process group.
 
 ### Cross-repo blast radius and ship order
 
@@ -222,8 +237,11 @@ Each criterion's literal command was run against current `main` (`a6cd589`, v2.1
 - [ ] **A `parallel: true` foreach of N never-exiting items with `jobs: all` starts all N under a global cap below N.**
   `Observed on main:` cannot run, `jobs` does not exist yet. The unguarded case measured 8 of 10 started at `otto.jobs: 8`, silently.
 
-- [ ] **An ottofile declaring `api: 2` loads on this binary and is refused with an upgrade message by v2.0.5.**
-  `Observed on main:` the v2.0.5 half already passes: `otto: unsupported api version '2' (this otto supports: 1). upgrade otto.` The v2.1.0 half fails: `SUPPORTED_API_VERSIONS` is `["1"]`, so current otto refuses its own generation.
+- [ ] **An ottofile using a key this binary does not know fails with a message that names the key AND names upgrading.**
+  `Observed on main:` names the key only. `tasks.hi.foreach: unknown field 'jobs', expected one of 'glob', 'items', 'range', 'command', 'as', 'parallel', 'max_items', 'buffer'`, rc=1. Nothing tells the reader their otto might be too old. Criterion currently FALSE.
+
+- [ ] **`SUPPORTED_API_VERSIONS` still contains exactly `["1"]` after every phase.**
+  `Observed on main:` `pub const SUPPORTED_API_VERSIONS: &[&str] = &[CURRENT_API_VERSION];`, one entry. This criterion guards a decision, not a feature: the doc's first draft proposed adding `"2"` and the policy at `src/cfg/otto.rs:20-26` forbids it for additive keys.
 
 - [ ] **`otto --tasks --format json` on an ottofile setting none of the new keys is byte-identical before and after all five phases.**
   `Observed on main:` baseline captured, 20 top-level keys on `otto-dev@main`, `subtasks` present per task. Not yet comparable; the after-side does not exist.
@@ -235,6 +253,16 @@ Each criterion's literal command was run against current `main` (`a6cd589`, v2.1
 - **2026-09-01: `--tasks` is not made lazy.** Checked rather than assumed: `--tasks --format json` emits a `subtasks` array per task (`src/cli/commands/tasks.rs:22-72` documents it as part of the view), so resolving a `command:` source there is contractual, not waste. The #15 nit about 10 subprocesses instead of 8 is the direct cost of adding two foreach tasks. No action.
 - **2026-09-01: the `[status:<svc>]` prefix replacing otto-dev's `=== <name> ===` headers stays.** Within one block every row carries the same prefix, so a compose table stays column-aligned; only the left margin differs between services. Cosmetic, and the prefix buys attribution that the header did not (it survives interleaving on `logs`). No action.
 - **2026-09-01: no per-item concurrency for `status`.** It is buffered and its commands exit, so permits recycle and the global cap only affects wall time. Only `logs` needs the override.
+
+Panel round 1 (Architect + Staff Engineer), 2026-09-01. Every finding below was re-verified against the code before folding in.
+
+- **`api: 2` is dropped, both seats, and the repo already said so.** `src/cfg/otto.rs:20-26` carries a written policy: "A new version is added when, and only when, otto makes a change that a prior otto would MIS-EXECUTE rather than merely fail to understand. Adding an optional field does NOT bump it." Every key in v2.1.0 and in this doc is additive. The proposed generation 2 would have gated nothing mechanically, which is the names-tell-the-truth violation, and the unknown-field wrapper covers every future addition natively. The one thing `api: 2` bought (a clean message from the already-shipped v2.0.5) is bought instead by otto-dev's `bin/ttv` floor check, which is in this doc anyway and needs no otto release.
+- **The SIGKILL pass reads a snapshot, not the live registry.** Both seats, independently. Folded into Architecture with the reasoning, and Phase 1 gains criterion (d) for the exact grace-window case.
+- **"The group holds one shared permit" was FALSE and is removed.** Both seats: `foreach.rs:98` gives the virtual parent `When::Always` edges to every subtask, so it is queued only after they are all terminal. It cannot hold anything while they run. Replaced with an in-flight counter checked in both directions.
+- **Phase 3 must move BOTH gates.** Staff seat, measured: the outer `active_tasks.len() < max_concurrent` at `scheduler.rs:1021` alone holds the run to `started_count=2` under `-j 2`, so a per-group semaphore by itself changes nothing.
+- **The Phase 2 inventory criterion was FALSE as written.** Staff seat: `src/cfg/task_tests.rs:1057` is a literal `assert_eq!(total, 45, ...)` with per-struct counts at `:992`. Both get edited; the criterion now says so.
+- **`bin/ttv` cheap-win widened.** Staff seat found a second copy of the stale premise at otto-dev `CLAUDE.md:49-52`, beyond the `scripts/lib.sh` one. Both are in the otto-dev item now.
+- **Held against both seats: nothing.** No pushbacks. Every must-fix from both seats is folded in above.
 
 ## Alternatives Considered
 
@@ -262,7 +290,13 @@ Each criterion's literal command was run against current `main` (`a6cd589`, v2.1
 - **Cons:** Cannot express "cap this group at 4", which is the symmetric and equally reasonable case; and a second boolean would then be needed beside it.
 - **Why not chosen:** Write as if more are coming. `jobs: all | <N>` covers both with one key and reuses the `-j`/`otto.jobs` vocabulary already in the file.
 
-### Alternative 5: warn when a parallel group cannot get a permit per item
+### Alternative 5: `SUPPORTED_API_VERSIONS` gains `"2"`
+- **Description:** Let an ottofile declare schema generation 2, so an old binary refuses it with `check_api_version`'s existing clean upgrade message before the typed parse.
+- **Pros:** The message already exists and already works: v2.0.5 prints `unsupported api version '2' (this otto supports: 1). upgrade otto.` It is the one mechanism that reaches an already-shipped binary.
+- **Cons:** `src/cfg/otto.rs:20-26` forbids it for additive keys, in writing, and every key here is additive. A generation that gates nothing mechanically is a version number that lies. It also cannot be enforced: a file can declare `2` and use no new keys, or declare `1` and use them all.
+- **Why not chosen:** Rejected by both panel seats and by the repo's own policy. Carried in this doc's first draft as Phase 4's first half; removed after round 1 so it is not re-litigated.
+
+### Alternative 6: warn when a parallel group cannot get a permit per item
 - **Description:** Leave the cap alone, print a notice at expansion time.
 - **Pros:** No scheduler change.
 - **Cons:** otto cannot distinguish "these items never exit" from "these items are slow", so the notice fires on every large parallel foreach, which is the normal and correct case. A warning that is usually wrong gets filtered out, and then it is not there when it matters.
@@ -302,7 +336,7 @@ Minor bump. `foreach.jobs` and `api: 2` are opt-in; the cancellation fix is not,
 | `killpg` reaches something otto did not start | Low | High | The pgid is one otto created via `process_group(0)` and recorded at spawn; the `tty` branch never takes a group signal; non-positive pids refused before the syscall |
 | The grace period makes Ctrl+C feel slow | Med | Low | SIGTERM first, and the second Ctrl+C escape hatch (exit 130) already shipped in v2.1.0 bypasses the wait entirely |
 | A `jobs: all` group starves the rest of the run | Med | Med | The group holds one shared permit, so the scheduler still counts it; documented as the explicit tradeoff of asking for it |
-| `api: 2` splits the ecosystem | Low | Med | Generation 1 files keep working on every binary forever; declaring 2 is opt-in and only needed by files using the v2.1.0+ key set |
+| A later change grows `SUPPORTED_API_VERSIONS` against the policy | Low | Med | Phase 4 criterion (c) asserts the set stays `["1"]`, so growing it fails a test rather than passing review |
 | otto-dev ships `jobs: all` before Phase 1 lands | Med | High | Ship order above: Phase 1 first. Until then every Ctrl+C on `otto logs` leaks an inner otto and a compose tail per service |
 
 ## Open Questions
