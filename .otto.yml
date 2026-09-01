@@ -90,17 +90,19 @@ tasks:
     help: "Display coverage report"
     params:
       --fail-under:
-        # Floor, not a target: measured 90.4% line coverage locally
-        # (2026-08-30, `cargo llvm-cov --workspace --all-features`,
-        # 20004/22132 lines) with a margin held back for runner-to-runner
-        # variance (tty/pty tests in particular can behave differently under
-        # GitHub's runners). A literal committed value, per the design doc's
-        # mechanism, so raising it is a reviewable diff and lowering it
-        # cannot happen silently. Enforced on CI by the `coverage` job in
+        # Floor, not a target. Runner truth (2026-09-01, audit batch 12):
+        # 87.4% line coverage (12517/14317 lines, CI run 33433873821), so
+        # the margin over this floor is 2.4 points. Local numbers read
+        # ~4.5 points higher because local cargo-llvm-cov 0.6.x counts
+        # *_tests.rs files in the denominator while the runner's pinned
+        # 0.9.0 excludes them; trust the runner's number, not a local one.
+        # A literal committed value, per the design doc's mechanism, so
+        # raising it is a reviewable diff and lowering it cannot happen
+        # silently. Enforced on CI by the `coverage` job in
         # `.github/workflows/checks.yml`, which runs `otto cov` (this task
-        # is chained by `cov`'s own `after:`). Confirm against the first
-        # real CI-runner measurement and ratchet up; this number was not
-        # measured on a runner.
+        # is chained by `cov`'s own `after:`). Ratcheting up is the owner's
+        # call; with 2.4 points of headroom, raise it only on a runner
+        # measurement.
         default: "85"
         help: "Minimum line coverage percentage (0 = no threshold)"
       --json:
