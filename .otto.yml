@@ -92,18 +92,20 @@ tasks:
       --fail-under:
         # Floor, not a target. Runner truth (2026-09-01, audit batch 12):
         # 87.4% line coverage (12517/14317 lines, CI run 33433873821), so
-        # the margin over this floor is 2.4 points. Local numbers read
-        # ~4.5 points higher because local cargo-llvm-cov 0.6.x counts
-        # *_tests.rs files in the denominator while the runner's pinned
-        # 0.9.0 excludes them; trust the runner's number, not a local one.
+        # the margin over this floor is 0.4 points. That tightness is the
+        # point: at 85 the floor was decorative, and a floor that cannot
+        # trip is not an alarm. Losing ~57 covered lines rings it.
+        # Local numbers read ~4.5 points higher because local
+        # cargo-llvm-cov 0.6.x counts *_tests.rs files in the denominator
+        # while the runner's pinned 0.9.0 excludes them; trust the runner's
+        # number, not a local one, and never ratchet off a local pass.
         # A literal committed value, per the design doc's mechanism, so
         # raising it is a reviewable diff and lowering it cannot happen
         # silently. Enforced on CI by the `coverage` job in
         # `.github/workflows/checks.yml`, which runs `otto cov` (this task
         # is chained by `cov`'s own `after:`). Ratcheting up is the owner's
-        # call; with 2.4 points of headroom, raise it only on a runner
-        # measurement.
-        default: "85"
+        # call, and only on a runner measurement.
+        default: "87"
         help: "Minimum line coverage percentage (0 = no threshold)"
       --json:
         default: "false"
