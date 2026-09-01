@@ -2,7 +2,7 @@
 
 **Author:** Scott A. Idler
 **Date:** 2026-08-30
-**Status:** In Progress — batches 1-7 complete, 8-14 outstanding
+**Status:** Complete — all 14 batches done; batches 8-14 ran 2026-09-01 at `33b3731` (post-feature-work tree, satisfying the re-run obligation from `2026-08-31-buffered-foreach-computed-envs-required-params.md`); every must-fix committed, finalization checkpoint with the user
 **Subject doc:** `docs/design/2026-06-10-code-review-remediation.md` (`Status: Implemented`)
 **HEAD at handoff:** `a567af9` (batches 3-4 audited at `6b28b52`, fixed through `16c2975`)
 
@@ -39,13 +39,13 @@ verdicts than items is rejected and re-run.
 | 5 | Phase 4 — State and DB integrity | 380-403 | 10 | **DONE** — 2 must-fix, fixed at `a10f911`, `0254baa` |
 | 6 | Phase 5 — Upgrade and HTTP safety | 404-413 | 4 | **DONE** — 1 must-fix, fixed at `e71638e` |
 | 7 | Phase 6 — cfg correctness | 414-448 | 10 | **DONE** — 1 must-fix, fixed at `7f7ffd5` |
-| 8 | Phase 7 — Makefile converter truth | 449-464 | 7 | TODO |
-| 9 | Phase 8 — TUI and CLI surface | 465-485 | 10 | TODO |
-| 10 | Phase 9 — Repo and dependency hygiene | 486-502 | 7 | TODO |
-| 11 | Phase 10 — Doc truth | 503-515 | 8 | TODO |
-| 12 | Phase 11 — Test-gap closure | 516-589 | 10 | TODO |
-| 13 | Acceptance Criteria | 590-638 | 8 | TODO |
-| 14 | Resolved Decisions that assert something about code | 639-662 | 21 | TODO |
+| 8 | Phase 7 — Makefile converter truth | 449-464 | 7 | **DONE** (2026-09-01, at `33b3731`) — 1 must-fix, fixed at `d8d9cfc` |
+| 9 | Phase 8 — TUI and CLI surface | 465-485 | 10 | **DONE** — 2 must-fix (doc annotations), fixed at `021fd06`; no regression from `2a396e1..9f3c5d1` |
+| 10 | Phase 9 — Repo and dependency hygiene | 486-502 | 7 | **DONE** — 2 must-fix: `graph.rs` unwrap fixed at `8c402a0`, doc absolute at `021fd06` |
+| 11 | Phase 10 — Doc truth | 503-515 | 8 | **DONE** — 2 must-fix (bullet 3 + its own audit header), fixed at `021fd06`; 45-key inventory verified bijective |
+| 12 | Phase 11 — Test-gap closure | 516-589 | 10 | **DONE** — 2 must-fix (coverage denominator, unpinned cargo-llvm-cov), fixed at `0ca381d`, `ba71ad4`; 16 mutation proofs |
+| 13 | Acceptance Criteria | 590-638 | 8 | **DONE** — 2 must-fix: release-gate hole fixed at `574c2a4`, name-leak scrub at `b77d016` |
+| 14 | Resolved Decisions that assert something about code | 639-662 | 21 | **DONE** — 3 must-fix (entries 12, 20, and the closing summary), fixed at `b77d016`, `574c2a4`, `021fd06` |
 
 Line numbers drift as fixes land. Re-derive with:
 `grep -n '^#### Phase \|^## Acceptance Criteria\|^## Resolved Decisions' docs/design/2026-06-10-code-review-remediation.md`
