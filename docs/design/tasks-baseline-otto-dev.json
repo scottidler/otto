@@ -1,0 +1,259 @@
+{
+  "auth-bypass": {
+    "help": "Point philo-fe at its own email-impersonation login (no auth-svc at all)",
+    "params": [],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "auth-local": {
+    "help": "Point philo-fe at the LOCAL auth-svc (real OAuth against :8000)",
+    "params": [],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "auth-staging": {
+    "help": "Point philo-fe at the STAGING auth-svc (real OAuth; the default)",
+    "params": [],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "convert-check": {
+    "help": "Is it safe to switch a service between flat and bare layouts? (read-only)",
+    "params": [
+      {
+        "name": "service",
+        "flags": [
+          "-s",
+          "--service"
+        ],
+        "choices": [],
+        "default": null,
+        "positional": false
+      }
+    ],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "data": {
+    "help": "Reload philo's sanitized data dump (slow; prompts for aws-vault)",
+    "params": [],
+    "edges": {
+      "before": [
+        "start-docker"
+      ],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "doctor": {
+    "help": "Read-only health check: the machine (bootstrap --check-only), then every service",
+    "params": [],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "down": {
+    "help": "Stop + remove every selected service (data volumes preserved; down:philo for one)",
+    "params": [],
+    "edges": {
+      "before": [
+        "start-docker"
+      ],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "init": {
+    "help": "Clone the repos the stack needs, as bare repos with a main worktree",
+    "params": [],
+    "edges": {
+      "before": [
+        "preflight"
+      ],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "logs": {
+    "help": "Tail logs from every selected service",
+    "params": [],
+    "edges": {
+      "before": [
+        "start-docker"
+      ],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "nuke": {
+    "help": "Stop + remove every selected service AND its volumes (wipes local databases)",
+    "params": [],
+    "edges": {
+      "before": [
+        "start-docker"
+      ],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "preflight": {
+    "help": "Check the irreducible prereqs (aws-vault, ~/.netrc) and fail with guidance",
+    "params": [],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "profiles": {
+    "help": "List start-up profiles: what each includes and what's actually available",
+    "params": [],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "pull": {
+    "help": "Pull latest main into each checkout, no rebuild (pull:philo for one)",
+    "params": [],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "seed": {
+    "help": "Seed a local login into auth-svc (testing@tatari.tv / local-dev-only)",
+    "params": [],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "start": {
+    "help": "Start each service in scope, building anything missing (start:philo for one)",
+    "params": [],
+    "edges": {
+      "before": [
+        "preflight",
+        "start-docker"
+      ],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "start-docker": {
+    "help": "Start Docker desktop / daemon",
+    "params": [],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "status": {
+    "help": "Show container status for every selected service (or -p <profile>)",
+    "params": [
+      {
+        "name": "profile",
+        "flags": [
+          "-p",
+          "--profile"
+        ],
+        "choices": [],
+        "default": null,
+        "positional": false
+      }
+    ],
+    "edges": {
+      "before": [
+        "start-docker"
+      ],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "stop": {
+    "help": "Stop every selected service (containers preserved; stop:philo for one)",
+    "params": [],
+    "edges": {
+      "before": [
+        "start-docker"
+      ],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "switch": {
+    "help": "Point a service's checkout at a branch (detached; prefers origin/<branch>)",
+    "params": [
+      {
+        "name": "branch",
+        "flags": [],
+        "choices": [],
+        "default": null,
+        "positional": true
+      },
+      {
+        "name": "svc",
+        "flags": [],
+        "choices-command": "scripts/svc.sh exposing switch",
+        "default": null,
+        "positional": true
+      }
+    ],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "up": {
+    "help": "Rebuild each service in scope from current code; prompts for aws-vault (up:philo for one)",
+    "params": [],
+    "edges": {
+      "before": [
+        "preflight",
+        "start-docker"
+      ],
+      "after": []
+    },
+    "subtasks": []
+  },
+  "use": {
+    "help": "Record a default profile for start/up (-p none clears it)",
+    "params": [
+      {
+        "name": "profile",
+        "flags": [
+          "-p",
+          "--profile"
+        ],
+        "choices": [],
+        "default": null,
+        "positional": false
+      }
+    ],
+    "edges": {
+      "before": [],
+      "after": []
+    },
+    "subtasks": []
+  }
+}

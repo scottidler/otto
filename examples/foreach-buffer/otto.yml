@@ -1,0 +1,47 @@
+# Example: foreach.buffer, otto.envs-command, and params.<title>.required
+#
+# Demonstrates the three additive keys from design doc
+# docs/design/2026-08-31-buffered-foreach-computed-envs-required-params.md:
+#   - otto.envs-command: a command whose KEY=VALUE stdout becomes global envs
+#   - tasks.<name>.foreach.buffer: true: a parallel foreach prints each
+#     subtask's output as one contiguous block, in item order, instead of
+#     interleaving lines from whichever subtask happens to be writing
+#   - tasks.<name>.params.<title>.required: true: a usage error instead of
+#     an empty variable when the argument is omitted
+#
+# Run with:          otto status
+# Missing required:  otto switch          (usage error naming svc)
+# With required arg: otto switch web
+
+otto:
+  api: 1
+  jobs: 4
+  envs-command: "printf 'FLEET=alpha,beta,gamma\n'"
+  tasks:
+    - status
+
+tasks:
+  status:
+    help: "Report status for three services, one ordered block per service"
+    foreach:
+      items:
+        - alpha
+        - beta
+        - gamma
+      as: service
+      parallel: true
+      buffer: true
+    bash: |
+      echo "=== ${service} ==="
+      echo "fleet: ${FLEET}"
+      echo "checking ${service}..."
+      echo "${service}: ok"
+
+  switch:
+    help: "Switch the active service (svc is required)"
+    params:
+      svc:
+        help: "service name"
+        required: true
+    bash: |
+      echo "switched to: ${svc}"

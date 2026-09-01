@@ -118,6 +118,14 @@ fn test_build_test_deploy_parses() {
     validate_example_parses("build-test-deploy").expect("build-test-deploy should parse");
 }
 
+#[test]
+fn test_foreach_buffer_parses() {
+    // Exercises otto.envs-command, tasks.<name>.foreach.buffer, and
+    // params.<title>.required together (design doc
+    // 2026-08-31-buffered-foreach-computed-envs-required-params.md, Phase 5).
+    validate_example_parses("foreach-buffer").expect("foreach-buffer should parse");
+}
+
 // ============================================================================
 // Examples That Should Execute Successfully
 // ============================================================================
@@ -125,6 +133,13 @@ fn test_build_test_deploy_parses() {
 #[test]
 fn test_hello_world_punch_executes() {
     run_example("hello-world", "punch").expect("hello-world punch should execute successfully");
+}
+
+#[test]
+fn test_foreach_buffer_status_executes() {
+    // `status` only echoes and reads the computed FLEET env var; nothing it
+    // runs compiles, deletes, packages, or deploys anything.
+    run_example("foreach-buffer", "status").expect("foreach-buffer status should execute successfully");
 }
 
 #[test]
