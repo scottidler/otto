@@ -463,6 +463,12 @@ pub async fn execute_with_terminal_output(
     let mut scheduler = TaskScheduler::new(executor_tasks, workspace.clone(), execution_context, jobs, false).await?;
     scheduler.set_no_prefix(no_prefix);
 
+    // Ctrl+C has to reach the scheduler, not just the process. Without this the
+    // terminal's SIGINT default-killed otto outright and `abandon_run` never
+    // ran, so a buffered foreach group lost every completed-but-unreplayed
+    // block. Taken before `execute_all` borrows the scheduler.
+    install_interrupt_handler(scheduler.cancel_signal());
+
     // Execute all tasks, capturing result
     let result = scheduler.execute_all().await;
 
@@ -477,6 +483,51 @@ pub async fn execute_with_terminal_output(
     }
 
     result
+}
+
+/// Turn Ctrl+C into a scheduler cancel on the non-TUI path, and a second Ctrl+C
+/// into an immediate exit.
+///
+/// The first interrupt sets the same `CancelSignal` the TUI path sets
+/// (`execute_with_tui`), so the run goes through `abandon_run`: the report
+/// channel is drained, completed buffered blocks are replayed in item order,
+/// killed children get their log paths printed, and the unstarted items get
+/// did-not-start lines. Installing nothing, which is what shipped through
+/// v2.0.5, meant the terminal's default SIGINT disposition killed otto between
+/// those two states and printed nothing.
+///
+/// **otto does not forward the signal to task children, by design.** A terminal
+/// Ctrl+C is delivered to the whole foreground process group, but every task
+/// child is put in its own group (`task_execution.rs`, `cmd.process_group(0)`),
+/// so the children do not receive it and otto's teardown is not raced. They die
+/// from `kill_on_drop(true)` when `abandon_run` aborts them, which is the same
+/// contract cancellation has always had. The one exception is a `tty: true`
+/// task: it deliberately stays in otto's group so it can own the terminal, so
+/// it takes the Ctrl+C directly, exactly as it would under any other runner.
+///
+/// The second interrupt is the escape hatch, and it is not optional: with a
+/// handler installed the default disposition is gone, so a teardown wedged on a
+/// child that will not die would otherwise be unkillable from the keyboard. It
+/// exits 130 (128 + SIGINT) without closing the run out in the database - the
+/// run stays `running` and `otto Clean` ages it out, which is the honest record
+/// of what happened.
+///
+/// The ordinary interrupt path keeps the normal failure exit: `abandon_run`
+/// returns `Err`, so `execute_all` fails, the run is recorded not-ok, and
+/// `main` exits non-zero.
+fn install_interrupt_handler(cancel: Arc<crate::executor::scheduler::CancelSignal>) {
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        info!("Interrupt received; cancelling the run");
+        cancel.cancel();
+
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!("otto: second interrupt; exiting without finishing teardown");
+            std::process::exit(130);
+        }
+    });
 }
 
 /// Execute tasks with TUI mode.
