@@ -658,12 +658,23 @@ impl Parser {
     /// on ran the tasks with an environment nobody configured (a >100-deep or
     /// circular chain hit exactly this and the run continued, silently
     /// env-less).
+    ///
+    /// The cwd is `base_dir()`, the ottofile's own directory, matching
+    /// `foreach.command` (`:679`) and `choices-command`
+    /// (`parser/command.rs:165`). It used to be the *process* cwd, so
+    /// `envs: {ROOT: '$(scripts/svc.sh root philo)'}` resolved relative paths
+    /// against whoever ran otto: verified failing with exit 127 on plain
+    /// `otto <task>` from a subdirectory, on `-C` aimed anywhere but the
+    /// ottofile's directory, on `-o`, and on `$OTTOFILE`. One cwd contract for
+    /// all four command sources (design doc
+    /// `docs/design/2026-08-31-buffered-foreach-computed-envs-required-params.md`,
+    /// Phase 2).
     fn global_envs(&self) -> Result<&HashMap<String, String>> {
         self.resolver.global_envs(|| {
             if self.config_spec.otto.envs.is_empty() {
                 Ok(HashMap::new())
             } else {
-                env_eval::evaluate_envs(&self.config_spec.otto.envs, Some(&self.cwd))
+                env_eval::evaluate_envs(&self.config_spec.otto.envs, Some(self.base_dir()))
             }
         })
     }
