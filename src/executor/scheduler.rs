@@ -1,7 +1,8 @@
 use std::{
-    collections::HashMap,
-    io::{self, Write},
-    path::Path,
+    collections::{HashMap, HashSet},
+    fs,
+    io::{self, BufRead, Write},
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -25,7 +26,7 @@ use super::task::{Task, TaskEdge};
 use super::{
     action::{ActionProcessor, ProcessedAction},
     colors::{colorize_task_name, colorize_task_prefix, set_global_task_order},
-    output::{OutputType, TaskMessage, TaskStreams, TuiTaskStatus},
+    output::{OutputType, TaskMessage, TaskStreams, TuiTaskStatus, format_terminal_output, terminal_lock},
     workspace::{ExecutionContext, Workspace},
 };
 use crate::cfg::edge::When;
@@ -45,6 +46,45 @@ const COMPLETION_CHANNEL_CAPACITY: usize = 32;
 /// terminal. The marker keeps the record honest.
 pub const TTY_LOG_MARKER: &str = "otto: tty task, output not captured";
 
+/// Why one of a task's two output drains did not finish cleanly.
+///
+/// `task_execution.rs` distinguishes three outcomes per stream and today only
+/// `error!`-logs each one before falling through to the process's exit status,
+/// so a task can report success over a partially written log. Buffered replay
+/// carries the condition so a short block ends with a marker that names it,
+/// rather than a silent truncation under a "finished successfully" line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainCondition {
+    /// The drain task returned an error while reading or writing.
+    ProcessingError,
+    /// The drain task itself panicked or was cancelled.
+    JoinError,
+    /// The drain did not finish within `OUTPUT_PROCESSING_TIMEOUT_SECS`.
+    Timeout,
+}
+
+impl DrainCondition {
+    /// The wording that goes into the truncation marker.
+    fn describe(self) -> &'static str {
+        match self {
+            Self::ProcessingError => "output processing failed",
+            Self::JoinError => "output processing task did not join",
+            Self::Timeout => "output processing timed out",
+        }
+    }
+}
+
+/// One stream's failed drain. A `Vec<DrainIssue>` that is empty means both
+/// streams drained cleanly; a bool could not name which stream or why, which is
+/// exactly what the marker promises to name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainIssue {
+    /// Which of the task's two logs may be short.
+    pub stream: OutputType,
+    /// What went wrong with that stream's drain.
+    pub condition: DrainCondition,
+}
+
 /// One task's terminal report, sent exactly once per started task.
 ///
 /// The task name is a field, not something to be recovered from the error
@@ -62,6 +102,10 @@ pub struct TaskReport {
     pub exit_code: Option<i32>,
     /// `None` when the task succeeded.
     pub error: Option<eyre::Report>,
+    /// Streams whose drain did not complete. Empty means the logs are whole.
+    /// Skip paths send no report at all and ran no process, so they carry
+    /// nothing.
+    pub drain: Vec<DrainIssue>,
 }
 
 impl TaskReport {
@@ -70,6 +114,7 @@ impl TaskReport {
             name,
             exit_code: Some(0),
             error: None,
+            drain: Vec::new(),
         }
     }
 
@@ -78,8 +123,28 @@ impl TaskReport {
             name,
             exit_code,
             error: Some(error),
+            drain: Vec::new(),
         }
     }
+
+    /// Attach the drain outcomes observed while the task's body ran.
+    #[must_use]
+    fn with_drain(mut self, drain: Vec<DrainIssue>) -> Self {
+        self.drain = drain;
+        self
+    }
+}
+
+/// What woke the `execute_all` drain loop.
+///
+/// A named enum rather than an `Option<TaskReport>` because `None` already
+/// means "the report channel closed", which is a different (and fatal) thing
+/// from "the run was cancelled".
+enum Wakeup {
+    /// A task reported, or a body was reaped without reporting.
+    Report(Option<TaskReport>),
+    /// The run was cancelled.
+    Cancelled,
 }
 
 /// Failure of a task body, carrying the process exit code when there was one.
@@ -887,6 +952,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 // `impl<F: FileSystem + 'static> TaskScheduler<F> { ... }` block for the same
 // type in the same module.
 include!("scheduler/support.rs");
+include!("scheduler/replay.rs");
 
 impl<F: FileSystem + 'static> TaskScheduler<F> {
     pub async fn execute_all(&self) -> Result<()> {
@@ -937,13 +1003,18 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let mut failed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut skipped_set: SkippedSet = SkippedSet::new();
 
+        // Ordered replay for `foreach.buffer: true`, a plain local beside the
+        // three sets above: no `Arc<Mutex>` and no lock ordering. Empty (and so
+        // inert) unless some foreach in this run set `buffer: true`.
+        let mut cursor = ReplayCursor::new(&self.tasks, self.tui_mode);
+
         // Record the first failure to surface as the run's error; conditional follow-ups
         // (when: failure / when: always) still get a chance to run.
         let mut final_error: Option<eyre::Report> = None;
 
         while completed_tasks < total_tasks {
             if self.cancel.is_cancelled() {
-                return self.abandon_run(&mut active_tasks).await;
+                return self.abandon_run(&mut active_tasks, &mut cursor, &mut rx).await;
             }
 
             // Start as many tasks as we can
@@ -956,7 +1027,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     // Dep state contradicts this task's edge condition, or its serial
                     // predecessor reached a non-success terminal state -> Skip.
                     let record = skip_record_for(&task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                    self.mark_skipped(&task, record, &mut skipped_set).await;
+                    self.mark_skipped(&task, record, &mut skipped_set, &mut cursor).await;
                     completed_tasks += 1;
                     continue;
                 }
@@ -985,6 +1056,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     &serial_groups,
                     &failed_set,
                     &mut skipped_set,
+                    &mut cursor,
                 )
                 .await?;
             }
@@ -1013,7 +1085,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 }
                 for t in newly_skipped {
                     let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                    self.mark_skipped(&t, record, &mut skipped_set).await;
+                    self.mark_skipped(&t, record, &mut skipped_set, &mut cursor).await;
                     completed_tasks += 1;
                 }
                 if !progressed && ready_queue.is_empty() {
@@ -1026,22 +1098,27 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             // Wait for any task to report. A body that ends without reporting
             // (a panic) is reaped instead, and synthesized into a failure so the
             // run terminates rather than waiting on a message that never comes.
-            let received = tokio::select! {
-                message = rx.recv() => message,
-                name = active_tasks.reap_unreported() => Some(TaskReport::failure(
+            // The cancel arm reports rather than returning: `abandon_run` needs
+            // `&mut rx` to drain reports that were sent but never consumed, and
+            // `rx` is borrowed by the `recv()` future for the whole `select!`.
+            let received = match tokio::select! {
+                message = rx.recv() => Wakeup::Report(message),
+                name = active_tasks.reap_unreported() => Wakeup::Report(Some(TaskReport::failure(
                     name.clone(),
                     eyre!("Task {name} panicked"),
                     None,
-                )),
-                () = self.cancel.cancelled() => {
-                    return self.abandon_run(&mut active_tasks).await;
-                }
+                ))),
+                () = self.cancel.cancelled() => Wakeup::Cancelled,
+            } {
+                Wakeup::Cancelled => return self.abandon_run(&mut active_tasks, &mut cursor, &mut rx).await,
+                Wakeup::Report(report) => report,
             };
 
             match received {
                 Some(TaskReport {
                     name: completed_task,
                     error: None,
+                    drain: report_drain,
                     ..
                 }) => {
                     info!("Task {completed_task} completed successfully");
@@ -1099,19 +1176,27 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         TaskStatus::Completed
                     };
 
-                    // Print user-visible success/failure message (only in terminal mode)
-                    if !self.tui_mode {
-                        // `--no-prefix` suppressed the `[task]` prefix on task
-                        // output but not here, so a no-prefix run printed
-                        // `OTHER` followed by `[other] finished successfully`.
-                        let msg = format!(
-                            "{} {}\n",
-                            self.status_label(&completed_task),
-                            task_outcome_word(&final_status)
-                        );
-                        print!("{msg}");
-                        io::stdout().flush().unwrap_or(());
-                    }
+                    // End-of-group backstop, hooked AFTER the aggregation
+                    // override above so the override still runs before
+                    // `completed_set.insert` and the blocked-tasks sweep. The
+                    // parent's `When::Always` edges to every subtask mean it is
+                    // queued only once all of them are terminal, so anything the
+                    // four-site cursor missed is emitted here, ahead of the
+                    // parent's own status line. A backstop, not the mechanism.
+                    self.replay_flush_group(&mut cursor, &completed_task).await;
+
+                    // Print user-visible success/failure message (only in terminal mode).
+                    // `--no-prefix` suppressed the `[task]` prefix on task output
+                    // but not here, so a no-prefix run printed `OTHER` followed
+                    // by `[other] finished successfully`. For a buffered subtask
+                    // this line travels with its block instead of printing now.
+                    let msg = format!(
+                        "{} {}\n",
+                        self.status_label(&completed_task),
+                        task_outcome_word(&final_status)
+                    );
+                    self.report_status_line(&mut cursor, &completed_task, msg, false, report_drain)
+                        .await;
 
                     // Broadcast task completion to TUI
                     let tui_status = Self::to_tui_status(&final_status);
@@ -1167,13 +1252,14 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     }
                     for t in newly_skipped {
                         let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        self.mark_skipped(&t, record, &mut skipped_set).await;
+                        self.mark_skipped(&t, record, &mut skipped_set, &mut cursor).await;
                         completed_tasks += 1;
                     }
                 }
                 Some(TaskReport {
                     name: task_name,
                     error: Some(e),
+                    drain: report_drain,
                     ..
                 }) => {
                     error!("Task {task_name} failed: {e}");
@@ -1187,12 +1273,11 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                             .unwrap_or(0)
                     };
 
-                    // Print user-visible failure message (only in terminal mode)
-                    if !self.tui_mode {
-                        let failure_msg = format!("{} failed\n", self.status_label(&task_name));
-                        eprint!("{failure_msg}");
-                        io::stderr().flush().unwrap_or(());
-                    }
+                    // Print user-visible failure message (only in terminal mode).
+                    // For a buffered subtask it travels with its block instead.
+                    let failure_msg = format!("{} failed\n", self.status_label(&task_name));
+                    self.report_status_line(&mut cursor, &task_name, failure_msg, true, report_drain)
+                        .await;
 
                     // Broadcast task failure to TUI
                     self.broadcast_message(TaskMessage::Finished {
@@ -1231,7 +1316,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     }
                     for t in newly_skipped {
                         let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        self.mark_skipped(&t, record, &mut skipped_set).await;
+                        self.mark_skipped(&t, record, &mut skipped_set, &mut cursor).await;
                         completed_tasks += 1;
                     }
 
@@ -1252,7 +1337,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         // failed and is unreachable for this task's when: condition).
         for task in blocked_tasks.drain(..) {
             let record = skip_record_for(&task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-            self.mark_skipped(&task, record, &mut skipped_set).await;
+            self.mark_skipped(&task, record, &mut skipped_set, &mut cursor).await;
         }
 
         // Join every spawned body so a panic is logged rather than silently
@@ -1282,6 +1367,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 
 include!("scheduler/task_execution.rs");
 
+#[path = "scheduler/replay_tests.rs"]
+mod replay_tests;
 #[path = "scheduler_tests_a.rs"]
 mod tests_a;
 #[path = "scheduler_tests_b.rs"]

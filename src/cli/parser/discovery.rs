@@ -224,8 +224,12 @@ impl Parser {
 
         // Step 0.5: Expand foreach tasks into subtasks
         let mut deferred_foreach: HashSet<String> = HashSet::new();
-        let (mut expanded_tasks, serial_membership, display_order) =
-            self.expand_foreach_tasks_with_serial(&serial_tasks, requested_tasks, &mut deferred_foreach)?;
+        let ForeachExpansion {
+            specs: mut expanded_tasks,
+            membership: serial_membership,
+            display_order,
+            buffered: buffered_parents,
+        } = self.expand_foreach_tasks_with_serial(&serial_tasks, requested_tasks, &mut deferred_foreach)?;
 
         // Step 0.6: Desugar `on-failure:` into synthetic `after:` edges.
         // X with `on-failure: [Y]` becomes `X.after += [{task: Y, when: failure}]`,
@@ -375,6 +379,14 @@ impl Parser {
             // for a foreach virtual parent, keyed by the same task_name.
             if let Some(subtask_names) = display_order.get(task_name) {
                 task.foreach_display_order = Some(subtask_names.clone());
+            }
+
+            // `foreach.buffer: true` reaches the scheduler as a flag on the
+            // parent AND on every subtask: the parent owns the replay cursor,
+            // each subtask needs its live terminal leg suppressed. Keyed by the
+            // parent name for both, since a subtask's name is `<parent>:<item>`.
+            if buffered_parents.contains(Self::parent_task_name(task_name)) {
+                task.buffered = true;
             }
 
             cli_provided_params.insert(task_name.clone(), cli_provided);

@@ -261,6 +261,7 @@ fn create_test_task(name: &str) -> Task {
         serial_index: 0,
         tty: false,
         foreach_display_order: None,
+        buffered: false,
     }
 }
 

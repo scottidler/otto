@@ -6,14 +6,22 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     /// `skip_records`, the name and kind land in `skipped_set` so downstream gates
     /// classify against the kind, and the terminal prints the detail so a skipped
     /// task is never silent.
-    async fn mark_skipped(&self, task: &Task, record: SkipRecord, skipped_set: &mut SkippedSet) {
+    ///
+    /// Terminal transition 3 of the four the replay cursor is driven from: this
+    /// path sends no `TaskReport`, so a cursor hung on the report channel would
+    /// never emit a block for a skipped subtask and would stall every later
+    /// item behind it.
+    async fn mark_skipped(
+        &self,
+        task: &Task,
+        record: SkipRecord,
+        skipped_set: &mut SkippedSet,
+        cursor: &mut ReplayCursor,
+    ) {
         let SkipRecord { kind, detail } = &record;
         info!("Skipping task {} ({detail})", task.name);
-        if !self.tui_mode {
-            let msg = format!("{} skipped ({detail})\n", self.status_label(&task.name));
-            print!("{msg}");
-            io::stdout().flush().unwrap_or(());
-        }
+        let msg = format!("{} skipped ({detail})\n", self.status_label(&task.name));
+        self.report_status_line(cursor, &task.name, msg, false, Vec::new()).await;
         skipped_set.insert(task.name.clone(), *kind);
         {
             let mut statuses = self.task_statuses.lock().await;
@@ -43,6 +51,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         serial_groups: &SerialGroups,
         failed_set: &std::collections::HashSet<String>,
         skipped_set: &mut SkippedSet,
+        cursor: &mut ReplayCursor,
     ) -> Result<()> {
         match self.needs_rebuild(&task).await {
             Ok(true) => {
@@ -66,12 +75,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     total_tasks
                 );
 
-                // Print user-visible skipped message (only in terminal mode)
-                if !self.tui_mode {
-                    let skipped_msg = format!("{} skipped (up to date)\n", self.status_label(&task.name));
-                    print!("{skipped_msg}");
-                    io::stdout().flush().unwrap_or(());
-                }
+                // Terminal transition 4 of four. Like `mark_skipped`, this path
+                // mutates the terminal-state sets inline and sends no report, so
+                // the cursor has to be advanced from here too.
+                let skipped_msg = format!("{} skipped (up to date)\n", self.status_label(&task.name));
+                self.report_status_line(cursor, &task.name, skipped_msg, false, Vec::new())
+                    .await;
 
                 // Broadcast task skipped to TUI
                 self.broadcast_message(TaskMessage::StatusChange {
@@ -142,13 +151,33 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     /// The children are killed rather than waited on, which is the whole point of a
     /// cancel: `kill_on_drop(true)` on every spawned command means aborting the task
     /// bodies takes the processes with them.
-    async fn abandon_run(&self, active_tasks: &mut ActiveTasks) -> Result<()> {
+    ///
+    /// Buffered blocks are not dropped on the floor here. `abandon_run` never
+    /// marks in-flight tasks terminal and never touches a log, so without the
+    /// flush every completed-but-not-yet-replayed block would vanish. The
+    /// report channel is drained first, which is what turns the "report sent
+    /// but not yet consumed" state into a complete block rather than a
+    /// did-not-start line.
+    async fn abandon_run(
+        &self,
+        active_tasks: &mut ActiveTasks,
+        cursor: &mut ReplayCursor,
+        rx: &mut mpsc::Receiver<TaskReport>,
+    ) -> Result<()> {
         let abandoned = active_tasks.len();
         info!("Run cancelled; killing {abandoned} in-flight task(s)");
-        active_tasks.abort_all();
-        if !self.tui_mode {
-            eprintln!("otto: run cancelled; {abandoned} running task(s) killed");
+        if !cursor.is_empty() {
+            while let Ok(report) = rx.try_recv() {
+                self.record_report_for_replay(cursor, &report).await;
+            }
         }
+        active_tasks.abort_all();
+        let notice = format!("otto: run cancelled; {abandoned} running task(s) killed\n");
+        if self.tui_mode {
+            self.persist_skip_records().await;
+            return Err(eyre!("run cancelled; {abandoned} running task(s) were killed"));
+        }
+        self.flush_cancelled_groups(cursor, notice).await;
         self.persist_skip_records().await;
         Err(eyre!("run cancelled; {abandoned} running task(s) were killed"))
     }

@@ -19,8 +19,34 @@ use super::colors::colorize_task_prefix;
 /// lagged broadcast subscriber loses messages rather than blocking the producer.
 const TASK_OUTPUT_CHANNEL_CAPACITY: usize = 10_000;
 
+/// Process-wide terminal lock. Every site that writes to otto's own stdout or
+/// stderr takes it, so a buffered-foreach block can be replayed as one
+/// contiguous run of lines without a concurrently running task's output, status
+/// line, skip message, failure message, or the run-cancelled message landing in
+/// the middle of it.
+///
+/// Naming `TeeWriter` alone would not have been enough: five of the seven
+/// terminal-writing sites are in the scheduler, not here (design doc
+/// `2026-08-31-buffered-foreach-computed-envs-required-params.md`, Phase 4).
+/// Live writers take it per write; replay holds it for one whole block.
+///
+/// A `std::sync::Mutex` on purpose: it is only ever held across synchronous
+/// writes, never across an `.await`, and replay runs inside `spawn_blocking`
+/// where blocking is the point.
+static TERMINAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take the process-wide terminal lock.
+///
+/// Poisoning is recovered rather than propagated: the lock guards nothing but
+/// write ordering, so a panic while it was held leaves no invariant broken, and
+/// refusing to print for the rest of the run would be a worse failure than an
+/// interleaved line.
+pub(crate) fn terminal_lock() -> std::sync::MutexGuard<'static, ()> {
+    TERMINAL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Type of output stream
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputType {
     /// Standard output
     Stdout,
@@ -99,7 +125,7 @@ pub struct TeeWriter {
 /// the colored `[task]` prefix ahead of the data, or the data alone when
 /// `no_prefix` (`--no-prefix`) is set. Pure so the prefix-suppression logic
 /// is unit-testable without capturing real process stdout/stderr.
-fn format_terminal_output(task_name: &str, data: &[u8], no_prefix: bool) -> String {
+pub(crate) fn format_terminal_output(task_name: &str, data: &[u8], no_prefix: bool) -> String {
     if no_prefix {
         String::from_utf8_lossy(data).to_string()
     } else {
@@ -123,10 +149,16 @@ impl TeeWriter {
         // Always write to file (no colors)
         self.file.write_all(data).await?;
 
-        // Conditionally write to terminal (suppressed in TUI mode)
+        // Conditionally write to terminal (suppressed in TUI mode, and for a
+        // buffered foreach subtask, whose bytes reach the terminal only through
+        // ordered replay)
         if !self.suppress_terminal {
             // Write to terminal, with or without the colored task name prefix
             let terminal_output = format_terminal_output(&self.task_name, data, self.no_prefix);
+            // Held across the write and its flush, never across an `.await`:
+            // this is one of the seven sites a replayed block must not be split
+            // by. Per write here, for one whole block in the replay path.
+            let _terminal = terminal_lock();
             if self.is_stderr {
                 eprint!("{terminal_output}");
             } else {
@@ -231,7 +263,7 @@ impl TaskStreams {
 
             let output = TaskOutput {
                 task_name: task_name.clone(),
-                stream_type: output_type.clone(),
+                stream_type: output_type,
                 timestamp: SystemTime::now(),
                 content: String::from_utf8_lossy(&line).into_owned(),
             };

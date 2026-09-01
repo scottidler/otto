@@ -66,6 +66,12 @@ pub struct Task {
     /// by the Phase 4 replay cursor (design doc
     /// `2026-08-31-buffered-foreach-computed-envs-required-params.md`, Phase 3).
     pub foreach_display_order: Option<Vec<String>>,
+    /// True for a `foreach.buffer: true` parent and every one of its subtasks.
+    /// On a subtask it suppresses the live terminal leg so the bytes reach only
+    /// `stdout.log`/`stderr.log`; on the parent it marks the group the replay
+    /// cursor owns (design doc
+    /// `2026-08-31-buffered-foreach-computed-envs-required-params.md`, Phase 4).
+    pub buffered: bool,
 }
 
 impl Task {
@@ -108,6 +114,7 @@ impl Task {
             serial_index: 0,
             tty: false,
             foreach_display_order: None,
+            buffered: false,
         }
     }
 
@@ -262,6 +269,7 @@ impl From<crate::cli::parser::Task> for Task {
         task.serial_index = parser_task.serial_index;
         task.tty = parser_task.tty;
         task.foreach_display_order = parser_task.foreach_display_order;
+        task.buffered = parser_task.buffered;
         task
     }
 }

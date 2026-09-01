@@ -439,6 +439,21 @@ type SerialMembership = HashMap<String, (String, usize)>;
 /// fields above, this covers every foreach expansion, not just serial ones.
 type DisplayOrderMap = HashMap<String, Vec<String>>;
 
+/// Everything one pass of foreach expansion produces, so the four outputs stay
+/// named rather than positional as the set grows (design doc Phase 4 added the
+/// fourth). Only `expand_foreach_tasks_with_serial` builds one.
+struct ForeachExpansion {
+    /// Every task in the run, with foreach tasks replaced by their subtasks
+    /// plus a virtual parent.
+    specs: TaskSpecs,
+    /// Serial foreach group membership, for the scheduler's ready loop.
+    membership: SerialMembership,
+    /// Display order for every foreach expansion, buffered or not.
+    display_order: DisplayOrderMap,
+    /// Names of the foreach parents that declared `buffer: true`.
+    buffered: HashSet<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Task {
     pub name: String,
@@ -468,6 +483,13 @@ pub struct Task {
     /// replay cursor, which needs it only when `buffer: true` (design doc,
     /// Phase 3).
     pub foreach_display_order: Option<Vec<String>>,
+    /// True for a `foreach.buffer: true` parent and for every one of its
+    /// subtasks. On a subtask it suppresses the live terminal leg; on the
+    /// parent it marks the group the replay cursor owns (design doc
+    /// `2026-08-31-buffered-foreach-computed-envs-required-params.md`,
+    /// Phase 4). `buffer: true` itself does not survive expansion - subtasks
+    /// are clones with `foreach = None` - so it is carried as this flag.
+    pub buffered: bool,
 }
 
 impl Task {
@@ -496,6 +518,7 @@ impl Task {
             serial_index: 0,
             tty: false,
             foreach_display_order: None,
+            buffered: false,
         }
     }
 

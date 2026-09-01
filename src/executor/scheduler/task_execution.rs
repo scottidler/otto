@@ -18,7 +18,9 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let envs = task.envs.clone();
         let tasks_dir = self.workspace.run().join("tasks");
         let execution_context = self.execution_context.clone();
-        let suppress_terminal = self.tui_mode;
+        // A buffered foreach subtask's bytes reach only its two logs; ordered
+        // replay is the sole path to the terminal for them (design doc Phase 4).
+        let suppress_terminal = self.tui_mode || task.buffered;
         let no_prefix = self.no_prefix;
         let task_streams = self.task_streams.clone();
         let is_virtual_parent = task.is_virtual_parent;
@@ -38,6 +40,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             // A virtual parent has no script, no output files and no database
             // row: it only aggregates its subtasks' statuses.
             let mut aggregator_only = false;
+            // Streams whose drain did not finish. Terminal state is not the
+            // same as output complete: the six arms below only `error!`-log and
+            // fall through to the exit status, so a task can report success over
+            // a short log. Buffered replay reads this to end the block with a
+            // marker naming the condition instead of a silent truncation.
+            let mut drain_issues: Vec<DrainIssue> = Vec::new();
 
             let outcome: std::result::Result<(), TaskFailure> = async {
                 // Acquire semaphore permit. A tty task takes every permit, so nothing
@@ -285,12 +293,24 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         }
                         Ok(Ok(Err(e))) => {
                             error!("Stdout processing failed for task {task_name}: {e}");
+                            drain_issues.push(DrainIssue {
+                                stream: OutputType::Stdout,
+                                condition: DrainCondition::ProcessingError,
+                            });
                         }
                         Ok(Err(e)) => {
                             error!("Stdout processing join failed for task {task_name}: {e}");
+                            drain_issues.push(DrainIssue {
+                                stream: OutputType::Stdout,
+                                condition: DrainCondition::JoinError,
+                            });
                         }
                         Err(_) => {
                             error!("Stdout processing timed out for task {task_name}");
+                            drain_issues.push(DrainIssue {
+                                stream: OutputType::Stdout,
+                                condition: DrainCondition::Timeout,
+                            });
                         }
                     }
 
@@ -300,12 +320,24 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         }
                         Ok(Ok(Err(e))) => {
                             error!("Stderr processing failed for task {task_name}: {e}");
+                            drain_issues.push(DrainIssue {
+                                stream: OutputType::Stderr,
+                                condition: DrainCondition::ProcessingError,
+                            });
                         }
                         Ok(Err(e)) => {
                             error!("Stderr processing join failed for task {task_name}: {e}");
+                            drain_issues.push(DrainIssue {
+                                stream: OutputType::Stderr,
+                                condition: DrainCondition::JoinError,
+                            });
                         }
                         Err(_) => {
                             error!("Stderr processing timed out for task {task_name}");
+                            drain_issues.push(DrainIssue {
+                                stream: OutputType::Stderr,
+                                condition: DrainCondition::Timeout,
+                            });
                         }
                     }
 
@@ -386,7 +418,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         }
                     }
 
-                    TaskReport::success(task_name.clone())
+                    TaskReport::success(task_name.clone()).with_drain(drain_issues)
                 }
                 Err(TaskFailure { error, exit_code: code }) => {
                     error!("Task {task_name} failed: {error}");
@@ -415,7 +447,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         let mut statuses = task_statuses.lock().await;
                         statuses.insert(task_name.clone(), TaskStatus::Failed(error.to_string()));
                     }
-                    TaskReport::failure(task_name.clone(), error, recorded)
+                    TaskReport::failure(task_name.clone(), error, recorded).with_drain(drain_issues)
                 }
             };
 

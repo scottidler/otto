@@ -46,10 +46,11 @@ impl Parser {
         serial_tasks: &HashSet<String>,
         requested_tasks: &[String],
         deferred: &mut HashSet<String>,
-    ) -> Result<(TaskSpecs, SerialMembership, DisplayOrderMap)> {
+    ) -> Result<ForeachExpansion> {
         let mut expanded: TaskSpecs = TaskSpecs::new();
         let mut membership: SerialMembership = HashMap::new();
         let mut display_order: DisplayOrderMap = HashMap::new();
+        let mut buffered: HashSet<String> = HashSet::new();
         let reachable = self.reachable_task_names(requested_tasks);
 
         for (name, spec) in &self.config_spec.tasks {
@@ -80,6 +81,16 @@ impl Parser {
                 // Declared item order here is the same order `expand_foreach_with_items`
                 // assigned each subtask's `OTTO_FOREACH_INDEX` in, so the two never drift.
                 display_order.insert(name.clone(), subtasks.iter().map(|st| st.name.clone()).collect());
+
+                // `buffer: true` does not survive the expansion on its own: the
+                // subtasks are clones with `foreach = None` and the virtual parent
+                // is built by `as_virtual_parent()`, which drops `foreach` too. The
+                // parent name is recorded here, where the spec is still in hand, and
+                // the caller stamps `Task::buffered` onto the parent and every
+                // subtask (design doc Phase 4).
+                if foreach.buffer {
+                    buffered.insert(name.clone());
+                }
 
                 // Check if this task should run serially (CLI --Serial flag OR config parallel: false)
                 let run_serial = serial_tasks.contains(name) || spec.foreach.as_ref().is_some_and(|f| !f.parallel);
@@ -130,7 +141,12 @@ impl Parser {
             }
         }
 
-        Ok((expanded, membership, display_order))
+        Ok(ForeachExpansion {
+            specs: expanded,
+            membership,
+            display_order,
+            buffered,
+        })
     }
 
     /// Collect all tasks needed to run a given task, including:
