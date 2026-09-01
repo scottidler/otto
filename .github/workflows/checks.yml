@@ -62,6 +62,69 @@ jobs:
     - name: Run otto quick (compile + clippy + fmt-check + test)
       run: otto quick
 
+  bash32:
+    # otto spawns `bash <script>`, so the interpreter for every `bash:` task is
+    # whatever `bash` PATH resolves to. On macOS that is /bin/bash 3.2.57, which
+    # Apple froze at the last GPLv2 release and will never update. Two bugs
+    # shipped in v2.0.0-v2.0.3 because the suite only ever ran under a bash 5:
+    # a bash-4-only case fold aborted every task with a dependency, and the
+    # single-quote escape in the output writer produced a different string under
+    # 3.2, silently corrupting any value containing an apostrophe.
+    #
+    # This runs the real suite with `bash` pinned to the 3.2 that ships in the
+    # image, which is the interpreter our macOS users actually get.
+    #
+    # It lives HERE, not in ci.yml, so the release gate sees it: v2.0.5
+    # published from a SHA whose bash32 run was red, because this job sat in
+    # ci.yml while Release gates only on this reusable workflow. This file's
+    # header says it is the one definition of "did the suite pass"; that is
+    # only true while every suite-running job is in it.
+    name: Suite under macOS /bin/bash 3.2
+    runs-on: macos-14
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ env.RUST_VERSION }}
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: "v1-rust"
+        shared-key: macos-14
+
+    # The image may carry a Homebrew bash ahead of /bin on PATH, which would
+    # make this job a duplicate of the Linux run. Pin it explicitly.
+    - name: Pin `bash` to /bin/bash 3.2
+      run: |
+        set -euo pipefail
+        version_line=$(/bin/bash --version | head -1)
+        echo "$version_line"
+        case "$version_line" in
+          *"version 3."*) ;;
+          *)
+            echo "::error::/bin/bash is no longer 3.x; needs rewriting"
+            exit 1
+            ;;
+        esac
+        mkdir -p "$RUNNER_TEMP/bash32"
+        ln -sf /bin/bash "$RUNNER_TEMP/bash32/bash"
+        echo "$RUNNER_TEMP/bash32" >> "$GITHUB_PATH"
+
+    - name: Confirm the pin took
+      run: bash --version | head -1
+
+    # `--no-fail-fast`: cargo stops after the first failing test binary, so a
+    # platform difference in one target hides every other one behind it. This
+    # job exists to find them, so it runs them all.
+    - name: Test
+      run: cargo test --locked --no-fail-fast
+
   # The coverage floor, on the runner. `otto ci` is what chains `cov` locally,
   # but `ci` also pulls in `lint`, which shells out to a personal `whitespace`
   # binary with no published release and therefore no CI-portable install path
