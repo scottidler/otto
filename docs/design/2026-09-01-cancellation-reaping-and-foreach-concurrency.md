@@ -128,7 +128,13 @@ Moving foreach items onto a per-group semaphore fixes gate 2 and leaves gate 1 i
 What replaces it:
 
 - Items of a group carrying `jobs` are **exempt from both gates**: they do not count against `active_tasks.len() < max_concurrent`, and they acquire from a per-group `Semaphore::new(N)` (or `Semaphore::new(item_count)` for `all`) instead of the shared one.
-- Exclusivity is kept by a counter, not a permit: an `AtomicUsize` of in-flight exempt items. `permits_for`'s tty path additionally waits for that counter to reach zero before it takes its permits, and an exempt item refuses to start while a tty task holds the semaphore. Two conditions, one invariant, no fake permit.
+- **Exclusivity is decided in the launch loop, which is already single-threaded, not by a second runtime predicate.** `execute_all`'s `while active_tasks.len() < max_concurrent && !ready_queue.is_empty()` (`scheduler.rs:1021`) is the one admission point in the program: it runs in one task, and `active_tasks` is a local it alone mutates. Two rules go there, and only there:
+  - do not admit a `tty: true` task while any exempt item is in flight;
+  - do not admit an exempt item while a `tty: true` task is in flight.
+
+  Everything else is untouched. `permits_for` and the shared semaphore keep handling tty-versus-normal exactly as today, so the FIFO guarantee documented at `task_execution.rs:52-53` ("tokio's semaphore is FIFO, so this wait cannot be starved by later single-permit acquires") still holds: the tty path never leaves the queue to wait on anything else.
+
+  **This replaces a mechanism that was wrong.** The first version of this fix used an `AtomicUsize` of in-flight exempt items, with the tty path waiting for zero and exempt items checking that no tty task held the semaphore. Panel round 1 (synthesis, not a seat: the text postdated the seats' snapshot) found the TOCTOU: two unsynchronized predicates over two pieces of state, so an exempt item can read "no tty holds the semaphore" while the tty path concurrently reads "counter == 0", and both proceed. A barrier test would pass most runs. It also cost the tty path its FIFO position. Deciding both rules in the serialized loop removes the second predicate rather than trying to order two of them.
 - **Consequence, stated rather than discovered later:** a `jobs: all` group of never-exiting items blocks a later `tty: true` task for as long as the group runs, which for `otto logs` is forever. This is not a regression. A single never-exiting task holds a shared permit forever today and starves a later tty task identically. It is the cost of asking for the exemption, and `logs` is the last task in a run by construction.
 
 **An actionable unknown-field error, and NO api bump.** The strict-parse failure path gets a wrapper: an `unknown field` serde error is re-emitted with a trailing line naming the likely cause and the fix. That is the whole of the otto-side change, and it helps from this release forward.
@@ -187,7 +193,7 @@ No Phase 0. The one environmental assumption this design rests on (that a Ctrl+C
 - Live-child registry on the scheduler; body inserts after spawn, removes on both exit paths.
 - `abandon_run` walks it: `killpg` SIGTERM -> `CANCEL_GRACE` -> `killpg` SIGKILL, direct `kill` for the `tty` case.
 - `CANCEL_GRACE` const beside `OUTPUT_PROCESSING_TIMEOUT_SECS`, with the rationale in a doc comment.
-- Update the `task_execution.rs:200-204` comment: it currently describes a reachability the code does not use, which is what hid this for two releases.
+- Update BOTH stale comments, since either one alone re-hides the bug: `task_execution.rs:200-204` describes a group reachability the code never uses, and `support.rs:150-153` (`abandon_run`'s own doc comment) asserts outright that "`kill_on_drop(true)` on every spawned command means aborting the task bodies takes the processes with them." That second one is the more dangerous of the two: it sits on the function being changed and states the false guarantee as the reason the function is correct.
 - Snapshot the pgid list before the first signal; both passes iterate the snapshot. `ESRCH` ignored on the second pass, `EPERM` loud.
 - **Success criteria:** (a) a pty test spawns a parallel foreach whose bodies each fork a `sleep 600` grandchild, interrupts with a literal `0x03`, and asserts every recorded grandchild pid is gone (checked by `/proc/<pid>/cmdline`, not pid liveness alone, since pids recycle); (b) break-the-code: with the `killpg` call removed the same test fails, and the grandchildren survive; (c) a `tty: true` task's cancellation does not signal otto itself, asserted by otto reaching its normal non-zero exit rather than dying of its own SIGTERM; (d) **the grace-window case**: the direct child exits on SIGTERM while a grandchild traps and ignores it, so the body deregisters during `CANCEL_GRACE`; the grandchild is still reaped, which fails if the SIGKILL pass reads the live registry instead of the snapshot.
 
@@ -202,8 +208,8 @@ No Phase 0. The one environmental assumption this design rests on (that a Ctrl+C
 **Model:** opus
 - Exempt the group's items from BOTH gates: the outer `active_tasks.len() < max_concurrent` launch cap (`scheduler.rs:1021`) and the shared semaphore acquire (`task_execution.rs:54`). Fixing only the semaphore leaves the launch cap in force and changes nothing.
 - Items acquire from a per-group `Semaphore::new(N)` / `Semaphore::new(item_count)`.
-- `tty` exclusivity via an `AtomicUsize` of in-flight exempt items, checked in both directions.
-- **Success criteria:** (a) 10 items, `parallel: true`, `jobs: all`, global `-j 2`, each body blocking on a fifo: all 10 write their start marker. `Observed on main` for the unguarded shape: `started_count=2`; (b) the same fixture with `jobs: 4` starts exactly 4 and the fifth only after one exits; (c) a `tty: true` task and a `jobs: all` group in one run never overlap, proved by a barrier file rather than timing, **with `max_parallel = 1`**, which is the case where a fake permit would have looked correct; (d) a `tty: true` task that becomes ready WHILE an exempt group is in flight waits for it, rather than starting alongside it.
+- `tty` exclusivity as two admission rules in the single-threaded launch loop, not as a runtime predicate. No new atomic, no change to `permits_for`, FIFO preserved.
+- **Success criteria:** (a) 10 items, `parallel: true`, `jobs: all`, global `-j 2`, each body blocking on a fifo: all 10 write their start marker. `Observed on main` for the unguarded shape: `started_count=2`; (b) the same fixture with `jobs: 4` starts exactly 4 and the fifth only after one exits; (c) a `tty: true` task and a `jobs: all` group in one run never overlap, proved by a barrier file rather than timing, **with `max_parallel = 1`**, which is the case where a fake permit would have looked correct; (d) a `tty: true` task that becomes ready WHILE an exempt group is in flight waits for it, rather than starting alongside it, and the mirror case (an exempt group becoming ready while a tty task runs) also waits; (e) break-the-code: deleting either admission rule fails (c) or (d), which is what pins that the check lives in the loop and not in a racing predicate.
 
 #### Phase 4: An actionable unknown-field error
 **Model:** sonnet
@@ -243,8 +249,12 @@ Each criterion's literal command was run against current `main` (`a6cd589`, v2.1
 - [ ] **`SUPPORTED_API_VERSIONS` still contains exactly `["1"]` after every phase.**
   `Observed on main:` `pub const SUPPORTED_API_VERSIONS: &[&str] = &[CURRENT_API_VERSION];`, one entry. This criterion guards a decision, not a feature: the doc's first draft proposed adding `"2"` and the policy at `src/cfg/otto.rs:20-26` forbids it for additive keys.
 
-- [ ] **`otto --tasks --format json` on an ottofile setting none of the new keys is byte-identical before and after all five phases.**
-  `Observed on main:` baseline captured, 20 top-level keys on `otto-dev@main`, `subtasks` present per task. Not yet comparable; the after-side does not exist.
+- [ ] **REGRESSION GUARD, not phase verification: `otto --tasks --format json` on an ottofile setting none of the new keys is byte-identical before and after all five phases.**
+  `Observed on main:` baseline captured, 20 top-level keys on `otto-dev@main`, `subtasks` present per task.
+  **Labelled honestly after panel round 1, because as originally written it was vacuous.** `TaskView` (`src/cli/commands/tasks.rs:25-30`) has exactly four fields: `help`, `params`, `edges`, `subtasks`. No `ForeachSpec` field reaches that serializer, so adding `jobs` cannot change this output whether Phase 2 is right or wrong. It is worth keeping as a guard against an unintended change to the view, and it verifies nothing about the phase it sat under. The architect seat reached the right verdict here through the wrong mechanism (crediting `skip_serializing_if`), which is why the reasoning is recorded rather than just the verdict.
+
+- [ ] **Every ottofile under `examples/` still loads, and `otto examples` passes, after the schema change.**
+  `Observed on main:` `otto ci` green at `a6cd589` includes `examples_integration_test`. This is the criterion that actually bites when a `ForeachSpec` field is added wrong, since `deny_unknown_fields` and the typed parse are what Phase 2 touches.
 
 ## Resolved Decisions
 
@@ -263,6 +273,9 @@ Panel round 1 (Architect + Staff Engineer), 2026-09-01. Every finding below was 
 - **The Phase 2 inventory criterion was FALSE as written.** Staff seat: `src/cfg/task_tests.rs:1057` is a literal `assert_eq!(total, 45, ...)` with per-struct counts at `:992`. Both get edited; the criterion now says so.
 - **`bin/ttv` cheap-win widened.** Staff seat found a second copy of the stale premise at otto-dev `CLAUDE.md:49-52`, beyond the `scripts/lib.sh` one. Both are in the otto-dev item now.
 - **Held against both seats: nothing.** No pushbacks. Every must-fix from both seats is folded in above.
+- **The Phase 3 TOCTOU, found by the synthesis rather than a seat**, in text written after the seats' snapshot. The `AtomicUsize` replacement had two unsynchronized predicates over two pieces of state and cost the tty path its FIFO position. Solved rather than logged as an open question: both admission rules move into `execute_all`'s launch loop, which is single-threaded and already owns `active_tasks`, so there is no second predicate to race. Open Questions stays empty.
+- **Criterion 5 was vacuous and is relabelled**, also from the synthesis: `TaskView` has four fields and none derive from `ForeachSpec`, so a `--tasks` byte-identity check cannot fail because of Phase 2. Kept as a regression guard, with a real Phase 2 criterion (the `examples/` load) added beside it.
+- **Process note, recorded because it cost the seats accuracy:** I told the panel the doc was frozen and then edited it while the seats were running, 56 diff lines against their snapshot. Their findings still landed, but every one had to be re-read against text they had not seen. The doc is frozen for any future round, or the round is not dispatched.
 
 ## Alternatives Considered
 
