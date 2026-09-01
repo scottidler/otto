@@ -230,6 +230,7 @@ fn rich_key_reflects_current_fields() {
         nargs: Nargs::default(),
         help: None,
         value: Value::Empty,
+        required: false,
     };
     assert_eq!(rich_key(&spec), "-v|--verbose");
 

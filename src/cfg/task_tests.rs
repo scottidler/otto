@@ -968,6 +968,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         choices_command: _,
         nargs: _,
         help: _,
+        required: _,
         value: _,
     } = serde_yaml::from_str::<ParamSpec>("{}\n").unwrap();
     // EdgeSpec has two bookkeeping fields (`from_sugar`, `is_injected_sugar`)
@@ -1019,7 +1020,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         ),
         (
             "ParamSpec",
-            6,
+            7,
             expected_keys_from_deny_unknown_fields::<ParamSpec>,
             param_path,
         ),
@@ -1052,8 +1053,8 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         total += keys.len();
     }
     assert_eq!(
-        total, 42,
-        "total on-disk key count drifted from the design doc's count of 42"
+        total, 43,
+        "total on-disk key count drifted from the design doc's count of 43"
     );
 
     // The per-key loop above only proves each key *name* appears somewhere on

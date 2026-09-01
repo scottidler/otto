@@ -434,6 +434,7 @@ fn create_test_param_spec(name: &str, param_type: ParamType, short: Option<char>
         nargs: Nargs::default(),
         help: Some(format!("Help for {name}")),
         value: Value::Empty,
+        required: false,
     }
 }
 

@@ -46,6 +46,15 @@ pub struct ParamView {
     pub choices_command: Option<String>,
     pub default: Option<String>,
     pub positional: bool,
+    // Emitted only when true: a plain param (the overwhelming majority of
+    // existing ottofiles) must emit nothing new here, or this doc's own
+    // additivity goal breaks for every `--tasks` consumer.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub required: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -141,6 +150,7 @@ fn param_view(spec: &crate::cfg::config::ParamSpec) -> ParamView {
         choices_command,
         default: spec.default.clone(),
         positional: spec.param_type == ParamType::POS,
+        required: spec.required,
     }
 }
 

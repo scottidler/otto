@@ -33,6 +33,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Output format".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -50,6 +51,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Output file path".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -93,6 +95,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Keep runs from the last N days".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -110,6 +113,7 @@ impl Parser {
                         nargs: Nargs::Zero,
                         help: Some("Show what would be deleted without actually deleting".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -127,6 +131,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Only clean runs for a specific project".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -170,6 +175,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Show history for a specific task".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -187,6 +193,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Limit number of results".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -204,6 +211,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Filter by status".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -221,6 +229,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Filter by project hash".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -238,6 +247,7 @@ impl Parser {
                         nargs: Nargs::Zero,
                         help: Some("Output as JSON".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -281,6 +291,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Show stats for a specific task".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -298,6 +309,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Limit number of tasks shown".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -315,6 +327,7 @@ impl Parser {
                         nargs: Nargs::Zero,
                         help: Some("Output as JSON".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -358,6 +371,7 @@ impl Parser {
                         nargs: Nargs::Zero,
                         help: Some("Treat warnings as errors".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -375,6 +389,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Output file (default: stdout)".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -418,6 +433,7 @@ impl Parser {
                         nargs: Nargs::Zero,
                         help: Some("Show what would be done without doing it".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -435,6 +451,7 @@ impl Parser {
                         nargs: Nargs::One,
                         help: Some("Specific version to upgrade to".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -452,6 +469,7 @@ impl Parser {
                         nargs: Nargs::Zero,
                         help: Some("List available versions".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -469,6 +487,7 @@ impl Parser {
                         nargs: Nargs::Zero,
                         help: Some("Rollback to previous version".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -486,6 +505,7 @@ impl Parser {
                         nargs: Nargs::Zero,
                         help: Some("Force upgrade even if already on target version".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 
@@ -503,6 +523,7 @@ impl Parser {
                         nargs: Nargs::Zero,
                         help: Some("Skip creating backup".to_string()),
                         value: Value::Empty,
+                        required: false,
                     },
                 );
 

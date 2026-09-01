@@ -343,6 +343,15 @@ fn unknown_task_error(unknown: &[String], task_names: &[String]) -> eyre::Report
     }
 }
 
+/// The error a bare `otto <task>` fails with when `task` declares a required
+/// param and got no arguments at all - otto's own error, not clap's, because
+/// clap never runs for this shape (`discovery.rs`'s bind gate skips it) and
+/// the whole point of the preflight is not making it run just to say so.
+fn required_param_error(task_name: &str, missing: &[&str]) -> eyre::Report {
+    let names = missing.join(", ");
+    eyre!("task '{task_name}': missing required param(s): {names}")
+}
+
 /// The clap `num_args` range implied by a param's `nargs:`.
 ///
 /// `Nargs::Range(min, max)` stores `min` already offset by one (see

@@ -60,6 +60,11 @@ impl Parser {
             // surface including `--help` reports the misconfiguration.
             Self::validate_foreach_sources(&config_spec)?;
 
+            // Validate `required: true` combinations (FLG, default:,
+            // zero-capable nargs) and required-positional ordering.
+            // Shape-only, executes nothing.
+            Self::validate_required_params(&config_spec)?;
+
             Ok((config_spec, hash, Some(ottofile)))
         } else {
             Err(eyre!("{}", ottofile_not_found_message()))
@@ -70,6 +75,37 @@ impl Parser {
         for (task_name, task_spec) in &config.tasks {
             if let Some(foreach) = &task_spec.foreach {
                 foreach.validate_sources(task_name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `required: true` rejections: each param's own shape (`ParamSpec::validate_required`)
+    /// plus the one cross-param property that needs declaration order - a
+    /// required positional after an optional one, which clap panics building
+    /// (design doc Phase 1).
+    fn validate_required_params(config: &ConfigSpec) -> Result<()> {
+        for (task_name, task_spec) in &config.tasks {
+            let mut last_optional_positional: Option<&str> = None;
+            for param_spec in task_spec.params.values() {
+                param_spec.validate_required(task_name)?;
+
+                if param_spec.param_type != ParamType::POS {
+                    continue;
+                }
+                if param_spec.required {
+                    if let Some(earlier) = last_optional_positional {
+                        return Err(eyre!(
+                            "Task '{task_name}': required positional param '{}' is declared after \
+                             optional positional param '{earlier}'; clap panics building a command \
+                             with that shape, so declare every required positional before any \
+                             optional one",
+                            param_spec.name
+                        ));
+                    }
+                } else {
+                    last_optional_positional = Some(param_spec.name.as_str());
+                }
             }
         }
         Ok(())

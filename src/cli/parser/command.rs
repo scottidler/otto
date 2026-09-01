@@ -97,6 +97,15 @@ impl Parser {
                 // Argument with value
                 arg = arg.value_parser(value_parser!(String));
 
+                // Load-time validation (`Parser::validate_required_params`)
+                // already rejected `required: true` on a `FLG` and combined
+                // with `default:` or a zero-capable `nargs`, so setting this
+                // unconditionally here is safe: it never fires for a param
+                // that couldn't reach clap in a broken shape.
+                if param_spec.required {
+                    arg = arg.required(true);
+                }
+
                 // `nargs` had zero readers outside cfg/param.rs: parsed,
                 // serialized, and never consulted when building the clap
                 // `Arg`, so every param accepted exactly one value no matter

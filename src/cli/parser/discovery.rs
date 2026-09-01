@@ -164,7 +164,56 @@ impl Parser {
             .collect()
     }
 
+    /// A bare `otto <task>` (task named, zero arguments) for a task that
+    /// declares a required param never reaches clap: the bind gate below
+    /// (`args.len() > 1`) skips clap entirely for that shape, and clap is
+    /// the only place `required` is enforced (design doc Phase 1). This
+    /// answers from `self.pargs` and each task's `ParamSpec`s alone - no
+    /// `global_envs()`, no clap `Command`, no dynamic choices - so the error
+    /// path for the case this feature exists for runs zero subprocesses.
+    ///
+    /// Only tasks literally NAMED on the command line are checked: a task
+    /// reached only as a dependency, or only via `otto.tasks:` defaults, has
+    /// no partition in `self.pargs` at all (not a length-1 one), so it is
+    /// left alone here exactly as `choices` already leaves it alone.
+    fn preflight_required_params(&self, requested_tasks: &[String]) -> Result<()> {
+        for task_name in requested_tasks {
+            let Some(task_spec) = self.config_spec.tasks.get(task_name) else {
+                continue;
+            };
+            let missing: Vec<&str> = task_spec
+                .params
+                .values()
+                .filter(|p| p.required)
+                .map(|p| p.name.as_str())
+                .collect();
+            if missing.is_empty() {
+                continue;
+            }
+
+            let partition_len = self
+                .pargs
+                .iter()
+                .find(|args| !args.is_empty() && args[0] == *task_name)
+                .map_or(0, Vec::len);
+            // Exactly 1: the task's own name with no following args. A task
+            // invoked WITH arguments (len > 1) takes today's clap gate, where
+            // `required` still fires, just later and with today's cost
+            // profile - unchanged by this doc.
+            if partition_len == 1 {
+                return Err(required_param_error(task_name, &missing));
+            }
+        }
+        Ok(())
+    }
+
     fn process_tasks_with_filter(&self, requested_tasks: &[String]) -> Result<Vec<Task>> {
+        // BEFORE Step 0: reads partitions and ParamSpecs only, so a bare
+        // invocation of a task with a missing required param errors without
+        // resolving global envs, task envs, a clap Command, or dynamic
+        // choices (design doc Phase 1).
+        self.preflight_required_params(requested_tasks)?;
+
         // Step 0: Evaluate global environment variables once
         // (memoized: a command-sourced foreach may already have forced this
         // evaluation at partition time, and both sites must see one result)

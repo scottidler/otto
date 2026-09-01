@@ -130,7 +130,7 @@ here too.
 | `tasks.<name>.foreach.parallel` | boolean | `true` | Whether subtasks run concurrently or serially. This is the key that must live HERE, not one level up on the task — the motivating bug for this whole design doc was `parallel:` written beside `foreach:` instead of inside it. |
 | `tasks.<name>.foreach.max_items` | integer | `1000` | Maximum item count before erroring. |
 
-## `tasks.<name>.params.<title>:` (`ParamSpec`) — 6 keys
+## `tasks.<name>.params.<title>:` (`ParamSpec`) — 7 keys
 
 The `params:` map's keys are **rich titles**, e.g. `-v|--verbose`, `-s`,
 `--service`, or a bare word for a positional param — free-form, parsed by
@@ -157,6 +157,7 @@ ignored, key.
 | `...params.<title>.choices-command` | string | none | **Kebab key.** Shell command whose stdout lines become the allowed value set (dynamic choices), resolved lazily and at most once per invocation. |
 | `...params.<title>.nargs` | string | `"1"` | One of `"0"`, `"1"`, `"?"` (zero-or-one), `"+"` (one-or-more), `"*"` (zero-or-more), a bare integer `"N"` (max count, min 0), or `"N:M"` (min:max, 1-indexed on disk). Wired to clap's `num_args`: a value of more than one collects every space-separated value from one occurrence. |
 | `...params.<title>.help` | string | none | Help text shown for this param. |
+| `...params.<title>.required` | boolean | `false` | clap enforces the value (a usage error instead of an empty variable). Rejected at load together with a `FLG` param, `default:`, or an `nargs` of `"0"`/`"?"`/`"*"` (all mean "may appear zero times"), and rejected if it declares a required positional after an optional one (clap panics on that shape). Fires only when the task is named on the command line: a task pulled in only as a dependency has no CLI partition and runs with the param unset, matching `choices`. |
 
 `dest` and `constant` were removed (design doc `2026-06-10-code-review-remediation.md`,
 Phase 6): both parsed and serialized but had zero readers outside
@@ -294,10 +295,10 @@ accept arbitrary keys:
 3. **`params:` (`tasks.<name>.params`)** — keys are rich param titles parsed
    by `divine()`, values are `tasks.<name>.params.<title>:`.
 
-## Total: 42 fixed keys across the seven structs
+## Total: 43 fixed keys across the seven structs
 
 `ConfigSpec` 2 + `OttoSpec` 7 + `RetentionSpec` 5 + `ForeachSpec` 7 +
-`TaskSpecHelper` 13 + `ParamSpec` 6 + `EdgeSpec` 2 = **42**. This count, and
+`TaskSpecHelper` 13 + `ParamSpec` 7 + `EdgeSpec` 2 = **43**. This count, and
 every key name above, is pinned by an automated drift test
 (`ottofile_reference_key_inventory_is_exhaustive`, in
 `src/cfg/task.rs`'s `#[cfg(test)]` module): it destructures a live instance of
@@ -306,7 +307,7 @@ gains or loses a field, before any test even runs) and separately recovers
 each struct's real on-disk key list from its "unknown field" error message
 (fed a deliberately bogus key — `deny_unknown_fields`'s derive-generated
 error for the six Architecture-table structs, `EdgeSpec`'s hand-written
-`visit_map` error for the seventh), then asserts every one of those 42
+`visit_map` error for the seventh), then asserts every one of those 43
 recovered keys is mentioned, verbatim, on this page. The stated total and the
 per-struct arithmetic in this section are pinned by the same test, so a wrong
 count here is a red build rather than a footnote nobody re-adds up. If this

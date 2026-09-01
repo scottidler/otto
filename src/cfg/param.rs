@@ -101,10 +101,27 @@ pub struct ParamSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
 
+    // clap enforces this (`arg.required(true)` in `param_to_arg`), with a
+    // preflight ahead of it: `discovery.rs`'s clap bind gate never runs for a
+    // task named with zero arguments, so an unadorned `required: true` alone
+    // would not fire on the bare-invocation case this key exists for (design
+    // doc `2026-08-31-buffered-foreach-computed-envs-required-params.md`,
+    // Phase 1). Skipped on serialize when false so a plain param emits
+    // nothing new.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub required: bool,
+
     // Runtime state, populated after CLI parsing — never part of the on-disk
     // ottofile representation.
     #[serde(skip)]
     pub value: Value,
+}
+
+/// `serde`'s `skip_serializing_if` needs a named function; `bool::not` doesn't
+/// have the right signature (`&bool -> bool`, not `bool -> bool`), so a plain
+/// closure can't be named in the attribute either.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ParamSpec {
@@ -114,6 +131,47 @@ impl ParamSpec {
     #[must_use]
     pub fn has_dynamic_choices(&self) -> bool {
         self.choices_command.is_some()
+    }
+
+    /// Load-time rejections for `required: true`, checked before any
+    /// subprocess runs so every rejection is shape-only (design doc Phase 1).
+    ///
+    /// Positional-after-optional-positional ordering is NOT checked here: it
+    /// is a cross-param, declaration-order property of one task's whole
+    /// params map, not a single param's own shape, so it is checked once per
+    /// task by the caller (`Parser::validate_required_params`).
+    pub fn validate_required(&self, task_name: &str) -> Result<()> {
+        if !self.required {
+            return Ok(());
+        }
+        if self.param_type == ParamType::FLG {
+            return Err(eyre::eyre!(
+                "Task '{task_name}' param '{}': `required: true` on a flag is meaningless; a \
+                 required boolean that must always be passed is a constant",
+                self.name
+            ));
+        }
+        if self.default.is_some() {
+            return Err(eyre::eyre!(
+                "Task '{task_name}' param '{}': `required: true` cannot be combined with \
+                 `default:`; a default makes required unreachable",
+                self.name
+            ));
+        }
+        let zero_capable = match self.nargs {
+            Nargs::Zero => Some("0"),
+            Nargs::OneOrZero => Some("?"),
+            Nargs::ZeroOrMore => Some("*"),
+            Nargs::One | Nargs::OneOrMore | Nargs::Range(..) => None,
+        };
+        if let Some(spelling) = zero_capable {
+            return Err(eyre::eyre!(
+                "Task '{task_name}' param '{}': `required: true` cannot be combined with \
+                 `nargs: '{spelling}'`, which means the param may appear zero times",
+                self.name
+            ));
+        }
+        Ok(())
     }
 
     /// Resolve a `choices-command:` param source: run the command and turn its

@@ -106,6 +106,7 @@ fn build_tasks_view_carries_edges_and_params() {
             nargs: Nargs::One,
             help: Some("service name".to_string()),
             value: Value::Empty,
+            required: false,
         },
     );
 
@@ -126,6 +127,74 @@ fn build_tasks_view_carries_edges_and_params() {
     );
     assert_eq!(deploy.params[0].default, Some("web".to_string()));
     assert!(!deploy.params[0].positional);
+}
+
+/// Additivity (design doc `2026-08-31-...-required-params.md`, Phase 1,
+/// success criterion (g)): a plain param's rendered JSON must not gain a
+/// `required` key at all, not even `false`, or every existing `--tasks`
+/// consumer's output would change for an ottofile that sets none of the new
+/// keys.
+#[test]
+fn a_plain_param_omits_required_entirely_from_rendered_json() {
+    let mut task = plain_task("deploy");
+    task.params.insert(
+        "svc".to_string(),
+        ParamSpec {
+            name: "svc".to_string(),
+            short: Some('s'),
+            long: Some("svc".to_string()),
+            param_type: ParamType::OPT,
+            metavar: None,
+            default: None,
+            choices_command: None,
+            choices: vec![],
+            nargs: Nargs::One,
+            help: None,
+            value: Value::Empty,
+            required: false,
+        },
+    );
+    let mut tasks = TaskSpecs::new();
+    tasks.insert("deploy".to_string(), task);
+
+    let view = build_tasks_view(&tasks, &static_resolver).unwrap();
+    let json = render_tasks_view(&view, TasksFormat::Json).unwrap();
+
+    assert!(
+        !json.contains("required"),
+        "plain param must not mention required: {json}"
+    );
+}
+
+/// The other half: a required param DOES carry `"required": true`.
+#[test]
+fn a_required_param_carries_required_true_in_rendered_json() {
+    let mut task = plain_task("sw");
+    task.params.insert(
+        "svc".to_string(),
+        ParamSpec {
+            name: "svc".to_string(),
+            short: None,
+            long: None,
+            param_type: ParamType::POS,
+            metavar: None,
+            default: None,
+            choices_command: None,
+            choices: vec![],
+            nargs: Nargs::One,
+            help: None,
+            value: Value::Empty,
+            required: true,
+        },
+    );
+    let mut tasks = TaskSpecs::new();
+    tasks.insert("sw".to_string(), task);
+
+    let view = build_tasks_view(&tasks, &static_resolver).unwrap();
+    assert!(view["sw"].params[0].required);
+    let json = render_tasks_view(&view, TasksFormat::Json).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["sw"]["params"][0]["required"], true, "{json}");
 }
 
 #[test]
