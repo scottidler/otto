@@ -524,7 +524,7 @@ Fixtures live under `/tmp/claude-1000/fx`. Every `Observed on main` line was run
 | A shadowing literal `envs:` key loses the computed value it self-references | Med | Med | Layering rather than merging; Phase 2 criterion (f) pins `FOO=[computed]` |
 | `envs-command` output shadows something a task depends on | Low | Med | Literal `envs:` wins; precedence pinned by test |
 | `required` breaks an existing ottofile | Low | Low | Additive with `#[serde(default)] false`; unset means today's behavior |
-| Audit batches 8-14 land on code this doc moves | Med | Med | Ship order stated above: finish the batches, or re-run 9 and 11 after |
+| Audit batches 8-14 land on code this doc moves | Med | Med | Ship order stated above: finish the batches, or re-run 9, 11, and 14 after. The ordering did slip (implementation landed first, `2a396e1..9f3c5d1`), so the fallback is what was taken: all three re-ran at `33b3731` and are DONE in `2026-08-30-audit-batch-handoff.md`'s batch table |
 | The new output lock serializes live task output and slows a wide parallel run | Med | Med | Lock is per line for live writers, exactly the granularity `print!` already takes internally; Phase 4 criterion (d) pins correctness, and the barrier fixture pins that concurrency survives |
 | A required positional declared after an optional one panics clap at build time | Med | High | Load-time guard in Phase 1, with criterion (d) asserting no panic on all four rejected combinations |
 
