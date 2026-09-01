@@ -367,3 +367,72 @@ tasks:
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(stdout(&output).contains("svc=[]"), "{}", stdout(&output));
 }
+
+/// Criterion (f), completed. When Phase 1 landed, `otto.envs-command` did not
+/// exist yet, so the "no subprocess on the error path" property could only be
+/// pinned with a literal `envs:` substitution's marker. Now the key exists,
+/// and the preflight's placement (before Step 0, not at the clap gate) is what
+/// keeps its subprocess off this path too: `global_envs()` resolves at
+/// `discovery.rs:171`, about 64 lines before the gate.
+fn envs_command_and_choices_fixture(envs_marker: &Path, choices_marker: &Path) -> String {
+    format!(
+        r#"
+otto:
+  api: 1
+  envs-command: "touch {envs_marker} && printf 'ALLOWED=alpha\n'"
+
+tasks:
+  switch:
+    params:
+      svc:
+        choices-command: "touch {choices_marker} && echo alpha"
+        required: true
+    bash: echo "svc=${{svc}}"
+"#,
+        envs_marker = envs_marker.display(),
+        choices_marker = choices_marker.display(),
+    )
+}
+
+#[test]
+fn bare_invocation_touches_neither_the_envs_command_marker_nor_the_choices_command_marker() {
+    let temp = TempDir::new().unwrap();
+    let envs_marker = temp.path().join("envs-command-marker");
+    let choices_marker = temp.path().join("choices-marker");
+    let ottofile = write_ottofile(
+        temp.path(),
+        &envs_command_and_choices_fixture(&envs_marker, &choices_marker),
+    );
+
+    let output = otto(&ottofile, &["switch"]);
+
+    assert!(!output.status.success(), "must not run: {}", stdout(&output));
+    assert!(
+        !envs_marker.exists(),
+        "otto.envs-command must not have run on the preflight-rejected path"
+    );
+    assert!(
+        !choices_marker.exists(),
+        "choices-command must not have run on the preflight-rejected path"
+    );
+}
+
+/// Positive control for the pair above: both commands DO run once a value is
+/// supplied, so the two absences are the preflight's doing rather than a
+/// broken fixture.
+#[test]
+fn supplying_the_value_resolves_both_the_envs_command_and_the_choices_command() {
+    let temp = TempDir::new().unwrap();
+    let envs_marker = temp.path().join("envs-command-marker");
+    let choices_marker = temp.path().join("choices-marker");
+    let ottofile = write_ottofile(
+        temp.path(),
+        &envs_command_and_choices_fixture(&envs_marker, &choices_marker),
+    );
+
+    let output = otto(&ottofile, &["switch", "alpha"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(envs_marker.exists(), "otto.envs-command must have run");
+    assert!(choices_marker.exists(), "choices-command must have run");
+}

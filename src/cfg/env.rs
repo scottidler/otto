@@ -3,12 +3,30 @@ use std::collections::HashMap;
 use std::env;
 use std::process::Command;
 
-/// Evaluate environment variables with shell command substitution and variable resolution
+/// Evaluate environment variables with shell command substitution and variable resolution.
+///
+/// `base_overrides` LAYERS under the declared map: it is applied on top of the
+/// inherited process environment before anything is evaluated, and it is the
+/// floor of the returned map. That is what makes `otto.envs-command` output
+/// visible to task bodies while a literal `envs:` entry for the same key still
+/// wins the final value - and, because [`evaluation_context`] seeds a key's
+/// *inherited* value when evaluating that key, a shadowing literal that
+/// self-references (`FOO: '$(echo "${FOO:-x}")'`) sees the computed value
+/// rather than the OS one. Merging the overrides into the declared map instead
+/// would discard the computed value on exactly that shape.
+///
+/// Callers with nothing to layer pass an empty map and behave identically to
+/// before the parameter existed.
 pub fn evaluate_envs(
     envs: &HashMap<String, String>,
     working_dir: Option<&std::path::Path>,
+    base_overrides: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    log::debug!("cfg::evaluate_envs: keys={} working_dir={working_dir:?}", envs.len());
+    log::debug!(
+        "cfg::evaluate_envs: keys={} working_dir={working_dir:?} base_overrides={}",
+        envs.len(),
+        base_overrides.len()
+    );
     let mut evaluated = HashMap::new();
     // Name *and* value, borrowed straight from `envs`: carrying the pair is what
     // keeps the retry loop free of a map lookup that could only be unwrapped.
@@ -27,9 +45,11 @@ pub fn evaluate_envs(
     // with "Maximum iterations reached", purely on HashMap seeding order.
     let max_iterations = envs.len() + 1;
 
-    // The environment otto itself was invoked with, before any declared key shadows it.
-    // This is what a declared key's own expression reads when it references itself.
-    let inherited: HashMap<String, String> = env::vars().collect();
+    // The environment otto itself was invoked with, before any declared key shadows it,
+    // with `base_overrides` layered on top. This is what a declared key's own expression
+    // reads when it references itself.
+    let mut inherited: HashMap<String, String> = env::vars().collect();
+    inherited.extend(base_overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     // Baseline context shared by every expression: system environment minus every declared
     // key, so a reference to a declared-but-not-yet-resolved key defers instead of silently
@@ -109,7 +129,58 @@ pub fn evaluate_envs(
         ));
     }
 
-    Ok(evaluated)
+    // The overrides are the floor, the declared map is the ceiling: an explicit
+    // `envs:` entry wins its key, everything else the layer carried survives.
+    let mut result = base_overrides.clone();
+    result.extend(evaluated);
+    Ok(result)
+}
+
+/// Parse `KEY=VALUE` lines (the `otto.envs-command` output format) into a map.
+///
+/// Deliberately narrow, because command output is DATA: values are taken
+/// literally, with no unquoting, no `$(...)` re-evaluation and no `${VAR}`
+/// expansion. The line format is `env` and `export`'s, so duplicate keys are
+/// last-wins rather than an error.
+///
+/// Skipped: blank lines, and lines whose first non-space character is `#`.
+/// Loud, naming the line number and the line: a line with no `=`, and a key
+/// that is not `[A-Za-z_][A-Za-z0-9_]*` (which is what makes `FOO = bar`, whose
+/// key would be `FOO `, an error rather than a silently-misnamed variable).
+/// Empty input is legal and means "no variables" - an env set can legitimately
+/// be empty, unlike a `choices-command`'s validation set.
+pub fn parse_env_assignments(stdout: &str) -> Result<HashMap<String, String>> {
+    let mut parsed = HashMap::new();
+    for (index, raw_line) in stdout.lines().enumerate() {
+        let number = index + 1;
+        // `str::lines` already drops a `\r\n`'s carriage return; this catches
+        // the lone trailing `\r` a Windows-ish generator can still emit, which
+        // would otherwise ride into the value invisibly.
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            return Err(eyre!("line {number} is not KEY=VALUE: '{line}'"));
+        };
+        if !is_valid_env_key(key) {
+            return Err(eyre!("line {number} has an invalid key '{key}': '{line}'"));
+        }
+        parsed.insert(key.to_string(), value.to_string());
+    }
+    Ok(parsed)
+}
+
+/// `[A-Za-z_][A-Za-z0-9_]*`, spelled out rather than pulled through a regex
+/// dependency for one predicate.
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Build the evaluation context for one expression.

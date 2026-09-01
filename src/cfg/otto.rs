@@ -259,6 +259,13 @@ pub struct OttoSpec {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub envs: HashMap<String, String>,
 
+    /// Command whose `KEY=VALUE` stdout LAYERS under `envs` as global
+    /// environment variables. Kebab on disk, matching `on-failure` and
+    /// `choices-command`. Resolved at most once per invocation, lazily, and
+    /// never for `--help`; a literal `envs:` entry still wins its key.
+    #[serde(default, rename = "envs-command", skip_serializing_if = "Option::is_none")]
+    pub envs_command: Option<String>,
+
     #[serde(default, skip_serializing_if = "RetentionSpec::is_default")]
     pub retention: RetentionSpec,
 }
@@ -272,6 +279,7 @@ impl Default for OttoSpec {
             jobs: default_jobs(),
             tasks: default_tasks(),
             envs: HashMap::new(),
+            envs_command: None,
             retention: RetentionSpec::default(),
         }
     }

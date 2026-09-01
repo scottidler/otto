@@ -13,11 +13,17 @@
 //!   command, never a silent empty expansion.
 //!
 //! `DynamicResolver` owns the caches (interior mutability, so the `&self`
-//! parser call sites keep working) and `run_lines_command` owns the one
+//! parser call sites keep working) and `run_command_stdout` owns the one
 //! execution contract every dynamic source shares: `sh -c`, cwd = the
 //! ottofile's directory, env = inherited environment + resolved global
 //! `envs:`, plus a recursion guard variable so a nested otto cannot resolve
-//! the same source again.
+//! the same source again. `run_lines_command` is the trim-and-filter wrapper
+//! over it that foreach items and dynamic choices want.
+//!
+//! `otto.envs-command` shares that execution contract but NOT these caches:
+//! it resolves inside the `global_envs` initializer, which sits upstream of
+//! every `RefCell` here, and re-entering the `OnceCell` from its own
+//! initializer would panic. The `OnceCell` already gives it once-per-invocation.
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
@@ -35,6 +41,12 @@ pub const FOREACH_GUARD_VAR: &str = "OTTO_FOREACH_COMMAND";
 /// Environment variable naming the `task:param` choices source(s) currently
 /// being resolved. Symmetric with `FOREACH_GUARD_VAR`.
 pub const CHOICES_GUARD_VAR: &str = "OTTO_CHOICES_COMMAND";
+
+/// Environment variable naming the `otto.envs-command` currently being
+/// resolved. Symmetric with the other two, except that there is exactly one
+/// resolution per invocation, so the guard *key* is a fixed literal rather
+/// than a task name.
+pub const ENVS_GUARD_VAR: &str = "OTTO_ENVS_COMMAND";
 
 /// Per-invocation cache for everything a dynamic source resolves.
 ///
@@ -127,10 +139,10 @@ impl DynamicResolver {
 
 /// Run a dynamic source's command and return its non-empty, trimmed stdout lines.
 ///
-/// `context` prefixes every error (e.g. `foreach task 'up'`); `guard_var` /
-/// `guard_key` implement the recursion guard: if `guard_var` already names
-/// `guard_key`, this errors instead of recursing, and the child process sees
-/// `guard_key` appended so an inner otto can make the same check.
+/// The trim-and-filter wrapper over [`run_command_stdout`], which owns the
+/// shared execution contract. Foreach items and dynamic choices both want
+/// trimmed, non-empty lines; `otto.envs-command` calls the raw form directly
+/// because `KEY=  spaced value  ` must survive byte-for-byte.
 pub fn run_lines_command(
     command: &str,
     cwd: &Path,
@@ -139,6 +151,35 @@ pub fn run_lines_command(
     guard_key: &str,
     context: &str,
 ) -> Result<Vec<String>> {
+    let stdout = run_command_stdout(command, cwd, envs, guard_var, guard_key, context)?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
+/// Run a dynamic source's command and return its stdout verbatim.
+///
+/// This is the one execution contract every command source shares: `sh -c`,
+/// cwd = the ottofile's directory, the caller's env layered onto the inherited
+/// one (no `env_clear`), a loud non-zero exit naming the command and its
+/// trimmed stderr, and stderr passthrough on success so a generator's own
+/// warnings stay visible while stdout stays pure data.
+///
+/// `context` prefixes every error (e.g. `foreach task 'up'`); `guard_var` /
+/// `guard_key` implement the recursion guard: if `guard_var` already names
+/// `guard_key`, this errors instead of recursing, and the child process sees
+/// `guard_key` appended so an inner otto can make the same check.
+pub fn run_command_stdout(
+    command: &str,
+    cwd: &Path,
+    envs: &HashMap<String, String>,
+    guard_var: &str,
+    guard_key: &str,
+    context: &str,
+) -> Result<String> {
     let chain = std::env::var(guard_var).unwrap_or_default();
     if chain.split(',').any(|entry| entry == guard_key) {
         return Err(eyre!(
@@ -183,12 +224,7 @@ pub fn run_lines_command(
         eprint!("{stderr}");
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToString::to_string)
-        .collect())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[path = "resolver_tests.rs"]

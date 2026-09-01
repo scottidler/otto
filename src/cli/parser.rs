@@ -23,7 +23,7 @@ use crate::cfg::config::{ConfigSpec, ParamSpec, TaskSpec, Value};
 use crate::cfg::edge::When;
 use crate::cfg::env as env_eval;
 use crate::cfg::param::{Nargs, ParamType};
-use crate::cfg::resolver::DynamicResolver;
+use crate::cfg::resolver::{self, DynamicResolver};
 use crate::cfg::task::{ForeachItem, ForeachSpec, TaskSpecs};
 use crate::cli::builtins::{BUILTIN_COMMANDS, is_builtin};
 
@@ -71,6 +71,14 @@ impl std::fmt::Display for OttofileSource {
 /// pre-parses the flag (logging is configured before a parser exists) and
 /// reads the same list, so the two can't drift.
 pub const LOG_LEVELS: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
+
+/// Guard key for `otto.envs-command`'s recursion chain. A fixed literal, not a
+/// task name: there is exactly one `envs-command` resolution per invocation.
+const ENVS_GUARD_KEY: &str = "otto.envs-command";
+
+/// Error prefix for everything `otto.envs-command` can fail at, so a message
+/// names the key the user wrote rather than an internal function.
+const ENVS_COMMAND_CONTEXT: &str = "otto.envs-command";
 
 const OTTOFILES: &[&str] = &[
     "otto.yml",
@@ -530,7 +538,7 @@ impl Task {
 
         // Then, evaluate and add task-level environment variables (overriding global ones)
         if !task_envs.is_empty() {
-            let task_evaluated_envs = env_eval::evaluate_envs(task_envs, Some(cwd))?;
+            let task_evaluated_envs = env_eval::evaluate_envs(task_envs, Some(cwd), &HashMap::new())?;
             for (key, value) in task_evaluated_envs {
                 merged_envs.insert(key, value);
             }
@@ -671,12 +679,45 @@ impl Parser {
     /// Phase 2).
     fn global_envs(&self) -> Result<&HashMap<String, String>> {
         self.resolver.global_envs(|| {
-            if self.config_spec.otto.envs.is_empty() {
-                Ok(HashMap::new())
-            } else {
-                env_eval::evaluate_envs(&self.config_spec.otto.envs, Some(self.base_dir()))
+            // Inside the initializer, ahead of `evaluate_envs`, and NOT through
+            // `DynamicResolver`'s own caches: those sit downstream of this
+            // `OnceCell`, and re-entering it from its own initializer panics.
+            // The cell already gives once-per-invocation, and being here is
+            // what makes `envs-command` inherit `envs:`' laziness exactly -
+            // never for `--help`, otherwise whenever something needs the map.
+            let computed = self.resolve_envs_command()?;
+            if self.config_spec.otto.envs.is_empty() && computed.is_empty() {
+                return Ok(HashMap::new());
             }
+            env_eval::evaluate_envs(&self.config_spec.otto.envs, Some(self.base_dir()), &computed)
         })
+    }
+
+    /// Run `otto.envs-command` and parse its `KEY=VALUE` stdout.
+    ///
+    /// Shares `run_command_stdout`'s execution contract (guard chain, `sh -c`,
+    /// cwd = `base_dir()`, loud non-zero exit, stderr passthrough) with the raw
+    /// stdout form, so whitespace inside a value survives byte-for-byte where
+    /// `run_lines_command`'s per-line `trim` would have eaten it.
+    ///
+    /// Two things the shared contract cannot give it: the guard key is a fixed
+    /// literal rather than a task name (one resolution per invocation), and the
+    /// command's environment is the inherited one only, because the global env
+    /// map is what this call is in the middle of computing.
+    fn resolve_envs_command(&self) -> Result<HashMap<String, String>> {
+        let Some(command) = self.config_spec.otto.envs_command.as_deref() else {
+            return Ok(HashMap::new());
+        };
+        let stdout = resolver::run_command_stdout(
+            command,
+            self.base_dir(),
+            &HashMap::new(),
+            resolver::ENVS_GUARD_VAR,
+            ENVS_GUARD_KEY,
+            ENVS_COMMAND_CONTEXT,
+        )?;
+        env_eval::parse_env_assignments(&stdout)
+            .map_err(|e| eyre!("{ENVS_COMMAND_CONTEXT}: command '{command}' produced invalid output: {e}"))
     }
 
     /// Resolve one task's foreach items, running a command source at most once

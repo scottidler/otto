@@ -255,7 +255,7 @@ fn test_evaluate_envs_unmatched_substitution_names_key_and_value() {
     let mut envs = HashMap::new();
     envs.insert("BROKEN".to_string(), "$(echo hello".to_string());
 
-    let error = evaluate_envs(&envs, None).unwrap_err().to_string();
+    let error = evaluate_envs(&envs, None, &HashMap::new()).unwrap_err().to_string();
     assert!(
         error.contains("BROKEN") && error.contains("unmatched '$('") && error.contains("$(echo hello"),
         "expected key and value in the error, got: {error}"
@@ -271,7 +271,7 @@ fn test_evaluate_envs_nested_and_quoted_substitutions() {
     envs.insert("PARENQ".to_string(), r#"$(echo ")")"#.to_string());
     envs.insert("SIBLING".to_string(), "plain-value".to_string());
 
-    let result = evaluate_envs(&envs, None).unwrap();
+    let result = evaluate_envs(&envs, None, &HashMap::new()).unwrap();
     assert_eq!(result.get("NESTED").unwrap(), "b");
     assert_eq!(result.get("PARENQ").unwrap(), ")");
     assert_eq!(result.get("SIBLING").unwrap(), "plain-value");
@@ -294,7 +294,7 @@ fn test_evaluate_envs_simple() {
         env::set_var("TEST_USER", "testuser");
     }
 
-    let result = evaluate_envs(&envs, None).unwrap();
+    let result = evaluate_envs(&envs, None, &HashMap::new()).unwrap();
     assert_eq!(result.get("GREETING").unwrap(), "Hello testuser");
 
     // Clean up our test variable
@@ -308,7 +308,7 @@ fn test_evaluate_envs_with_shell_command() {
     let mut envs = HashMap::new();
     envs.insert("ECHO_TEST".to_string(), "$(echo hello world)".to_string());
 
-    let result = evaluate_envs(&envs, None).unwrap();
+    let result = evaluate_envs(&envs, None, &HashMap::new()).unwrap();
     assert_eq!(result.get("ECHO_TEST").unwrap(), "hello world");
 }
 
@@ -319,7 +319,7 @@ fn test_evaluate_envs_dependency_chain() {
     envs.insert("VERSION".to_string(), "$(echo 1.0.0)".to_string());
     envs.insert("FULL_NAME".to_string(), "${BASE}-${VERSION}".to_string());
 
-    let result = evaluate_envs(&envs, None).unwrap();
+    let result = evaluate_envs(&envs, None, &HashMap::new()).unwrap();
     assert_eq!(result.get("BASE").unwrap(), "myapp");
     assert_eq!(result.get("VERSION").unwrap(), "1.0.0");
     assert_eq!(result.get("FULL_NAME").unwrap(), "myapp-1.0.0");
@@ -338,7 +338,7 @@ fn test_evaluate_envs_self_reference_reads_inherited_value() {
     let mut envs = HashMap::new();
     envs.insert(key.to_string(), format!("$(echo \"${{{key}:-fallback}}\")"));
 
-    let result = evaluate_envs(&envs, None).unwrap();
+    let result = evaluate_envs(&envs, None, &HashMap::new()).unwrap();
 
     unsafe {
         env::remove_var(key);
@@ -358,7 +358,7 @@ fn test_evaluate_envs_self_reference_falls_back_when_unset() {
     let mut envs = HashMap::new();
     envs.insert(key.to_string(), format!("$(echo \"${{{key}:-fallback}}\")"));
 
-    let result = evaluate_envs(&envs, None).unwrap();
+    let result = evaluate_envs(&envs, None, &HashMap::new()).unwrap();
     assert_eq!(result.get(key).unwrap(), "fallback");
 }
 
@@ -374,7 +374,7 @@ fn test_evaluate_envs_self_reference_outside_command_substitution() {
     let mut envs = HashMap::new();
     envs.insert(key.to_string(), format!("${{{key}}}/suffix"));
 
-    let result = evaluate_envs(&envs, None).unwrap();
+    let result = evaluate_envs(&envs, None, &HashMap::new()).unwrap();
 
     unsafe {
         env::remove_var(key);
@@ -439,7 +439,7 @@ fn test_evaluate_envs_cross_references_never_read_inherited_values() {
                 envs.insert((*key).to_string(), value.clone());
             }
 
-            let result = evaluate_envs(&envs, None).unwrap();
+            let result = evaluate_envs(&envs, None, &HashMap::new()).unwrap();
             let expected = [
                 (keys[0], "inherited-a-x"),
                 (keys[1], "inherited-a-x-b"),
@@ -485,7 +485,7 @@ fn test_evaluate_envs_circular_reference_still_errors() {
     envs.insert(a.to_string(), format!("${{{b}}}"));
     envs.insert(b.to_string(), format!("${{{a}}}"));
 
-    let error = evaluate_envs(&envs, None).unwrap_err().to_string();
+    let error = evaluate_envs(&envs, None, &HashMap::new()).unwrap_err().to_string();
     assert!(
         error.contains("Circular dependency between environment variables") && error.contains(a) && error.contains(b),
         "expected a cycle named as a cycle, got: {error}"
@@ -507,7 +507,7 @@ fn test_evaluate_envs_circular_reference_errors_even_when_inherited() {
     envs.insert(a.to_string(), format!("${{{b}}}"));
     envs.insert(b.to_string(), format!("${{{a}}}"));
 
-    let result = evaluate_envs(&envs, None);
+    let result = evaluate_envs(&envs, None, &HashMap::new());
 
     unsafe {
         env::remove_var(a);
@@ -533,7 +533,7 @@ fn command_output_is_not_rescanned_for_variable_references() {
 
     let mut envs = HashMap::new();
     envs.insert("LEAK".to_string(), "$(echo '$OTTO_TEST_PARENTVAL')".to_string());
-    let result = evaluate_envs(&envs, None);
+    let result = evaluate_envs(&envs, None, &HashMap::new());
 
     unsafe {
         env::remove_var("OTTO_TEST_PARENTVAL");
@@ -555,7 +555,8 @@ fn command_output_naming_an_undefined_variable_is_still_text() {
     let mut envs = HashMap::new();
     envs.insert("MSG".to_string(), "$(echo 'cost is $undefined_thing')".to_string());
 
-    let evaluated = evaluate_envs(&envs, None).expect("undefined name in output must not fail the load");
+    let evaluated =
+        evaluate_envs(&envs, None, &HashMap::new()).expect("undefined name in output must not fail the load");
     assert_eq!(
         evaluated.get("MSG").map(String::as_str),
         Some("cost is $undefined_thing")
@@ -595,7 +596,7 @@ fn double_dollar_is_a_literal_dollar() {
 
     let mut envs = HashMap::new();
     envs.insert("LITERAL".to_string(), "$$(echo ran)".to_string());
-    let evaluated = evaluate_envs(&envs, None).expect("an escaped $( must not execute");
+    let evaluated = evaluate_envs(&envs, None, &HashMap::new()).expect("an escaped $( must not execute");
     assert_eq!(
         evaluated.get("LITERAL").map(String::as_str),
         Some("$(echo ran)"),
@@ -620,8 +621,8 @@ fn a_deep_chain_resolves_at_any_depth() {
             envs.insert(format!("V{i}"), format!("${{V{}}}-{i}", i - 1));
         }
 
-        let evaluated =
-            evaluate_envs(&envs, None).unwrap_or_else(|e| panic!("a {depth}-deep chain must resolve, got: {e}"));
+        let evaluated = evaluate_envs(&envs, None, &HashMap::new())
+            .unwrap_or_else(|e| panic!("a {depth}-deep chain must resolve, got: {e}"));
 
         let tail = evaluated
             .get(&format!("V{depth}"))
@@ -647,10 +648,10 @@ fn a_deep_chain_resolves_identically_across_repeats() {
         envs.insert(format!("V{i}"), format!("${{V{}}}-{i}", i - 1));
     }
 
-    let first = evaluate_envs(&envs, None).expect("first pass must resolve");
+    let first = evaluate_envs(&envs, None, &HashMap::new()).expect("first pass must resolve");
     for run in 2..=10 {
-        let again =
-            evaluate_envs(&envs, None).unwrap_or_else(|e| panic!("run {run} of the same map must resolve, got: {e}"));
+        let again = evaluate_envs(&envs, None, &HashMap::new())
+            .unwrap_or_else(|e| panic!("run {run} of the same map must resolve, got: {e}"));
         assert_eq!(first, again, "run {run} disagreed with run 1 on identical input");
     }
 }
@@ -663,11 +664,201 @@ fn a_cycle_still_fails_closed_with_the_per_key_budget() {
     envs.insert("X".to_string(), "${Y}-x".to_string());
     envs.insert("Y".to_string(), "${X}-y".to_string());
 
-    let err = evaluate_envs(&envs, None)
+    let err = evaluate_envs(&envs, None, &HashMap::new())
         .expect_err("a cycle must not resolve")
         .to_string();
     assert!(
         err.contains("Circular dependency between environment variables"),
         "a cycle must be reported as one, got: {err}"
     );
+}
+
+// ----------------------------------------------------------------------
+// `base_overrides`: the layer `otto.envs-command` output arrives on.
+// ----------------------------------------------------------------------
+
+/// The layer is the floor of the returned map, so a computed key with no
+/// literal `envs:` counterpart still reaches the task.
+#[test]
+fn base_overrides_survive_into_the_result() {
+    let mut base = HashMap::new();
+    base.insert("COMPUTED".to_string(), "from-command".to_string());
+
+    let result = evaluate_envs(&HashMap::new(), None, &base).unwrap();
+
+    assert_eq!(result.get("COMPUTED").map(String::as_str), Some("from-command"));
+}
+
+/// An explicit `envs:` entry wins its own key. This is the precedence rule
+/// stated in the design doc: the more specific declaration wins, and it gives
+/// a consumer a one-line override without editing the command.
+#[test]
+fn a_declared_key_beats_the_same_key_in_the_base_layer() {
+    let mut base = HashMap::new();
+    base.insert("FOO".to_string(), "computed".to_string());
+    let mut envs = HashMap::new();
+    envs.insert("FOO".to_string(), "explicit".to_string());
+
+    let result = evaluate_envs(&envs, None, &base).unwrap();
+
+    assert_eq!(result.get("FOO").map(String::as_str), Some("explicit"));
+}
+
+/// The layering-not-merging case: a declared key that *self-references* reads
+/// the computed value, because the base layer seeds the inherited environment
+/// that `evaluation_context` hands the key's own expression. Merging the
+/// command's output into the declared map instead would resolve this to the
+/// fallback (or, when the OS has the variable, to the OS value).
+#[test]
+#[serial]
+fn a_self_referencing_declared_key_reads_the_base_layer_value() {
+    let mut base = HashMap::new();
+    base.insert("FOO".to_string(), "computed".to_string());
+    let mut envs = HashMap::new();
+    envs.insert("FOO".to_string(), "$(echo \"${FOO:-fallback}\")".to_string());
+
+    let result = evaluate_envs(&envs, None, &base).unwrap();
+
+    assert_eq!(
+        result.get("FOO").map(String::as_str),
+        Some("computed"),
+        "a shadowing self-reference must see the layered value, not the fallback"
+    );
+}
+
+/// A declared key can read a *different* key the layer carries, because the
+/// layer is part of the base environment every expression evaluates against.
+#[test]
+fn a_declared_key_can_reference_a_base_layer_key() {
+    let mut base = HashMap::new();
+    base.insert("ROOT".to_string(), "/srv/philo".to_string());
+    let mut envs = HashMap::new();
+    envs.insert("BIN".to_string(), "${ROOT}/bin".to_string());
+
+    let result = evaluate_envs(&envs, None, &base).unwrap();
+
+    assert_eq!(result.get("BIN").map(String::as_str), Some("/srv/philo/bin"));
+}
+
+// ----------------------------------------------------------------------
+// `parse_env_assignments`: the `KEY=VALUE` format `otto.envs-command` emits.
+// ----------------------------------------------------------------------
+
+#[test]
+fn parse_env_assignments_reads_plain_pairs() {
+    let parsed = parse_env_assignments("FOO=bar\nBAZ=qux\n").unwrap();
+
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed.get("FOO").map(String::as_str), Some("bar"));
+    assert_eq!(parsed.get("BAZ").map(String::as_str), Some("qux"));
+}
+
+/// Empty output is legal and means "no variables" - an env set can
+/// legitimately be empty on a machine with nothing cloned, unlike a
+/// `choices-command`'s validation set.
+#[test]
+fn parse_env_assignments_accepts_empty_output() {
+    assert!(parse_env_assignments("").unwrap().is_empty());
+    assert!(parse_env_assignments("\n\n").unwrap().is_empty());
+}
+
+/// Split on the FIRST `=`, so a value containing `=` survives whole.
+#[test]
+fn parse_env_assignments_splits_on_the_first_equals() {
+    let parsed = parse_env_assignments("FLAGS=-Dx=1 -Dy=2\n").unwrap();
+
+    assert_eq!(parsed.get("FLAGS").map(String::as_str), Some("-Dx=1 -Dy=2"));
+}
+
+/// Whitespace inside a value survives byte-for-byte. This is why the command
+/// runs through `run_command_stdout` (raw) rather than `run_lines_command`
+/// (per-line `str::trim`).
+#[test]
+fn parse_env_assignments_keeps_whitespace_in_a_value() {
+    let parsed = parse_env_assignments("KEY=  spaced value  \n").unwrap();
+
+    assert_eq!(parsed.get("KEY").map(String::as_str), Some("  spaced value  "));
+}
+
+/// An empty value is a real value, not a missing one.
+#[test]
+fn parse_env_assignments_accepts_an_empty_value() {
+    let parsed = parse_env_assignments("EMPTY=\n").unwrap();
+
+    assert_eq!(parsed.get("EMPTY").map(String::as_str), Some(""));
+}
+
+#[test]
+fn parse_env_assignments_skips_blank_and_comment_lines() {
+    let parsed = parse_env_assignments("# a header\n\n   # indented comment\nFOO=bar\n").unwrap();
+
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed.get("FOO").map(String::as_str), Some("bar"));
+}
+
+/// Leading whitespace before the KEY is skipped; a `#` inside a value is not
+/// a comment, since only the line's first non-space character starts one.
+#[test]
+fn parse_env_assignments_skips_leading_whitespace_before_the_key() {
+    let parsed = parse_env_assignments("   FOO=bar # not a comment\n").unwrap();
+
+    assert_eq!(parsed.get("FOO").map(String::as_str), Some("bar # not a comment"));
+}
+
+/// CRLF: the carriage return never rides into the value.
+#[test]
+fn parse_env_assignments_strips_a_trailing_carriage_return() {
+    let parsed = parse_env_assignments("FOO=bar\r\nBAZ=qux\r\n").unwrap();
+
+    assert_eq!(parsed.get("FOO").map(String::as_str), Some("bar"));
+    assert_eq!(parsed.get("BAZ").map(String::as_str), Some("qux"));
+}
+
+/// Duplicate keys are last-wins, matching `env` and `export`, not an error.
+#[test]
+fn parse_env_assignments_takes_the_last_duplicate() {
+    let parsed = parse_env_assignments("FOO=first\nFOO=second\n").unwrap();
+
+    assert_eq!(parsed.get("FOO").map(String::as_str), Some("second"));
+}
+
+#[test]
+fn parse_env_assignments_rejects_a_line_with_no_equals() {
+    let err = parse_env_assignments("FOO=bar\nnot-a-kv\n")
+        .expect_err("a line with no `=` must fail")
+        .to_string();
+
+    assert!(err.contains("line 2"), "must name the line number, got: {err}");
+    assert!(err.contains("not-a-kv"), "must quote the line, got: {err}");
+}
+
+#[test]
+fn parse_env_assignments_rejects_an_invalid_key() {
+    for (line, bad_key) in [("1FOO=bar", "1FOO"), ("FOO-BAR=x", "FOO-BAR"), ("FOO =bar", "FOO ")] {
+        let err = parse_env_assignments(line).unwrap_err().to_string();
+        assert!(err.contains("line 1"), "must name the line number, got: {err}");
+        assert!(
+            err.contains(bad_key),
+            "must name the offending key '{bad_key}', got: {err}"
+        );
+    }
+}
+
+/// A value is DATA: no unquoting, no `$(...)` re-evaluation, no `${VAR}`
+/// expansion. The v2.0.0 injection-containment rule, applied to this source.
+#[test]
+fn parse_env_assignments_takes_values_literally() {
+    let parsed = parse_env_assignments("A=$(rm -rf /)\nB=${HOME}\nC=\"quoted\"\n").unwrap();
+
+    assert_eq!(parsed.get("A").map(String::as_str), Some("$(rm -rf /)"));
+    assert_eq!(parsed.get("B").map(String::as_str), Some("${HOME}"));
+    assert_eq!(parsed.get("C").map(String::as_str), Some("\"quoted\""));
+}
+
+/// A leading underscore is a legal env-var name.
+#[test]
+fn parse_env_assignments_accepts_an_underscore_leading_key() {
+    let parsed = parse_env_assignments("_PRIVATE=x\n").unwrap();
+
+    assert_eq!(parsed.get("_PRIVATE").map(String::as_str), Some("x"));
 }

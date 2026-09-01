@@ -481,7 +481,7 @@ fn foreach_item_values_are_escaped_against_the_env_evaluator() {
     let injected = subtasks[0].envs.get("OTTO_FOREACH_ITEM").unwrap();
     assert_eq!(injected, "$${IFS}-$$(touch /tmp/OTTO_PWNED)");
 
-    let evaluated = crate::cfg::env::evaluate_envs(&subtasks[0].envs, None).unwrap();
+    let evaluated = crate::cfg::env::evaluate_envs(&subtasks[0].envs, None, &HashMap::new()).unwrap();
     assert_eq!(
         evaluated.get("OTTO_FOREACH_ITEM").map(String::as_str),
         Some("${IFS}-$(touch /tmp/OTTO_PWNED)")
@@ -924,6 +924,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         jobs: _,
         tasks: _,
         envs: _,
+        envs_command: _,
         retention: _,
     } = OttoSpec::default();
     let RetentionSpec {
@@ -996,7 +997,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         ),
         (
             "OttoSpec",
-            7,
+            8,
             expected_keys_from_deny_unknown_fields::<OttoSpec>,
             otto_path,
         ),
@@ -1053,8 +1054,8 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         total += keys.len();
     }
     assert_eq!(
-        total, 43,
-        "total on-disk key count drifted from the design doc's count of 43"
+        total, 44,
+        "total on-disk key count drifted from the design doc's count of 44"
     );
 
     // The per-key loop above only proves each key *name* appears somewhere on

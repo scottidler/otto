@@ -177,7 +177,7 @@ impl Task {
         let evaluated_merged = if merged_envs.is_empty() {
             HashMap::new()
         } else {
-            env_eval::evaluate_envs(&merged_envs, Some(working_dir))?
+            env_eval::evaluate_envs(&merged_envs, Some(working_dir), &HashMap::new())?
         };
 
         Ok(evaluated_merged)

@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use super::*;
+use serial_test::serial;
 use std::path::PathBuf;
 
 fn no_envs() -> HashMap<String, String> {
@@ -150,4 +151,69 @@ fn run_lines_command_refuses_to_recurse_on_the_same_choices_key() {
     assert!(err.contains("recursion detected"), "{err}");
     assert!(err.contains("switch:svc"), "{err}");
     assert!(err.contains(CHOICES_GUARD_VAR), "{err}");
+}
+
+// ----------------------------------------------------------------------
+// `run_command_stdout`: the raw form `otto.envs-command` uses.
+// ----------------------------------------------------------------------
+
+/// The whole point of the split: the raw form keeps whitespace and blank
+/// lines that `run_lines_command` trims and drops, so a `KEY=  spaced  ` pair
+/// survives byte-for-byte.
+#[test]
+#[serial]
+fn run_command_stdout_returns_output_verbatim() {
+    let stdout = run_command_stdout(
+        "printf 'alpha\\n\\n  beta  \\n'",
+        &PathBuf::from("."),
+        &no_envs(),
+        ENVS_GUARD_VAR,
+        "otto.envs-command",
+        "otto.envs-command",
+    )
+    .unwrap();
+    assert_eq!(stdout, "alpha\n\n  beta  \n");
+}
+
+/// Same exit-code contract as the wrapper: loud, naming the context, the
+/// command, the code, and the command's own stderr.
+#[test]
+#[serial]
+fn run_command_stdout_reports_nonzero_exit_with_command_and_context() {
+    let err = run_command_stdout(
+        "echo boom >&2; exit 3",
+        &PathBuf::from("."),
+        &no_envs(),
+        ENVS_GUARD_VAR,
+        "otto.envs-command",
+        "otto.envs-command",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("otto.envs-command"), "{err}");
+    assert!(err.contains("exit code 3"), "{err}");
+    assert!(err.contains("boom"), "{err}");
+}
+
+/// The guard chain is the same mechanism, with a fixed literal key rather
+/// than a task name: there is one `envs-command` resolution per invocation.
+#[test]
+#[serial]
+fn run_command_stdout_refuses_to_recurse_on_the_envs_command_key() {
+    // Stands in for a nested otto: the guard var already names the key.
+    unsafe { std::env::set_var(ENVS_GUARD_VAR, "otto.envs-command") };
+    let err = run_command_stdout(
+        "printf 'FOO=bar\n'",
+        &PathBuf::from("."),
+        &no_envs(),
+        ENVS_GUARD_VAR,
+        "otto.envs-command",
+        "otto.envs-command",
+    )
+    .unwrap_err()
+    .to_string();
+    unsafe { std::env::remove_var(ENVS_GUARD_VAR) };
+    assert!(err.contains("recursion detected"), "{err}");
+    assert!(err.contains("otto.envs-command"), "{err}");
+    assert!(err.contains(ENVS_GUARD_VAR), "{err}");
 }
