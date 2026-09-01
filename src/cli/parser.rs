@@ -708,7 +708,7 @@ impl Parser {
     /// The cwd is `base_dir()`, the ottofile's own directory, matching
     /// `foreach.command` (`:679`) and `choices-command`
     /// (`parser/command.rs:165`). It used to be the *process* cwd, so
-    /// `envs: {ROOT: '$(scripts/svc.sh root philo)'}` resolved relative paths
+    /// `envs: {ROOT: '$(scripts/svc.sh root web)'}` resolved relative paths
     /// against whoever ran otto: verified failing with exit 127 on plain
     /// `otto <task>` from a subdirectory, on `-C` aimed anywhere but the
     /// ottofile's directory, on `-o`, and on `$OTTOFILE`. One cwd contract for

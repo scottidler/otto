@@ -45,12 +45,12 @@ fn stderr(output: &Output) -> String {
 }
 
 /// A relative-path helper script beside the ottofile, exactly the shape
-/// otto-dev's `envs:` block uses (`$(scripts/svc.sh root philo)`).
+/// otto-dev's `envs:` block uses (`$(scripts/svc.sh root web)`).
 fn write_svc_script(dir: &Path) {
     let scripts = dir.join("scripts");
     fs::create_dir_all(&scripts).unwrap();
     let script = scripts.join("svc.sh");
-    fs::write(&script, "#!/bin/sh\necho /srv/philo\n").unwrap();
+    fs::write(&script, "#!/bin/sh\necho /srv/web\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -65,12 +65,12 @@ const RELATIVE_ENVS_FIXTURE: &str = r#"
 otto:
   api: 1
   envs:
-    PHILO_ROOT: "$(scripts/svc.sh root philo)"
+    WEB_ROOT: "$(scripts/svc.sh root web)"
 
 tasks:
   profiles:
     bash: |
-      echo "PHILO_ROOT=[${PHILO_ROOT}]"
+      echo "WEB_ROOT=[${WEB_ROOT}]"
 "#;
 
 // ----------------------------------------------------------------------
@@ -95,7 +95,7 @@ fn envs_substitution_resolves_against_the_ottofile_dir_under_dash_o() {
         stderr(&output)
     );
     assert!(
-        stdout(&output).contains("PHILO_ROOT=[/srv/philo]"),
+        stdout(&output).contains("WEB_ROOT=[/srv/web]"),
         "stdout: {}\nstderr: {}",
         stdout(&output),
         stderr(&output)
@@ -125,7 +125,7 @@ fn envs_substitution_resolves_from_a_subdirectory_with_no_flags() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("PHILO_ROOT=[/srv/philo]"),
+        String::from_utf8_lossy(&output.stdout).contains("WEB_ROOT=[/srv/web]"),
         "stdout: {}",
         String::from_utf8_lossy(&output.stdout)
     );
@@ -156,7 +156,7 @@ fn envs_substitution_resolves_when_dash_c_points_elsewhere() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("PHILO_ROOT=[/srv/philo]"),
+        String::from_utf8_lossy(&output.stdout).contains("WEB_ROOT=[/srv/web]"),
         "stdout: {}",
         String::from_utf8_lossy(&output.stdout)
     );
@@ -570,7 +570,7 @@ fn the_envs_command_runs_in_the_ottofile_directory() {
         r#"
 otto:
   api: 1
-  envs-command: "printf 'ROOT=%s\n' \"$(scripts/svc.sh root philo)\""
+  envs-command: "printf 'ROOT=%s\n' \"$(scripts/svc.sh root web)\""
 
 tasks:
   show:
@@ -582,7 +582,7 @@ tasks:
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(
-        stdout(&output).contains("ROOT=[/srv/philo]"),
+        stdout(&output).contains("ROOT=[/srv/web]"),
         "stdout: {}",
         stdout(&output)
     );

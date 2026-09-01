@@ -731,13 +731,13 @@ fn a_self_referencing_declared_key_reads_the_base_layer_value() {
 #[test]
 fn a_declared_key_can_reference_a_base_layer_key() {
     let mut base = HashMap::new();
-    base.insert("ROOT".to_string(), "/srv/philo".to_string());
+    base.insert("ROOT".to_string(), "/srv/web".to_string());
     let mut envs = HashMap::new();
     envs.insert("BIN".to_string(), "${ROOT}/bin".to_string());
 
     let result = evaluate_envs(&envs, None, &base).unwrap();
 
-    assert_eq!(result.get("BIN").map(String::as_str), Some("/srv/philo/bin"));
+    assert_eq!(result.get("BIN").map(String::as_str), Some("/srv/web/bin"));
 }
 
 // ----------------------------------------------------------------------
