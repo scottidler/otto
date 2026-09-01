@@ -275,11 +275,16 @@ fn test_every_fixture_round_trips_through_config_spec() {
 ///
 /// `test_every_fixture_round_trips_through_config_spec` deserializes the
 /// converted YAML directly, which proves serde accepts the shape and nothing
-/// more. Otto's actual load path does strictly more than deserialize: it gates
-/// on `otto.api`, rejects reserved builtin param names, and resolves the task
-/// graph. A conversion could satisfy serde and still be a file otto refuses to
-/// run, and that gap is what this test closes - by running the binary against
-/// the converted file and asking it to enumerate the tasks.
+/// more. Otto's binary load path does strictly more than deserialize: it gates
+/// on `otto.api` and rejects reserved builtin param names, and this test
+/// covers exactly that much by running the binary and asking it to enumerate
+/// the tasks. It does NOT resolve the task graph: `--tasks --format json`
+/// returns 0 on a file whose `before:` names a task that does not exist,
+/// while running that task fails with "unknown dependency". That is by
+/// construction - `makefiles/makefile-example` converts to exactly such a
+/// file, its dangling `build` edge disclosed by a converter warning that
+/// `test_every_converted_dependency_names_a_real_task` requires. Edge truth
+/// is that test's job, not this one's.
 #[test]
 fn test_every_fixture_loads_through_the_real_otto() {
     for name in converting_fixtures() {
