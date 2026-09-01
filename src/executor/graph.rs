@@ -507,7 +507,22 @@ impl DagVisualizer {
             if let Some(parent) = crate::naming::parent_of(&task.name) {
                 // This is a foreach subtask - only add the parent once
                 if !result.contains_key(parent) {
-                    let subtasks = foreach_groups.get(parent).unwrap();
+                    // Pass 1 groups by the same split_subtask predicate over the
+                    // same nodes, so this lookup cannot miss today. Guarded
+                    // anyway: if the two passes ever diverge, the subtask shows
+                    // uncollapsed rather than panicking inside display code.
+                    let Some(subtasks) = foreach_groups.get(parent) else {
+                        result.insert(
+                            task.name.clone(),
+                            CollapsedTaskInfo {
+                                display_name: task.name.clone(),
+                                deps: task.task_deps.iter().map(|d| d.task.clone()).collect(),
+                                file_deps_count: task.file_deps.len(),
+                                output_deps_count: task.output_deps.len(),
+                            },
+                        );
+                        continue;
+                    };
                     let count = subtasks.len();
 
                     // Try to get display name from original ForeachSpec, fall back to inference
