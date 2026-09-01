@@ -44,7 +44,7 @@ verdicts than items is rejected and re-run.
 | 10 | Phase 9 — Repo and dependency hygiene | 486-502 | 7 | **DONE** — 2 must-fix: `graph.rs` unwrap fixed at `8c402a0`, doc absolute at `021fd06` |
 | 11 | Phase 10 — Doc truth | 503-515 | 8 | **DONE** — 2 must-fix (bullet 3 + its own audit header), fixed at `021fd06`; 45-key inventory verified bijective |
 | 12 | Phase 11 — Test-gap closure | 516-589 | 10 | **DONE** — 2 must-fix (coverage denominator, unpinned cargo-llvm-cov), fixed at `0ca381d`, `ba71ad4`; 16 mutation proofs |
-| 13 | Acceptance Criteria | 590-638 | 8 | **DONE** — 2 must-fix: release-gate hole fixed at `574c2a4`, name-leak scrub at `b77d016` |
+| 13 | Acceptance Criteria | 590-638 | 8 | **DONE** — 2 must-fix: release-gate hole fixed at `574c2a4`, name-leak scrub at `b77d016`; its one DEFER (sweep against the private repo list) closed 2026-09-01, see criterion 8's dated correction |
 | 14 | Resolved Decisions that assert something about code | 639-662 | 21 | **DONE** — 3 must-fix (entries 12, 20, and the closing summary), fixed at `b77d016`, `574c2a4`, `021fd06` |
 
 Line numbers drift as fixes land. Re-derive with:
