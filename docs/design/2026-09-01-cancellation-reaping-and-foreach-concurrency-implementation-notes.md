@@ -122,3 +122,38 @@ Success criteria from the design doc, Phase 3. End-to-end tests are in `tests/fo
 
 - **Should `tty: true` combined with `foreach.jobs` be a load error?** It is expressible today, the two keys ask for opposite things, and this phase resolves it as tty-wins plus a `warn!`. A fifth entry in Phase 2's rejection table would be the honest answer (`fail loudly`), and it is a one-validator change beside `validate_foreach_jobs` - but adding it here would be reaching into a phase that is already committed, so it is surfaced rather than taken.
 - **The starvation the doc accepts is now real and observable:** a `jobs: all` group of never-exiting items blocks every later `tty: true` task for as long as the group runs, and head-of-line skipping means later exempt items keep starting past the waiting tty task. The doc calls this "not a regression" and the cost of the exemption; worth confirming that is still intended now that it is code rather than prose.
+
+## Phase 4: An actionable unknown-field error
+
+### Design decisions
+
+- **`wrap_unknown_field_error` lives in `src/cfg/otto.rs`, beside `check_api_version`** (`src/cfg/otto.rs:97-127`) — both are "make an ottofile-load failure name the upgrade" mechanisms, and both are read together by anyone auditing `SUPPORTED_API_VERSIONS` policy, so the doc comment for one can point at the other without a module hop.
+- **The wrapper is a plain string match on `"unknown field"`, not a `serde_yaml::Error` downcast** — `serde_yaml::Error` exposes no structured "this was a `deny_unknown_fields` rejection" variant to match on; the message text is the only signal serde gives, and it is the same text `deny_unknown_fields_names_a_misspelled_otto_task_key` and its siblings already assert on, so the repo already treats that substring as stable.
+- **Wired at the single call site, `src/cli/parser/config.rs`'s `load_config_from_path`** — `serde_yaml::from_str::<ConfigSpec>(&content).map_err(wrap_unknown_field_error)?` replaces the bare `?`. This is the only place an ottofile's typed parse happens, so every load path (`--tasks`, a real run, `otto doctor`) gets the wrapper for free rather than needing its own call.
+- **The trailing line hedges both explanations by construction, not by inspecting the key** — otto cannot tell "new key from a newer otto" from "typo" (see doc's Phase 4 rationale), so the wrapper does not try; it states both possibilities and names the one fix that helps if the first is true (`otto Upgrade`), satisfying success criterion (b) without a heuristic that could be wrong out loud.
+
+### Deviations
+
+None. The change is exactly what the doc specifies: wrap the strict-parse `unknown field` error with a trailing line, no api bump.
+
+### Tradeoffs
+
+- **String-match on `"unknown field"` vs a custom `Deserializer` wrapper that tags the failure kind at the point of rejection.** The custom-deserializer route would require re-deriving `deny_unknown_fields`' rejection by hand for both `ConfigSpec` and every nested `#[serde(deny_unknown_fields)]` struct, to attach a typed marker serde does not provide. The string match costs a substring check on an already-formatted error and nothing else; it is wrong only if serde ever changes its wording, which the existing negative tests would also break on first.
+- **Passing every other `serde_yaml::Error` through unchanged, rather than also softening type-mismatch or missing-field messages.** The doc's Phase 4 scope is the unknown-field path specifically ("An actionable unknown-field error"); widening it to every load failure would be scope creep this phase does not need, and `wrap_unknown_field_error_is_a_noop_for_other_serde_failures` pins that boundary.
+
+### Verification
+
+Success criteria from the design doc, Phase 4. Unit tests in `src/cfg/otto_tests.rs`; manual confirmation against the built binary below.
+
+- **(a) PASS** — `wrap_unknown_field_error_names_the_key_and_the_upgrade_fix` asserts the wrapped message contains both the offending key and `otto Upgrade`. Confirmed against the real binary: `otto -o <fixture with foreach.totally-fake-key> --tasks` prints `tasks.hi.foreach: unknown field \`totally-fake-key\`, expected one of ...` followed by `this key is either new to a newer otto than this binary, or simply misspelled in the ottofile; if the ottofile targets a newer otto, run \`otto Upgrade\` to update this binary`, `rc=1`.
+- **(b) PASS** — `wrap_unknown_field_error_hedges_a_genuine_misspelling` uses `tsaks:` (never a real otto key) and asserts the message contains both "misspelled" and "newer", i.e. it does not assert out-of-date as the only explanation. Confirmed against the real binary: same trailing line, same hedge, `rc=1`.
+- **(c) PASS** — `supported_api_versions_stays_exactly_one` asserts `SUPPORTED_API_VERSIONS == &["1"]`. `src/cfg/otto.rs:27` is untouched: `pub const SUPPORTED_API_VERSIONS: &[&str] = &[CURRENT_API_VERSION];`.
+- Extra test beyond the three criteria: `wrap_unknown_field_error_is_a_noop_for_other_serde_failures`, pinning that a type-mismatch error (`otto.jobs: not-a-number`) passes through byte-identical, so the wrapper's reach is bounded to unknown-field rejections.
+
+`cargo test --workspace --all-features`: 864 unit tests + all integration binaries green (44 test binaries, 0 failed). `cargo fmt --all` and `cargo clippy --workspace --all-features --all-targets`: both clean, no warnings.
+
+**Reduced gate, by explicit user decision for Phases 4 and 5 (overriding the doc's Testing Strategy line "Every phase carries a break-the-code check"):** no break-the-code check was run for this phase, and coverage was not measured. The gate used was `cargo test --workspace --all-features` plus `cargo fmt`/`cargo clippy`, not `otto ci`. The orchestrator runs one full `otto ci` before finalization.
+
+### Open questions
+
+None.

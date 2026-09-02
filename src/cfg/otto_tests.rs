@@ -104,6 +104,59 @@ retention:
     assert_eq!(spec.retention.keep_failed, 60); // default
 }
 
+/// Phase 4 success criterion (a): an unknown key this binary predates
+/// (the pre-2.1.0 upgrade cliff) fails with a message naming the key AND
+/// naming upgrading.
+#[test]
+fn wrap_unknown_field_error_names_the_key_and_the_upgrade_fix() {
+    use crate::cfg::config::ConfigSpec;
+    let yaml = "otto:\n  not-a-real-key: foo\ntasks:\n  up:\n    bash: echo hi\n";
+    let raw_err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err();
+    let wrapped = wrap_unknown_field_error(raw_err).to_string();
+    assert!(wrapped.contains("not-a-real-key"), "must still name the key: {wrapped}");
+    assert!(wrapped.contains("otto Upgrade"), "must name the fix: {wrapped}");
+}
+
+/// Phase 4 success criterion (b): a genuinely misspelled key (`tsaks:`, not
+/// a key any otto has ever shipped) gets the same wrapper, and the wrapper
+/// does not assert being out of date as the ONLY explanation.
+#[test]
+fn wrap_unknown_field_error_hedges_a_genuine_misspelling() {
+    use crate::cfg::config::ConfigSpec;
+    let yaml = "tsaks:\n  up:\n    bash: echo hi\n";
+    let raw_err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err();
+    let wrapped = wrap_unknown_field_error(raw_err).to_string();
+    assert!(wrapped.contains("tsaks"), "must still name the key: {wrapped}");
+    assert!(
+        wrapped.contains("misspelled") && wrapped.contains("newer"),
+        "must name both possibilities, not assert out-of-date alone: {wrapped}"
+    );
+}
+
+/// A non-unknown-field serde failure (here, a wrong scalar type) is passed
+/// through untouched: the trailing line only applies to "a key this binary
+/// does not recognize", not to every load failure.
+#[test]
+fn wrap_unknown_field_error_is_a_noop_for_other_serde_failures() {
+    use crate::cfg::config::ConfigSpec;
+    let yaml = "otto:\n  jobs: not-a-number\ntasks:\n  up:\n    bash: echo hi\n";
+    let raw_err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err();
+    let raw_message = raw_err.to_string();
+    let wrapped = wrap_unknown_field_error(raw_err).to_string();
+    assert_eq!(
+        wrapped, raw_message,
+        "non-unknown-field errors must pass through unchanged"
+    );
+}
+
+/// Phase 4 success criterion (c): the set stays exactly `["1"]`. Guards the
+/// policy at `src/cfg/otto.rs:20-26` against a later change quietly growing
+/// it for an additive key.
+#[test]
+fn supported_api_versions_stays_exactly_one() {
+    assert_eq!(SUPPORTED_API_VERSIONS, &["1"]);
+}
+
 #[test]
 fn test_otto_spec_without_retention() {
     let yaml = "name: test-project";

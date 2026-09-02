@@ -50,7 +50,13 @@ impl Parser {
             // added instead of telling the operator to upgrade.
             crate::cfg::otto::check_api_version(&content)?;
 
-            let config_spec: ConfigSpec = serde_yaml::from_str(&content)?;
+            // `deny_unknown_fields` already names the offending key and path.
+            // `wrap_unknown_field_error` adds a trailing line naming the
+            // likely cause (a newer-than-this-binary key, or a typo) and the
+            // fix, without an api bump (design doc `2026-09-01-cancellation-
+            // reaping-and-foreach-concurrency.md`, Phase 4).
+            let config_spec: ConfigSpec =
+                serde_yaml::from_str(&content).map_err(crate::cfg::otto::wrap_unknown_field_error)?;
 
             // Validate that no tasks use reserved builtin param names
             Self::validate_no_builtin_params(&config_spec)?;

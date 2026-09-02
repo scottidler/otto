@@ -76,6 +76,48 @@ pub fn check_api_version(content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Wrap a strict-parse (`deny_unknown_fields`) failure with a trailing line
+/// naming the likely cause and the fix, when the failure is an unknown-field
+/// rejection (design doc `2026-09-01-cancellation-reaping-and-foreach-
+/// concurrency.md`, Phase 4).
+///
+/// `check_api_version` already covers the case an ottofile can assert about
+/// itself (`otto.api` names a generation this binary refuses). It cannot
+/// cover the case here: an ottofile with no `api:` bump at all, using a key
+/// this binary predates. `deny_unknown_fields` already names the key and its
+/// path; what it cannot say is WHY the key is unknown, because serde has no
+/// way to know. There are exactly two explanations and this otto cannot tell
+/// them apart: the key is new, added by an otto released after this binary
+/// (the pre-2.1.0 upgrade cliff, Problem Statement item 3), or the key is
+/// simply misspelled in the ottofile. Both get the same next step named,
+/// without asserting the first explanation as the only one: a genuinely
+/// misspelled key (`tsaks:`) is not this binary's fault, and telling that
+/// user their otto is out of date would be a wrong diagnosis dressed up as a
+/// confident one.
+///
+/// **Deliberately NOT an api-version bump.** `SUPPORTED_API_VERSIONS` policy
+/// (above) forbids growing the set for an additive key, and this wrapper is
+/// the mechanism that covers additive keys instead: it needs no otto release
+/// to have shipped a new generation, and it fires on every future addition
+/// natively.
+///
+/// A no-op for every other `serde_yaml` failure (a missing field, a type
+/// mismatch, unparseable YAML): none of those are "a key this binary does
+/// not recognize", so none of them get the trailing line.
+pub fn wrap_unknown_field_error(err: serde_yaml::Error) -> eyre::Report {
+    let message = err.to_string();
+    if message.contains("unknown field") {
+        eyre::eyre!(
+            "{message}\n\
+             this key is either new to a newer otto than this binary, or simply \
+             misspelled in the ottofile; if the ottofile targets a newer otto, run \
+             `otto Upgrade` to update this binary"
+        )
+    } else {
+        eyre::Report::new(err)
+    }
+}
+
 fn default_name() -> String {
     "otto".to_string()
 }
