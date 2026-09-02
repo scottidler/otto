@@ -6,6 +6,7 @@ use std::env;
 use std::fmt::Debug;
 use std::fs;
 use std::io::IsTerminal;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -439,9 +440,17 @@ type SerialMembership = HashMap<String, (String, usize)>;
 /// fields above, this covers every foreach expansion, not just serial ones.
 type DisplayOrderMap = HashMap<String, Vec<String>>;
 
-/// Everything one pass of foreach expansion produces, so the four outputs stay
+/// Per-group concurrency: parent task name -> the permit count that group's
+/// own semaphore is built with, already resolved against the expansion
+/// (`jobs: all` is one permit per item, so the number is only knowable once
+/// the items are known). Design doc
+/// `2026-09-01-cancellation-reaping-and-foreach-concurrency.md`, Phase 3.
+type ForeachJobsMap = HashMap<String, NonZeroUsize>;
+
+/// Everything one pass of foreach expansion produces, so the five outputs stay
 /// named rather than positional as the set grows (design doc Phase 4 added the
-/// fourth). Only `expand_foreach_tasks_with_serial` builds one.
+/// fourth, the foreach-concurrency doc the fifth). Only
+/// `expand_foreach_tasks_with_serial` builds one.
 struct ForeachExpansion {
     /// Every task in the run, with foreach tasks replaced by their subtasks
     /// plus a virtual parent.
@@ -452,6 +461,9 @@ struct ForeachExpansion {
     display_order: DisplayOrderMap,
     /// Names of the foreach parents that declared `buffer: true`.
     buffered: HashSet<String>,
+    /// Resolved per-group permit counts for the foreach parents that declared
+    /// `jobs:`. Absent for every group that did not.
+    jobs: ForeachJobsMap,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -490,6 +502,13 @@ pub struct Task {
     /// Phase 4). `buffer: true` itself does not survive expansion - subtasks
     /// are clones with `foreach = None` - so it is carried as this flag.
     pub buffered: bool,
+    /// For an ITEM of a foreach group that declared `foreach.jobs`: the permit
+    /// count that group's own semaphore is built with, one per item under
+    /// `jobs: all`. `None` for every other task, including the group's virtual
+    /// parent - the parent is queued only once its items are terminal, so it
+    /// never runs beside them and has nothing to be exempted from (design doc
+    /// `2026-09-01-cancellation-reaping-and-foreach-concurrency.md`, Phase 3).
+    pub foreach_jobs: Option<NonZeroUsize>,
 }
 
 impl Task {
@@ -519,6 +538,7 @@ impl Task {
             tty: false,
             foreach_display_order: None,
             buffered: false,
+            foreach_jobs: None,
         }
     }
 

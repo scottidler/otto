@@ -7,8 +7,11 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     /// only sender. Before this, a `?` on any of those abandoned the task with
     /// nothing sent, and the scheduler waited on it forever.
     async fn execute_task(&self, task: Task, tx: mpsc::Sender<TaskReport>, active: &mut ActiveTasks) -> Result<()> {
-        debug!("execute_task: task={} tty={}", task.name, task.tty);
-        let semaphore = self.semaphore.clone();
+        let class = admission_for(&task);
+        debug!(
+            "execute_task: task={} tty={} admission={class:?}",
+            task.name, task.tty
+        );
 
         let task_name = task.name.clone();
         let task_dir = self.workspace.task(&task_name);
@@ -26,13 +29,22 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let is_virtual_parent = task.is_virtual_parent;
         let action_is_empty = task.action.is_empty();
         let tty = task.tty;
-        let permits = permits_for(tty, self.max_parallel)?;
+        // An exempt item is exempt from the SHARED semaphore, not from all
+        // scheduling: it takes one permit from its own group's semaphore
+        // instead, which is what bounds `jobs: <N>` and what `jobs: all` sizes
+        // to the item count. `permits_for` and the shared semaphore's
+        // tty-versus-normal handling are untouched, so the FIFO guarantee
+        // documented below still holds for every task that does use them.
+        let (semaphore, permits) = match class {
+            Admission::Exempt => (self.group_semaphore(&task)?, 1),
+            Admission::Tty | Admission::Capped => (self.semaphore.clone(), permits_for(tty, self.max_parallel)?),
+        };
         // The scheduler cannot reach the `Child` this body is about to own, and
         // cancellation has to. The body records the pid here instead.
         let live_children = active.children();
 
         let spawn_name = task_name.clone();
-        active.spawn(spawn_name, async move {
+        active.spawn(spawn_name, class, async move {
             // Set by the run block when a process actually exited, so the
             // database records the real code instead of re-parsing it back out
             // of the error message and defaulting to 1.
@@ -53,7 +65,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             let outcome: std::result::Result<(), TaskFailure> = async {
                 // Acquire semaphore permit. A tty task takes every permit, so nothing
                 // else runs while it owns the terminal; tokio's semaphore is FIFO, so
-                // this wait cannot be starved by later single-permit acquires.
+                // this wait cannot be starved by later single-permit acquires. For an
+                // exempt item this is its group's semaphore and `permits` is 1; the
+                // task is already counted in flight by `ActiveTasks::spawn`, so the
+                // launch loop's admission view is correct while this wait runs.
                 let _permit = semaphore.acquire_many(permits).await?;
 
                 // Empty-action fast path (used by virtual parent tasks). The parent

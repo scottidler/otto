@@ -72,6 +72,14 @@ pub struct Task {
     /// cursor owns (design doc
     /// `2026-08-31-buffered-foreach-computed-envs-required-params.md`, Phase 4).
     pub buffered: bool,
+    /// For an ITEM of a foreach group that declared `foreach.jobs`: the permit
+    /// count that group's own semaphore is built with (one per item under
+    /// `jobs: all`). Its presence is what makes the item exempt from the
+    /// scheduler's launch cap and from the shared semaphore; its value is what
+    /// bounds the group instead. `None` for every other task, including the
+    /// group's virtual parent (design doc
+    /// `2026-09-01-cancellation-reaping-and-foreach-concurrency.md`, Phase 3).
+    pub foreach_jobs: Option<std::num::NonZeroUsize>,
 }
 
 impl Task {
@@ -115,6 +123,7 @@ impl Task {
             tty: false,
             foreach_display_order: None,
             buffered: false,
+            foreach_jobs: None,
         }
     }
 
@@ -270,6 +279,7 @@ impl From<crate::cli::parser::Task> for Task {
         task.tty = parser_task.tty;
         task.foreach_display_order = parser_task.foreach_display_order;
         task.buffered = parser_task.buffered;
+        task.foreach_jobs = parser_task.foreach_jobs;
         task
     }
 }

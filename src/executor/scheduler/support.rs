@@ -176,7 +176,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         cursor: &mut ReplayCursor,
         rx: &mut mpsc::Receiver<TaskReport>,
     ) -> Result<()> {
-        let abandoned = active_tasks.len();
+        let abandoned = active_tasks.in_flight_len();
         info!("Run cancelled; killing {abandoned} in-flight task(s)");
         // Frozen before anything is signalled, because what the flush owes each
         // item describes the run at the MOMENT of cancellation. The bodies keep

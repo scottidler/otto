@@ -51,6 +51,7 @@ impl Parser {
         let mut membership: SerialMembership = HashMap::new();
         let mut display_order: DisplayOrderMap = HashMap::new();
         let mut buffered: HashSet<String> = HashSet::new();
+        let mut jobs: ForeachJobsMap = HashMap::new();
         let reachable = self.reachable_task_names(requested_tasks);
 
         for (name, spec) in &self.config_spec.tasks {
@@ -90,6 +91,19 @@ impl Parser {
                 // subtask (design doc Phase 4).
                 if foreach.buffer {
                     buffered.insert(name.clone());
+                }
+
+                // `jobs:` does not survive expansion either, and unlike
+                // `buffer` it is not a flag: `all` is one permit per item, so
+                // the count can only be resolved here, where the item list and
+                // the `foreach:` block are both still in hand. An `all` group
+                // that expanded to zero items records nothing - there is no
+                // item to exempt, and a zero-permit semaphore would be a gate
+                // that never opens.
+                if let Some(spec_jobs) = foreach.jobs
+                    && let Some(permits) = spec_jobs.permits(subtasks.len())
+                {
+                    jobs.insert(name.clone(), permits);
                 }
 
                 // Check if this task should run serially (CLI --Serial flag OR config parallel: false)
@@ -146,6 +160,7 @@ impl Parser {
             membership,
             display_order,
             buffered,
+            jobs,
         })
     }
 

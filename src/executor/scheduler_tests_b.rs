@@ -984,3 +984,181 @@ mod cancellation_reaping {
         );
     }
 }
+
+/// Phase 3 (design doc 2026-09-01, `foreach.jobs`). The end-to-end behavior is
+/// in `tests/foreach_jobs_concurrency_test.rs`; these pin the pieces that test
+/// can only observe through a whole run, including the one property the
+/// admission rules rest on.
+mod foreach_jobs_admission {
+    use super::*;
+    use std::num::NonZeroUsize;
+
+    fn permits(n: usize) -> Option<NonZeroUsize> {
+        NonZeroUsize::new(n)
+    }
+
+    fn item(name: &str, group: &str, group_permits: usize) -> Task {
+        let mut task = Task::new(
+            name.to_string(),
+            Some(group.to_string()),
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo hi".to_string(),
+        );
+        task.foreach_jobs = permits(group_permits);
+        task
+    }
+
+    fn plain(name: &str) -> Task {
+        Task::new(
+            name.to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            "echo hi".to_string(),
+        )
+    }
+
+    /// An item of a group carrying `jobs:` is exempt; everything else is not.
+    #[test]
+    fn admission_classes_come_from_the_task() {
+        assert_eq!(admission_for(&plain("build")), Admission::Capped);
+        assert_eq!(admission_for(&item("tail:s1", "tail", 4)), Admission::Exempt);
+
+        let mut tty = plain("interactive");
+        tty.tty = true;
+        assert_eq!(admission_for(&tty), Admission::Tty);
+    }
+
+    /// A task asking for both `tty: true` and `foreach.jobs` is classified as
+    /// tty. The two are opposite requests and only one can be honored;
+    /// `warn_on_tty_with_foreach_jobs` is what keeps the choice from being
+    /// silent.
+    #[test]
+    fn tty_wins_over_a_group_concurrency_override() {
+        let mut both = item("logs:s1", "logs", 8);
+        both.tty = true;
+        assert_eq!(admission_for(&both), Admission::Tty);
+    }
+
+    /// The two admission rules, as a table. Every cell is one sentence of the
+    /// design doc: a tty task waits for exempt items, exempt items wait for a
+    /// tty task, and an ordinary task is gated only by the launch cap.
+    #[test]
+    fn the_admission_rules_are_symmetric_and_bind_only_tty_against_exempt() {
+        let idle = InFlight::default();
+        let exempt_running = InFlight { tty: 0, exempt: 3 };
+        let tty_running = InFlight { tty: 1, exempt: 0 };
+
+        assert!(may_admit(Admission::Tty, idle));
+        assert!(!may_admit(Admission::Tty, exempt_running));
+        assert!(may_admit(Admission::Tty, tty_running));
+
+        assert!(may_admit(Admission::Exempt, idle));
+        assert!(may_admit(Admission::Exempt, exempt_running));
+        assert!(!may_admit(Admission::Exempt, tty_running));
+
+        // An ordinary task is never held by these rules: the tty task's
+        // exclusivity against it is the shared semaphore's job, unchanged.
+        assert!(may_admit(Admission::Capped, idle));
+        assert!(may_admit(Admission::Capped, exempt_running));
+        assert!(may_admit(Admission::Capped, tty_running));
+    }
+
+    /// The launch cap must not count exempt items, and cancellation must.
+    /// Fixing only the semaphore leaves `active_tasks.len() < max_concurrent`
+    /// in force, which is why 10 items under `-j 2` still started 2.
+    #[tokio::test]
+    async fn exempt_items_are_in_flight_but_not_against_the_launch_cap() {
+        let mut active = ActiveTasks::default();
+        active.spawn("build".to_string(), Admission::Capped, std::future::pending());
+        active.spawn("tail:s1".to_string(), Admission::Exempt, std::future::pending());
+        active.spawn("tail:s2".to_string(), Admission::Exempt, std::future::pending());
+
+        assert_eq!(active.capped_len(), 1, "only the ordinary task is capped");
+        assert_eq!(active.in_flight_len(), 3, "all three are in flight");
+        assert_eq!(active.in_flight(), InFlight { tty: 0, exempt: 2 });
+
+        active.reported("tail:s1");
+        assert_eq!(active.in_flight(), InFlight { tty: 0, exempt: 1 });
+        assert_eq!(active.capped_len(), 1);
+    }
+
+    /// **Success criterion (f), and the property the whole mechanism rests
+    /// on.** `ActiveTasks::spawn` counts a task as in flight at SPAWN time, so
+    /// a task whose body is still queuing on a permit is already visible to the
+    /// admission rules. Move that insert to permit-acquisition time and the
+    /// launch loop starts deciding admission on a stale view: it lets a tty
+    /// task through, the body is still queuing, and the next pass admits an
+    /// exempt group because the tty task "is not running yet".
+    #[tokio::test]
+    async fn spawn_counts_a_task_in_flight_before_its_body_acquires_a_permit() {
+        // A semaphore with no permits to give: the body below can never get
+        // past its acquire, so anything the scheduler knows about this task it
+        // knows from the spawn alone.
+        let semaphore = Arc::new(Semaphore::new(0));
+        let (reached_acquire, acquired) = (Arc::new(tokio::sync::Notify::new()), Arc::new(Mutex::new(false)));
+
+        let mut active = ActiveTasks::default();
+        {
+            let semaphore = semaphore.clone();
+            let reached_acquire = reached_acquire.clone();
+            let acquired = acquired.clone();
+            active.spawn("interactive".to_string(), Admission::Tty, async move {
+                reached_acquire.notify_waiters();
+                let _permit = semaphore.acquire_many(1).await;
+                *acquired.lock().await = true;
+            });
+        }
+
+        // Let the body run until it parks on the semaphore. Yielding rather
+        // than sleeping: the assertion below is about ordering, not timing.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            !*acquired.lock().await,
+            "the body must still be queuing for a permit, or this test proves nothing"
+        );
+        assert_eq!(
+            active.in_flight(),
+            InFlight { tty: 1, exempt: 0 },
+            "a task the loop admitted counts as in flight while its body queues"
+        );
+        assert!(
+            !may_admit(Admission::Exempt, active.in_flight()),
+            "the admission view must not be stale: an exempt group must be held off by a tty \
+             task that has not acquired its permits yet"
+        );
+
+        active.abort_all().await;
+    }
+
+    /// One semaphore per group, sized by the count the items carry, and a
+    /// missing group fails closed rather than borrowing the global permit.
+    #[test]
+    fn group_semaphores_are_built_per_group_from_the_items_own_count() {
+        let tasks = vec![
+            item("tail:s1", "tail", 3),
+            item("tail:s2", "tail", 3),
+            item("watch:a", "watch", 1),
+            plain("build"),
+        ];
+        let semaphores = TaskScheduler::<crate::ports::RealFs>::build_group_semaphores(&tasks);
+
+        assert_eq!(semaphores.len(), 2, "one per group carrying jobs:, and no more");
+        assert_eq!(semaphores["tail"].available_permits(), 3);
+        assert_eq!(semaphores["watch"].available_permits(), 1);
+        assert!(
+            !semaphores.contains_key("build"),
+            "a task without foreach.jobs has no group semaphore"
+        );
+    }
+}

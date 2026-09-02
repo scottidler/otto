@@ -190,10 +190,10 @@ async fn test_scheduler_rejects_a_dependency_cycle_at_init() {
 #[tokio::test]
 async fn reap_unreported_observes_a_panicking_task_body() {
     let mut active = ActiveTasks::default();
-    active.spawn("boom".to_string(), async {
+    active.spawn("boom".to_string(), Admission::Capped, async {
         panic!("deliberate panic for reap_unreported's own test");
     });
-    assert_eq!(active.len(), 1);
+    assert_eq!(active.in_flight_len(), 1);
 
     let name = active.reap_unreported().await;
 

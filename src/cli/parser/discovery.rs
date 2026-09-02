@@ -229,6 +229,7 @@ impl Parser {
             membership: serial_membership,
             display_order,
             buffered: buffered_parents,
+            jobs: group_jobs,
         } = self.expand_foreach_tasks_with_serial(&serial_tasks, requested_tasks, &mut deferred_foreach)?;
 
         // Step 0.6: Desugar `on-failure:` into synthetic `after:` edges.
@@ -387,6 +388,19 @@ impl Parser {
             // parent name for both, since a subtask's name is `<parent>:<item>`.
             if buffered_parents.contains(Self::parent_task_name(task_name)) {
                 task.buffered = true;
+            }
+
+            // `foreach.jobs` reaches the scheduler as a resolved permit count
+            // on every ITEM of the group, keyed by the parent name - and
+            // deliberately NOT on the virtual parent, which `parent_of` returns
+            // `None` for. The parent is queued only after all of its items are
+            // terminal, so it never runs beside them; exempting it from the
+            // launch cap would claim a concurrency carve-out for a task that
+            // cannot use one.
+            if let Some(parent) = crate::naming::parent_of(task_name)
+                && let Some(permits) = group_jobs.get(parent)
+            {
+                task.foreach_jobs = Some(*permits);
             }
 
             cli_provided_params.insert(task_name.clone(), cli_provided);

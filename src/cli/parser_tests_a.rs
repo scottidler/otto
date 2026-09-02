@@ -1151,3 +1151,68 @@ tasks:
         );
     }
 }
+
+/// `foreach.jobs` reaches the scheduler as a resolved permit count on the
+/// group's ITEMS and on nothing else.
+///
+/// `all` is the count the items expanded to, which is the only place that
+/// number exists: the scheduler sees subtasks, never the `foreach:` block. The
+/// virtual parent is deliberately left `None` - it is queued only once its
+/// items are terminal, so it never runs beside them and an exemption there
+/// would be a carve-out for a task that cannot use one (design doc
+/// `2026-09-01-cancellation-reaping-and-foreach-concurrency.md`, Phase 3).
+#[test]
+fn foreach_jobs_is_stamped_on_every_item_and_never_on_the_virtual_parent() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile_path = temp_dir.path().join("otto.yml");
+    fs::write(
+        &ottofile_path,
+        "tasks:\n  \
+         tail:\n    \
+         foreach:\n      \
+         items: [alpha, beta, gamma]\n      \
+         parallel: true\n      \
+         jobs: all\n    \
+         action: echo ${item}\n  \
+         capped:\n    \
+         foreach:\n      \
+         items: [one, two]\n      \
+         parallel: true\n      \
+         jobs: 1\n    \
+         action: echo ${item}\n",
+    )
+    .unwrap();
+
+    let args = vec![
+        "otto".to_string(),
+        "--ottofile".to_string(),
+        ottofile_path.to_string_lossy().to_string(),
+        "tail".to_string(),
+        "capped".to_string(),
+    ];
+    let mut parser = Parser::new(args).unwrap();
+    let (tasks, _, _, _, _, _) = parser.parse().unwrap().into_run().unwrap().into_parts();
+
+    let jobs_for = |name: &str| {
+        tasks
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("task {name} missing from the run set"))
+            .foreach_jobs
+            .map(std::num::NonZeroUsize::get)
+    };
+
+    // `all` over three items is three permits, on each of the three items.
+    for item in ["tail:alpha", "tail:beta", "tail:gamma"] {
+        assert_eq!(jobs_for(item), Some(3), "{item} carries one permit per item");
+    }
+    assert_eq!(jobs_for("tail"), None, "the virtual parent is never exempt");
+
+    // A fixed count is carried verbatim, and does not leak to the other group.
+    assert_eq!(jobs_for("capped:one"), Some(1));
+    assert_eq!(jobs_for("capped:two"), Some(1));
+    assert_eq!(jobs_for("capped"), None);
+}

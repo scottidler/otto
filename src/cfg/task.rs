@@ -126,6 +126,28 @@ impl<'de> Deserialize<'de> for ForeachJobs {
     }
 }
 
+impl ForeachJobs {
+    /// The permit count this group's own semaphore is built with, given how
+    /// many items the foreach actually expanded to.
+    ///
+    /// `all` means one permit per item, which is the whole point of the key:
+    /// a group whose items never exit on their own must not be capped below
+    /// its own size. The count is resolved here, at expansion time, because
+    /// that is the only place both halves are in hand - the scheduler sees
+    /// subtasks, not the `foreach:` block that produced them.
+    ///
+    /// `None` only for `all` over an empty expansion: a group with no items
+    /// has nothing to admit, and `Semaphore::new(0)` would be a gate that
+    /// never opens rather than an exemption.
+    #[must_use]
+    pub fn permits(self, item_count: usize) -> Option<NonZeroUsize> {
+        match self {
+            Self::All => NonZeroUsize::new(item_count),
+            Self::Fixed(n) => Some(n),
+        }
+    }
+}
+
 /// Configuration for foreach-based subtask generation
 ///
 /// `deny_unknown_fields` turns a stale or misplaced `foreach:` key (e.g.

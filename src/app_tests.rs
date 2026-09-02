@@ -262,6 +262,7 @@ fn create_test_task(name: &str) -> Task {
         tty: false,
         foreach_display_order: None,
         buffered: false,
+        foreach_jobs: None,
     }
 }
 

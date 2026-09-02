@@ -290,6 +290,90 @@ async fn deregister_child(children: &LiveChildren, task: &str) {
     }
 }
 
+/// How the launch loop counts a task, and which gates it passes through.
+///
+/// The three arms are the whole concurrency vocabulary of the scheduler, so
+/// they live in one enum rather than as two booleans read at four sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// An ordinary task: counts against the launch cap and takes one permit
+    /// from the shared semaphore.
+    Capped,
+    /// A `tty: true` task: counts against the launch cap and takes EVERY
+    /// permit of the shared semaphore, which is what makes it exclusive
+    /// against other capped tasks. Exempt items do not touch that semaphore,
+    /// so exclusivity against them is an admission rule instead.
+    Tty,
+    /// An item of a foreach group carrying `jobs:`: exempt from both gates.
+    /// It does not count against the launch cap and it acquires from its
+    /// group's own semaphore rather than the shared one.
+    Exempt,
+}
+
+impl Admission {
+    /// Whether the launch cap (`-j`/`otto.jobs`) applies to this task.
+    fn is_capped(self) -> bool {
+        !matches!(self, Self::Exempt)
+    }
+}
+
+/// What the launch loop is holding open right now, as the two admission rules
+/// need to see it.
+///
+/// A count of each, not a pair of booleans: the rules ask "is any in flight",
+/// and a count is the honest answer to build that from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct InFlight {
+    /// `tty: true` tasks the loop has admitted and not yet seen report.
+    tty: usize,
+    /// Exempt foreach items the loop has admitted and not yet seen report.
+    exempt: usize,
+}
+
+/// The two admission rules, as one pure function over what is in flight.
+///
+/// **Both are decided here, in the single-threaded launch loop, and nowhere
+/// else.** `execute_all` is the one admission point in the program: it runs in
+/// one task and `active_tasks` is a local it alone mutates, so two rules read
+/// there cannot race each other. The predecessor of this design kept an
+/// `AtomicUsize` of in-flight exempt items and had the tty path check it while
+/// exempt items checked the semaphore - two unsynchronized predicates over two
+/// pieces of state, so both could read "clear" and both proceed. There is no
+/// second predicate here to race.
+///
+/// This is sound only because an admitted task counts as in flight for the
+/// whole time its body is still queuing for a permit; see `ActiveTasks::spawn`.
+fn may_admit(class: Admission, in_flight: InFlight) -> bool {
+    match class {
+        // A tty task owns the terminal. Exempt items are outside the shared
+        // semaphore it makes itself exclusive with, so the only thing keeping
+        // them off the terminal is this rule.
+        Admission::Tty => in_flight.exempt == 0,
+        // The mirror. An exempt item that started beside a running tty task
+        // would write to a terminal another task owns.
+        Admission::Exempt => in_flight.tty == 0,
+        // The launch cap is the loop's own condition; nothing else gates an
+        // ordinary task.
+        Admission::Capped => true,
+    }
+}
+
+/// Which of the three admission classes a task belongs to.
+///
+/// `tty` wins over `jobs:`, because the two ask for opposite things and only
+/// one of them can be honored: exclusive ownership of the terminal cannot be
+/// shared out one-permit-per-item. A task that asks for both is reported once
+/// per run by `warn_on_tty_with_foreach_jobs`, not silently resolved here.
+fn admission_for(task: &Task) -> Admission {
+    if task.tty {
+        return Admission::Tty;
+    }
+    match task.foreach_jobs {
+        Some(_) => Admission::Exempt,
+        None => Admission::Capped,
+    }
+}
+
 /// The tasks currently running, with their join handles.
 ///
 /// Handles are reaped rather than dropped on the floor: a body that ends
@@ -299,8 +383,11 @@ async fn deregister_child(children: &LiveChildren, task: &str) {
 struct ActiveTasks {
     /// Spawned bodies that have not been joined yet, by join id.
     names: HashMap<tokio::task::Id, String>,
-    /// Names the scheduler still counts as in flight.
-    running: std::collections::HashSet<String>,
+    /// Names the scheduler still counts as in flight, each with the admission
+    /// class it was admitted under. The class is stored rather than recomputed
+    /// so the loop's view of what is in flight cannot disagree with the
+    /// decision it made when it let the task through.
+    running: HashMap<String, Admission>,
     /// The direct child of each in-flight body, for cancellation to signal.
     /// It belongs here rather than beside it: `ActiveTasks` is already the
     /// answer to "what is in flight".
@@ -309,8 +396,32 @@ struct ActiveTasks {
 }
 
 impl ActiveTasks {
-    fn len(&self) -> usize {
+    /// Every task in flight, whatever its class. This is what a cancelled run
+    /// reports as killed, and what `is_empty` is the zero case of.
+    fn in_flight_len(&self) -> usize {
         self.running.len()
+    }
+
+    /// The tasks the launch cap actually applies to.
+    ///
+    /// Exempt foreach items are excluded, which is half of what `foreach.jobs`
+    /// buys: fixing only the shared semaphore leaves `while active <
+    /// max_concurrent` in force, and 10 items under `-j 2` still start 2.
+    fn capped_len(&self) -> usize {
+        self.running.values().filter(|class| class.is_capped()).count()
+    }
+
+    /// What the two admission rules read.
+    fn in_flight(&self) -> InFlight {
+        let mut counts = InFlight::default();
+        for class in self.running.values() {
+            match class {
+                Admission::Tty => counts.tty += 1,
+                Admission::Exempt => counts.exempt += 1,
+                Admission::Capped => {}
+            }
+        }
+        counts
     }
 
     /// A handle on the live-child registry for a task body to write into.
@@ -339,13 +450,27 @@ impl ActiveTasks {
         self.running.is_empty()
     }
 
-    fn spawn<Fut>(&mut self, name: String, body: Fut)
+    /// Spawn a task's body and count it as in flight from this instant.
+    ///
+    /// **The insert happens at SPAWN time, before the body has run a single
+    /// line - and in particular before it reaches `semaphore.acquire_many` in
+    /// `task_execution.rs`. The whole admission design rests on that.** An
+    /// entry only leaves via `reported`, `reap_unreported`, `abort_all` or
+    /// `drain`, all driven from the same loop, so a task the loop admitted
+    /// counts as in flight for the entire time its body sits queuing on a
+    /// permit, not just while it holds one. Move this insert to
+    /// permit-acquisition time and the loop starts deciding admission on a
+    /// stale view: it lets a tty task through, the body is still queuing, and
+    /// the next iteration admits an exempt group because the tty task "is not
+    /// running yet". Pinned by
+    /// `spawn_counts_a_task_in_flight_before_its_body_acquires_a_permit`.
+    fn spawn<Fut>(&mut self, name: String, class: Admission, body: Fut)
     where
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let handle = self.joins.spawn(body);
         self.names.insert(handle.id(), name.clone());
-        self.running.insert(name);
+        self.running.insert(name, class);
     }
 
     /// Mark a task as no longer in flight, having received its report.
@@ -1076,6 +1201,12 @@ pub struct TaskScheduler<F: FileSystem = crate::ports::RealFs> {
     /// all of them at once, and the live `available_permits()` is the wrong number
     /// to ask for at acquisition time (it is whatever is free right then).
     max_parallel: usize,
+    /// One semaphore per foreach group that declared `jobs:`, keyed by the
+    /// group's parent task. An exempt item never touches `semaphore` above, so
+    /// this is the only thing bounding its group - `Semaphore::new(N)`, or one
+    /// permit per item under `jobs: all`. Empty for every run that uses no
+    /// `foreach.jobs`, which is what keeps those runs on exactly today's path.
+    group_semaphores: HashMap<String, Arc<Semaphore>>,
     /// Workspace for path management
     workspace: Arc<Workspace<F>>,
     /// Execution context for metadata
@@ -1126,6 +1257,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             skip_records: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(max_parallel)),
             max_parallel,
+            group_semaphores: Self::build_group_semaphores(&tasks),
             workspace,
             execution_context,
             tasks,
@@ -1135,6 +1267,74 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             task_streams: None,
             cancel: Arc::new(CancelSignal::default()),
         })
+    }
+
+    /// The key an exempt item's group semaphore is stored under: the group's
+    /// parent task.
+    ///
+    /// One function, called by both the builder and the lookup, so the two
+    /// cannot drift into keying the same group differently. An item whose name
+    /// carries no parent falls back to its own name rather than sharing a
+    /// bucket with everything else nameless.
+    fn group_key(task: &Task) -> String {
+        task.parent
+            .clone()
+            .unwrap_or_else(|| crate::naming::parent_or_self(&task.name).to_string())
+    }
+
+    /// Build one semaphore per foreach group carrying `jobs:`.
+    ///
+    /// Every item of a group is stamped with the same resolved count at
+    /// expansion time (`ForeachJobs::permits`), so the first item seen decides
+    /// the group's size and the rest agree with it by construction. Built once
+    /// here rather than lazily in the task body: a body that had to create the
+    /// semaphore it then acquires from would race every sibling item, and the
+    /// group's bound would be whichever body won.
+    fn build_group_semaphores(tasks: &[Task]) -> HashMap<String, Arc<Semaphore>> {
+        let mut semaphores: HashMap<String, Arc<Semaphore>> = HashMap::new();
+        for task in tasks {
+            let Some(permits) = task.foreach_jobs else {
+                continue;
+            };
+            semaphores
+                .entry(Self::group_key(task))
+                .or_insert_with(|| Arc::new(Semaphore::new(permits.get())));
+        }
+        semaphores
+    }
+
+    /// The semaphore an exempt item acquires from.
+    ///
+    /// Fails closed rather than falling back to the shared semaphore: a
+    /// missing entry would mean the item was classified `Exempt` off a
+    /// `foreach_jobs` the constructor never saw, and silently borrowing the
+    /// global permit would reinstate the starvation the key exists to remove.
+    fn group_semaphore(&self, task: &Task) -> Result<Arc<Semaphore>> {
+        let key = Self::group_key(task);
+        self.group_semaphores.get(&key).cloned().ok_or_else(|| {
+            eyre!(
+                "task {} is exempt from the global job cap but its group '{key}' has no semaphore; \
+                 the scheduler was built from a different task set than the one being run",
+                task.name
+            )
+        })
+    }
+
+    /// Say so, once per run, when a task asks for both `tty: true` and
+    /// `foreach.jobs`.
+    ///
+    /// The two are opposite requests - exclusive ownership of the terminal
+    /// versus one permit per item - and `admission_for` honors `tty`. That
+    /// choice is safe but it ignores a key the ottofile wrote, so it does not
+    /// get to be silent.
+    fn warn_on_tty_with_foreach_jobs(&self) {
+        for task in self.tasks.iter().filter(|t| t.tty && t.foreach_jobs.is_some()) {
+            log::warn!(
+                "task {} sets tty: true and foreach.jobs; a tty task owns the terminal exclusively, \
+                 so it runs exclusively and the per-group concurrency override is not applied",
+                task.name
+            );
+        }
     }
 
     /// A handle the caller can trip to cancel this run.
@@ -1240,6 +1440,13 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let total_tasks = self.tasks.len();
         let mut active_tasks = ActiveTasks::default();
         let max_concurrent = self.max_parallel;
+        // Whether this run contains any task the launch cap does not apply to.
+        // Computed once: when it is false the launch pass below stops at the
+        // cap exactly as it always has, so an ottofile that uses no
+        // `foreach.jobs` walks the same path, at the same cost, as before this
+        // key existed.
+        let has_exempt_items = self.tasks.iter().any(|t| matches!(admission_for(t), Admission::Exempt));
+        self.warn_on_tty_with_foreach_jobs();
 
         // Track completed and failed tasks for dependency satisfaction checking.
         let mut completed_set = std::collections::HashSet::new();
@@ -1260,8 +1467,24 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 return self.abandon_run(&mut active_tasks, &mut cursor, &mut rx).await;
             }
 
-            // Start as many tasks as we can
-            while active_tasks.len() < max_concurrent && !ready_queue.is_empty() {
+            // Start as many tasks as we can.
+            //
+            // Tasks the admission rules will not let start YET are set aside
+            // here and put back at the head of the queue when the pass ends,
+            // rather than pushed into `blocked_tasks`: they are not blocked on
+            // a gate, so the blocked sweep would never look at them again.
+            // Deferring one is only ever possible while something is in flight
+            // (both rules read a non-zero count), so the pass that defers is
+            // always followed by a wait on a report rather than a spin.
+            let mut deferred_by_admission: Vec<Task> = Vec::new();
+            while !ready_queue.is_empty() {
+                // The cap is checked per task below, not as this loop's
+                // condition, because an exempt item must be admitted past a
+                // full cap. With no exempt item in the run there is nothing
+                // past the cap to find, so the pass ends where it always did.
+                if !has_exempt_items && active_tasks.capped_len() >= max_concurrent {
+                    break;
+                }
                 let task = ready_queue.pop_front().unwrap();
 
                 let states = classify_gates(&task, &serial_groups, &completed_set, &failed_set, &skipped_set);
@@ -1286,6 +1509,25 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     continue;
                 }
 
+                // Every gate is satisfied; the remaining question is whether
+                // the run can hold this task right now. Both concurrency rules
+                // are decided here, in this single-threaded loop, over
+                // `active_tasks` - a local nothing else mutates.
+                let class = admission_for(&task);
+                if class.is_capped() && active_tasks.capped_len() >= max_concurrent {
+                    deferred_by_admission.push(task);
+                    continue;
+                }
+                if !may_admit(class, active_tasks.in_flight()) {
+                    debug!(
+                        "execute_all: deferring {} ({class:?}) against in-flight {:?}",
+                        task.name,
+                        active_tasks.in_flight()
+                    );
+                    deferred_by_admission.push(task);
+                    continue;
+                }
+
                 // Try to start the task (handles rebuild check, skipping, and errors)
                 self.try_start_ready_task(
                     task,
@@ -1302,6 +1544,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     &mut cursor,
                 )
                 .await?;
+            }
+
+            // Back to the head, in the order they were popped: a deferral is a
+            // "not yet", not a demotion behind tasks that became ready later.
+            for task in deferred_by_admission.into_iter().rev() {
+                ready_queue.push_front(task);
             }
 
             // Only wait for task completion if there are active tasks.

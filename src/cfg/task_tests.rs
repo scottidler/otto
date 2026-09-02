@@ -207,6 +207,28 @@ fn test_foreach_jobs_round_trips() {
     assert_eq!(serde_yaml::from_str::<ForeachJobs>(&fixed_yaml).unwrap(), fixed);
 }
 
+/// Resolving `jobs` to the permit count its group's semaphore is built with
+/// (design doc `2026-09-01-cancellation-reaping-and-foreach-concurrency.md`,
+/// Phase 3). `all` is only knowable once the items are, which is why the count
+/// is resolved at expansion time rather than carried as the keyword.
+#[test]
+fn test_foreach_jobs_permits_resolves_all_against_the_item_count() {
+    let nz = |n: usize| std::num::NonZeroUsize::new(n);
+
+    assert_eq!(ForeachJobs::All.permits(10), nz(10), "all is one permit per item");
+    assert_eq!(ForeachJobs::All.permits(1), nz(1));
+    assert_eq!(
+        ForeachJobs::All.permits(0),
+        None,
+        "a group with no items has nothing to admit, and a zero-permit semaphore \
+         would be a gate that never opens rather than an exemption"
+    );
+
+    let fixed = ForeachJobs::Fixed(nz(4).unwrap());
+    assert_eq!(fixed.permits(10), nz(4), "a fixed count ignores the item count");
+    assert_eq!(fixed.permits(0), nz(4));
+}
+
 /// `jobs` defaults to absent and round-trips as absent (`skip_serializing_if`),
 /// so an ottofile that never mentions it never gains the key on re-emit -
 /// the property success criterion (b) rests on.
