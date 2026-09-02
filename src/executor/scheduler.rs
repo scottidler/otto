@@ -34,6 +34,19 @@ use crate::cfg::edge::When;
 /// Timeout for output processing after task completion
 const OUTPUT_PROCESSING_TIMEOUT_SECS: u64 = 5;
 
+/// How long a cancelled task's process group gets between SIGTERM and SIGKILL.
+///
+/// Teardown timing, not a user tunable, which is why it sits here beside
+/// `OUTPUT_PROCESSING_TIMEOUT_SECS` rather than in the ottofile. The grace
+/// exists to let a shell run its `trap` and a child close what it opened; it is
+/// deliberately NOT sized to let a child finish work, because a cancelled run
+/// has already been abandoned - the logs are drained by otto, and the buffered
+/// blocks are flushed by otto, so nothing downstream is waiting on the child.
+/// Long enough for a trap handler, short enough that Ctrl+C does not feel
+/// wedged, and a teardown that still will not end has the second Ctrl+C
+/// (`install_interrupt_handler`, exit 130) as its escape hatch.
+const CANCEL_GRACE: Duration = Duration::from_millis(500);
+
 /// Capacity of the task-completion channel. Each started task sends exactly one
 /// report, and the drain loop consumes them as fast as they arrive, so this only
 /// has to absorb a burst of simultaneous finishes.
@@ -222,6 +235,61 @@ impl CancelSignal {
     }
 }
 
+/// One task's direct child process, as the cancellation path needs to see it.
+///
+/// The scheduler cannot reach a `Child`: it lives inside the spawned task body,
+/// which owns it for the body's whole lifetime. What cancellation actually needs
+/// is not the handle but the two facts below, and those can be recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChildHandle {
+    /// The child's pid. When `own_group` is true this is also its pgid, since
+    /// `process_group(0)` makes the child its own group leader.
+    pid: u32,
+    /// Whether the child leads its own process group, which is what makes the
+    /// whole subtree it started reachable with one `killpg`. False for a
+    /// `tty: true` task, which deliberately stays in otto's group so it can own
+    /// the terminal: a group signal there would land on otto itself.
+    own_group: bool,
+}
+
+/// Every task child alive right now, by task name.
+///
+/// Written by the task bodies (`task_execution.rs`), read by `abandon_run`. The
+/// `Arc` is what crosses that gap: the bodies are spawned onto the runtime and
+/// outlive the borrow the scheduler had of them.
+type LiveChildren = Arc<Mutex<HashMap<String, ChildHandle>>>;
+
+/// Record a task's freshly spawned child so cancellation can reach it and
+/// everything it goes on to start.
+///
+/// A child tokio can no longer name (`id()` returns `None` once it has been
+/// reaped) is not recorded: there is no pid left to signal, and inventing one
+/// would signal whatever now holds it.
+async fn register_child(children: &LiveChildren, task: &str, pid: Option<u32>, own_group: bool) {
+    let Some(pid) = pid else {
+        debug!("register_child: task={task} has no pid to record");
+        return;
+    };
+    debug!("register_child: task={task} pid={pid} own_group={own_group}");
+    children
+        .lock()
+        .await
+        .insert(task.to_string(), ChildHandle { pid, own_group });
+}
+
+/// Drop a task's registry entry, because its child has exited or never started.
+///
+/// Called the moment `wait()` returns rather than when the body ends: the two
+/// are not the same instant, since the output drains can outlive the child by
+/// up to `OUTPUT_PROCESSING_TIMEOUT_SECS` when a grandchild still holds the
+/// pipe open. An entry left behind for those seconds names a pid the kernel may
+/// have reissued.
+async fn deregister_child(children: &LiveChildren, task: &str) {
+    if children.lock().await.remove(task).is_some() {
+        debug!("deregister_child: task={task}");
+    }
+}
+
 /// The tasks currently running, with their join handles.
 ///
 /// Handles are reaped rather than dropped on the floor: a body that ends
@@ -233,12 +301,38 @@ struct ActiveTasks {
     names: HashMap<tokio::task::Id, String>,
     /// Names the scheduler still counts as in flight.
     running: std::collections::HashSet<String>,
+    /// The direct child of each in-flight body, for cancellation to signal.
+    /// It belongs here rather than beside it: `ActiveTasks` is already the
+    /// answer to "what is in flight".
+    children: LiveChildren,
     joins: JoinSet<()>,
 }
 
 impl ActiveTasks {
     fn len(&self) -> usize {
         self.running.len()
+    }
+
+    /// A handle on the live-child registry for a task body to write into.
+    fn children(&self) -> LiveChildren {
+        self.children.clone()
+    }
+
+    /// The recorded children as of right now, detached from the registry.
+    ///
+    /// Cancellation signals this list twice and must not re-read the registry
+    /// between the passes: the grace period yields to the executor, the direct
+    /// children that took the SIGTERM exit, and their bodies remove their own
+    /// entries. A second pass reading the live registry would find it empty and
+    /// signal nothing, which is exactly the case where a SIGTERM-ignoring
+    /// grandchild is still alive in a group that is still valid.
+    async fn child_snapshot(&self) -> Vec<(String, ChildHandle)> {
+        self.children
+            .lock()
+            .await
+            .iter()
+            .map(|(name, handle)| (name.clone(), *handle))
+            .collect()
     }
 
     fn is_empty(&self) -> bool {
@@ -287,12 +381,22 @@ impl ActiveTasks {
         }
     }
 
-    /// Abort every in-flight body. Each child process was spawned with
-    /// `kill_on_drop`, so dropping the body's future is what actually kills it.
-    fn abort_all(&mut self) {
+    /// Abort every in-flight body, as the backstop behind the group reaping.
+    ///
+    /// Each child process was spawned with `kill_on_drop`, so dropping the
+    /// body's future SIGKILLs the direct child - and only the direct child.
+    /// That is why cancellation signals the process groups first
+    /// (`reap_live_children`): this call is what guarantees the direct children
+    /// are gone, not what reaches their descendants.
+    ///
+    /// The registry goes with them. Every entry left in it names a body that no
+    /// longer exists to remove its own, so keeping them would leave the map
+    /// claiming children that are dead.
+    async fn abort_all(&mut self) {
         self.joins.abort_all();
         self.running.clear();
         self.names.clear();
+        self.children.lock().await.clear();
     }
 
     /// Join every remaining body, logging any that panicked.
@@ -314,6 +418,145 @@ impl ActiveTasks {
         self.running.clear();
     }
 }
+
+/// Why a signal aimed at a recorded child did not land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignalFailure {
+    /// The recorded pid does not name a process, so it never reached the
+    /// syscall. Refusing here rather than casting is the point: `kill` reads a
+    /// non-positive argument as a process group.
+    NotAPid(u32),
+    /// The kernel refused the signal, with this errno.
+    Errno(i32),
+}
+
+/// How loudly a [`SignalFailure`] deserves to be reported.
+///
+/// Split out from the logging so the policy is a value a test can assert on
+/// rather than a line in a log nobody reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignalVolume {
+    /// Expected, and says nothing is wrong. `ESRCH` means the target is already
+    /// gone, which on the SIGKILL pass is the success this whole path exists to
+    /// produce, and on the SIGTERM pass means the child exited between the
+    /// snapshot and the signal.
+    Ignored,
+    /// Unexpected, but not evidence otto is signalling the wrong thing.
+    Warn,
+    /// otto is signalling something it does not own (`EPERM`), or recorded a pid
+    /// that is not a pid. Neither can happen if the design holds, so neither is
+    /// allowed to be quiet.
+    Error,
+}
+
+#[cfg(unix)]
+fn volume_for(failure: SignalFailure) -> SignalVolume {
+    match failure {
+        SignalFailure::NotAPid(_) => SignalVolume::Error,
+        SignalFailure::Errno(libc::ESRCH) => SignalVolume::Ignored,
+        SignalFailure::Errno(libc::EPERM) => SignalVolume::Error,
+        SignalFailure::Errno(_) => SignalVolume::Warn,
+    }
+}
+
+/// Deliver `signal` to a recorded child: to its whole process group when it
+/// leads one, to the pid alone when it does not.
+///
+/// The group case is the entire fix. `kill_on_drop` reaches the direct child
+/// and nothing below it, so a task body that ran `bash -> otto -> docker
+/// compose logs` left the bottom two running after every Ctrl+C.
+#[cfg(unix)]
+fn signal_child(handle: ChildHandle, signal: libc::c_int) -> Result<(), SignalFailure> {
+    // Only a strictly positive pid names a process. `kill` reads 0 as "my own
+    // process group" and a negative number as "that process group", so a pid
+    // that does not fit a positive `pid_t` must never reach the syscall:
+    // casting 4294967290 lands on -6 and signals process group 6, which is
+    // somebody else's. Same rule the upgrade reaper already learned.
+    let pid = libc::pid_t::try_from(handle.pid)
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or(SignalFailure::NotAPid(handle.pid))?;
+    // SAFETY: `kill` and `killpg` take integers and return one, so there is no
+    // memory to get wrong. The target is a pid otto spawned itself and recorded
+    // at spawn time, and the group is one otto created via `process_group(0)`,
+    // never a number read from the filesystem or from another process.
+    let rc = unsafe {
+        if handle.own_group {
+            libc::killpg(pid, signal)
+        } else {
+            libc::kill(pid, signal)
+        }
+    };
+    if rc == 0 {
+        return Ok(());
+    }
+    Err(SignalFailure::Errno(
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+    ))
+}
+
+/// Send one signal to every child in `snapshot`, logging each failure at the
+/// volume its cause earns.
+#[cfg(unix)]
+fn signal_snapshot(snapshot: &[(String, ChildHandle)], signal: libc::c_int, signal_name: &str) {
+    for (task, handle) in snapshot {
+        let target = if handle.own_group { "group" } else { "pid" };
+        debug!(
+            "signal_snapshot: {signal_name} -> {target} {} (task {task})",
+            handle.pid
+        );
+        let Err(failure) = signal_child(*handle, signal) else {
+            continue;
+        };
+        match volume_for(failure) {
+            SignalVolume::Ignored => {
+                debug!("{signal_name} to {target} {} for task {task}: already gone", handle.pid);
+            }
+            SignalVolume::Warn => {
+                log::warn!(
+                    "{signal_name} to {target} {} for task {task} failed: {failure:?}",
+                    handle.pid
+                );
+            }
+            SignalVolume::Error => {
+                error!(
+                    "{signal_name} to {target} {} for task {task} failed: {failure:?}",
+                    handle.pid
+                );
+            }
+        }
+    }
+}
+
+/// Reap the cancelled run's children: SIGTERM, `CANCEL_GRACE`, SIGKILL.
+///
+/// **Both passes walk `snapshot`, and nothing re-reads the registry between
+/// them.** The sleep yields to the executor, so the direct children that took
+/// the SIGTERM exit and their bodies remove their own registry entries while it
+/// runs. A second pass asking the live registry what is still there would find
+/// it empty and signal nothing - in exactly the case the pass exists for, where
+/// a SIGTERM-ignoring grandchild is still alive in a process group that is
+/// still valid. A group outliving its leader is fine: the group stays valid
+/// while any member lives, so the recorded pgid is still the right target.
+///
+/// Pid reuse inside the grace window stays theoretically possible and is
+/// accepted: the window is one grace period on a pid otto itself created and
+/// has not reaped.
+#[cfg(unix)]
+async fn reap_live_children(snapshot: Vec<(String, ChildHandle)>) {
+    if snapshot.is_empty() {
+        return;
+    }
+    debug!("reap_live_children: {} recorded child(ren)", snapshot.len());
+    signal_snapshot(&snapshot, libc::SIGTERM, "SIGTERM");
+    tokio::time::sleep(CANCEL_GRACE).await;
+    signal_snapshot(&snapshot, libc::SIGKILL, "SIGKILL");
+}
+
+/// Process groups are a unix concept; on other platforms `kill_on_drop` on the
+/// direct child is all there is, which is the pre-existing behavior.
+#[cfg(not(unix))]
+async fn reap_live_children(_snapshot: Vec<(String, ChildHandle)>) {}
 
 /// Permits a task must hold to run: one for an ordinary task, the semaphore's
 /// entire initial count for a `tty: true` task, which is what makes it exclusive.

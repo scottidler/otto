@@ -146,11 +146,23 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         Ok(())
     }
 
-    /// Stop the run: kill the in-flight children and report the cancellation.
+    /// Stop the run: kill the in-flight children and everything they started,
+    /// then report the cancellation.
     ///
-    /// The children are killed rather than waited on, which is the whole point of a
-    /// cancel: `kill_on_drop(true)` on every spawned command means aborting the task
-    /// bodies takes the processes with them.
+    /// The children are killed rather than waited on, which is the whole point
+    /// of a cancel. **What does the killing is the process-group reaping below,
+    /// not `kill_on_drop`.** That was the standing claim here and it was false:
+    /// `kill_on_drop(true)` SIGKILLs the direct child when its body's future is
+    /// dropped and reaches nothing below it, so a task body running
+    /// `bash -> otto -> docker compose logs` left the bottom two alive after
+    /// every Ctrl+C. Each non-tty child is its own process group leader
+    /// (`task_execution.rs`, `cmd.process_group(0)`), so `reap_live_children`
+    /// signals the group and takes the whole subtree; `abort_all` still runs
+    /// afterwards, as the backstop that guarantees the direct children are gone.
+    ///
+    /// The reaping happens AFTER the report channel is drained, which is what
+    /// keeps a killed subtask reporting as killed rather than as a failure over
+    /// its own partial log.
     ///
     /// Buffered blocks are not dropped on the floor here. `abandon_run` never
     /// marks in-flight tasks terminal and never touches a log, so without the
@@ -166,18 +178,36 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     ) -> Result<()> {
         let abandoned = active_tasks.len();
         info!("Run cancelled; killing {abandoned} in-flight task(s)");
+        // Frozen before anything is signalled, because what the flush owes each
+        // item describes the run at the MOMENT of cancellation. The bodies keep
+        // running through the grace period below, and a body whose child takes
+        // the SIGTERM sets its own status to Failed on the way out - after
+        // which the flush would read "not Running" and print a did-not-start
+        // line for a subtask whose child it just killed.
+        let statuses_at_cancel = self.task_statuses.lock().await.clone();
         if !cursor.is_empty() {
             while let Ok(report) = rx.try_recv() {
                 self.record_report_for_replay(cursor, &report).await;
             }
         }
-        active_tasks.abort_all();
+        // Snapshot the registry first, signal second. Both passes inside use
+        // that one list; see `reap_live_children` for why re-reading the
+        // registry between them misses the case the second pass exists for.
+        //
+        // After the drain, deliberately. A child that dies during the grace
+        // period reports on its way out, and reading those reports would replay
+        // a killed subtask as an ordinary failure over its half-written log -
+        // exactly what the "killed mid-run" line and its log paths exist to
+        // avoid. Cancellation's output contract is unchanged by this fix; only
+        // the descendants' fate is.
+        reap_live_children(active_tasks.child_snapshot().await).await;
+        active_tasks.abort_all().await;
         let notice = format!("otto: run cancelled; {abandoned} running task(s) killed\n");
         if self.tui_mode {
             self.persist_skip_records().await;
             return Err(eyre!("run cancelled; {abandoned} running task(s) were killed"));
         }
-        self.flush_cancelled_groups(cursor, notice).await;
+        self.flush_cancelled_groups(cursor, notice, statuses_at_cancel).await;
         self.persist_skip_records().await;
         Err(eyre!("run cancelled; {abandoned} running task(s) were killed"))
     }

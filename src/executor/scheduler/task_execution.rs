@@ -27,6 +27,9 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let action_is_empty = task.action.is_empty();
         let tty = task.tty;
         let permits = permits_for(tty, self.max_parallel)?;
+        // The scheduler cannot reach the `Child` this body is about to own, and
+        // cancellation has to. The body records the pid here instead.
+        let live_children = active.children();
 
         let spawn_name = task_name.clone();
         active.spawn(spawn_name, async move {
@@ -198,10 +201,15 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     .kill_on_drop(true);
 
                 // Its own process group, so a signal aimed at otto does not race
-                // ahead of otto's own teardown and so the child's own children are
-                // reachable as a group. NOT for a `tty: true` task: that task owns
-                // the terminal, and a background process group reading from it gets
-                // SIGTTIN and stops.
+                // ahead of otto's own teardown, and so the child's own children are
+                // reachable as a group: `abandon_run` signals this pgid, which is
+                // the only thing that reaches a grandchild. Until that reaping
+                // existed, this line created a group nothing ever signalled and
+                // the reachability the sentence above claims was never used.
+                // NOT for a `tty: true` task: that task owns the terminal, and a
+                // background process group reading from it gets SIGTTIN and stops.
+                // Its registry entry records that (`own_group: false`), so
+                // cancellation signals its pid alone - otto is in that group.
                 #[cfg(unix)]
                 if !tty {
                     cmd.process_group(0);
@@ -220,7 +228,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                             .stderr(std::process::Stdio::inherit())
                             .spawn()
                             .map_err(|e| eyre!("Task {task_name} could not start {interpreter}: {e}"))?;
+                        // `own_group: false`: a tty task stays in otto's own
+                        // process group, so cancellation must signal this pid
+                        // and never this group.
+                        register_child(&live_children, &task_name, child.id(), false).await;
                         let status = child.wait().await?;
+                        deregister_child(&live_children, &task_name).await;
                         exit_code = status.code();
                         if status.success() {
                             return Ok(());
@@ -243,6 +256,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         .stderr(std::process::Stdio::piped())
                         .spawn()
                         .map_err(|e| eyre!("Task {task_name} could not start {interpreter}: {e}"))?;
+                    // `own_group` mirrors the `process_group(0)` above exactly,
+                    // including its `cfg`: claiming a group otto never created
+                    // would send cancellation at a pgid that is not one.
+                    register_child(&live_children, &task_name, child.id(), cfg!(unix)).await;
 
                     // Setup output streams
                     let stdout = child.stdout.take().ok_or_else(|| eyre!("Failed to capture stdout"))?;
@@ -282,6 +299,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 
                     // Wait for process to complete
                     let status = child.wait().await?;
+                    // Deregister here, not at the end of the body: a grandchild
+                    // holding the pipe open keeps the drains below waiting for
+                    // up to `OUTPUT_PROCESSING_TIMEOUT_SECS` after this child is
+                    // already reaped, and an entry left behind for those seconds
+                    // names a pid the kernel may have reissued.
+                    deregister_child(&live_children, &task_name).await;
                     exit_code = status.code();
 
                     // Wait for output handling to complete with timeout (only for output processing)
@@ -374,6 +397,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 }
                 .await;
 
+                // Both branches above deregister when their `wait()` returns;
+                // this covers the paths that failed before ever getting there,
+                // so no entry outlives the body that owns it.
+                deregister_child(&live_children, &task_name).await;
                 result.map_err(TaskFailure::from)
             }
             .await;

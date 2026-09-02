@@ -496,14 +496,16 @@ pub async fn execute_with_terminal_output(
 /// v2.0.5, meant the terminal's default SIGINT disposition killed otto between
 /// those two states and printed nothing.
 ///
-/// **otto does not forward the signal to task children, by design.** A terminal
-/// Ctrl+C is delivered to the whole foreground process group, but every task
-/// child is put in its own group (`task_execution.rs`, `cmd.process_group(0)`),
-/// so the children do not receive it and otto's teardown is not raced. They die
-/// from `kill_on_drop(true)` when `abandon_run` aborts them, which is the same
-/// contract cancellation has always had. The one exception is a `tty: true`
-/// task: it deliberately stays in otto's group so it can own the terminal, so
-/// it takes the Ctrl+C directly, exactly as it would under any other runner.
+/// **otto does not forward the terminal's signal to task children, by design.**
+/// A terminal Ctrl+C is delivered to the whole foreground process group, but
+/// every task child is put in its own group (`task_execution.rs`,
+/// `cmd.process_group(0)`), so the children do not receive it and otto's
+/// teardown is not raced. They are killed by otto instead, on its own schedule:
+/// `abandon_run` signals each recorded process group, SIGTERM then SIGKILL, so
+/// the task's whole subtree dies rather than only its direct child. The one
+/// exception is a `tty: true` task: it deliberately stays in otto's group so it
+/// can own the terminal, so it takes the Ctrl+C directly, exactly as it would
+/// under any other runner, and cancellation signals its pid alone.
 ///
 /// The second interrupt is the escape hatch, and it is not optional: with a
 /// handler installed the default disposition is gone, so a teardown wedged on a

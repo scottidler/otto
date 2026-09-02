@@ -555,12 +555,22 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     /// cursor exists to prevent, reappearing on the one path the four sites do
     /// not drive: cancellation returns before both the post-loop reconciliation
     /// and the report funnel, so this flush can rely on neither.
-    async fn flush_cancelled_groups(&self, cursor: &mut ReplayCursor, notice: String) {
+    ///
+    /// `statuses` is passed in rather than read here, and it is read at the
+    /// moment of cancellation: the reaping that runs between then and now takes
+    /// a grace period, during which a body whose child died sets its own status
+    /// to Failed. Reading `task_statuses` at this point would see that and
+    /// classify a killed child as an item that never started.
+    async fn flush_cancelled_groups(
+        &self,
+        cursor: &mut ReplayCursor,
+        notice: String,
+        statuses: HashMap<String, TaskStatus>,
+    ) {
         if cursor.is_empty() {
             self.write_blocks(Some(notice), Vec::new()).await;
             return;
         }
-        let statuses = self.task_statuses.lock().await.clone();
         let workspace = self.workspace.clone();
         let log_exists = move |name: &str| workspace.stdout(name).exists();
         let mut blocks = Vec::new();

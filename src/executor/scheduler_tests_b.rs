@@ -798,3 +798,189 @@ async fn test_tty_task_logs_carry_the_marker_and_plain_tasks_still_capture() -> 
 
     Ok(())
 }
+
+/// Phase 1 (design doc 2026-09-01, cancellation reaping). The pty tests in
+/// `tests/cancel_reaping_test.rs` prove the end-to-end behavior; these pin the
+/// pieces it is built from, which the end-to-end test can only observe
+/// indirectly.
+#[cfg(unix)]
+mod cancellation_reaping {
+    use super::*;
+    use std::time::Instant;
+
+    /// A child in its own process group that ignores SIGTERM, plus the pid the
+    /// registry would have recorded for it.
+    ///
+    /// `trap "" TERM` is inherited across the `exec` bash does for the last
+    /// command of a `-c` string, so the process this returns is a `sleep` that
+    /// SIGTERM cannot touch. That is the whole point: it makes "was it SIGKILLed
+    /// by the second pass" an observable fact rather than a guess.
+    /// The marker is not decoration: it is what makes the trap observable.
+    /// Signalling immediately after `spawn` raced the shell to its own first
+    /// line, and a bash that has not run `trap` yet dies of SIGTERM like any
+    /// other process, which made this fixture prove the opposite of its name.
+    async fn sigterm_proof_child() -> (TempDir, tokio::process::Child, ChildHandle) {
+        let temp = TempDir::new().expect("temp dir");
+        let ready = temp.path().join("trap-installed");
+        let script = format!(r#"trap "" TERM; touch "{}"; sleep 600"#, ready.display());
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(script).kill_on_drop(true);
+        cmd.process_group(0);
+        let child = cmd.spawn().expect("spawn a test child");
+        let pid = child.id().expect("a freshly spawned child has a pid");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "the test child never installed its trap");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        (temp, child, ChildHandle { pid, own_group: true })
+    }
+
+    #[test]
+    fn a_pid_that_is_not_a_pid_never_reaches_the_syscall() {
+        // 0 is "my own process group" to `kill`, and 4294967290 casts to -6,
+        // which is process group 6. Both must be refused, not reinterpreted.
+        for pid in [0u32, u32::MAX, 4294967290] {
+            let handle = ChildHandle { pid, own_group: false };
+            assert_eq!(
+                signal_child(handle, libc::SIGTERM),
+                Err(SignalFailure::NotAPid(pid)),
+                "pid {pid} does not name a process and must be refused before the syscall"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pid_that_does_not_exist_reports_esrch_and_is_ignored() {
+        // pid_t's ceiling is never a live pid, so this is a real syscall that
+        // really fails, not a stubbed one.
+        let handle = ChildHandle {
+            pid: libc::pid_t::MAX as u32,
+            own_group: false,
+        };
+        let failure = signal_child(handle, libc::SIGTERM).expect_err("a pid this high cannot exist");
+        assert_eq!(failure, SignalFailure::Errno(libc::ESRCH));
+        assert_eq!(
+            volume_for(failure),
+            SignalVolume::Ignored,
+            "ESRCH is the success case of the SIGKILL pass and must be silent"
+        );
+    }
+
+    #[test]
+    fn signalling_something_otto_does_not_own_is_loud() {
+        // pid 1 is init: it exists, and otto is not allowed to signal it. That
+        // is the one failure that means otto is aiming at the wrong thing.
+        assert_eq!(volume_for(SignalFailure::Errno(libc::EPERM)), SignalVolume::Error);
+        assert_eq!(volume_for(SignalFailure::NotAPid(0)), SignalVolume::Error);
+        assert_eq!(volume_for(SignalFailure::Errno(libc::EINVAL)), SignalVolume::Warn);
+    }
+
+    #[tokio::test]
+    async fn a_group_signal_reaches_a_child_that_ignored_the_term() {
+        let (_temp, mut child, handle) = sigterm_proof_child().await;
+        assert_eq!(signal_child(handle, libc::SIGTERM), Ok(()));
+        assert_eq!(
+            signal_child(handle, libc::SIGKILL),
+            Ok(()),
+            "the group is still valid: SIGTERM was ignored, so nothing has exited"
+        );
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("a SIGKILLed child exits")
+            .expect("wait");
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(libc::SIGKILL),
+            "the child must have died of the group's SIGKILL, not of the SIGTERM it ignores"
+        );
+    }
+
+    /// The load-bearing property of the design: the SIGKILL pass walks the
+    /// snapshot, so it still reaps a group whose registry entry disappeared
+    /// while the grace period was running. Reading the live registry instead
+    /// would find nothing to signal in exactly this case.
+    #[tokio::test]
+    async fn the_sigkill_pass_reaps_a_group_whose_registry_entry_vanished_mid_grace() {
+        let (_temp, mut child, handle) = sigterm_proof_child().await;
+        let registry: LiveChildren = Arc::new(Mutex::new(HashMap::new()));
+        registry.lock().await.insert("hold".to_string(), handle);
+
+        let snapshot = vec![("hold".to_string(), handle)];
+        // Stand in for the body deregistering when its direct child exits on the
+        // SIGTERM, which happens partway through the grace window.
+        let emptier = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(CANCEL_GRACE / 5).await;
+                registry.lock().await.clear();
+            })
+        };
+
+        reap_live_children(snapshot).await;
+        emptier.await.expect("the deregistering task");
+        assert!(registry.lock().await.is_empty(), "the fixture must have emptied it");
+
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("the snapshot pass must have SIGKILLed the group")
+            .expect("wait");
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(libc::SIGKILL)
+        );
+    }
+
+    #[tokio::test]
+    async fn reaping_nothing_costs_no_grace_period() {
+        // Every cancelled run with no children in flight would otherwise pay the
+        // full grace period for nothing.
+        let started = Instant::now();
+        reap_live_children(Vec::new()).await;
+        assert!(
+            started.elapsed() < CANCEL_GRACE,
+            "an empty snapshot must return at once"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_is_detached_from_the_registry() {
+        let active = ActiveTasks::default();
+        register_child(&active.children(), "hold", Some(4242), true).await;
+        let snapshot = active.child_snapshot().await;
+        deregister_child(&active.children(), "hold").await;
+
+        assert_eq!(
+            snapshot,
+            vec![(
+                "hold".to_string(),
+                ChildHandle {
+                    pid: 4242,
+                    own_group: true
+                }
+            )],
+            "a snapshot taken before the entry was removed must still carry it"
+        );
+        assert!(active.child_snapshot().await.is_empty(), "the registry itself moved on");
+    }
+
+    #[tokio::test]
+    async fn a_child_with_no_pid_is_not_recorded() {
+        // `Child::id()` is `None` once tokio has reaped the process. Recording a
+        // placeholder would mean signalling whatever holds that number next.
+        let active = ActiveTasks::default();
+        register_child(&active.children(), "hold", None, true).await;
+        assert!(active.child_snapshot().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aborting_the_run_clears_the_registry() {
+        let mut active = ActiveTasks::default();
+        register_child(&active.children(), "hold", Some(4242), true).await;
+        active.abort_all().await;
+        assert!(
+            active.child_snapshot().await.is_empty(),
+            "the bodies that would remove their own entries are gone, so the entries must go too"
+        );
+    }
+}
