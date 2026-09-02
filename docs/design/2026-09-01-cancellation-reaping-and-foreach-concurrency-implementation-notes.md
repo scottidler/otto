@@ -227,3 +227,69 @@ That also closes the Phase 3 open question at line 123 ("Should `tty: true` comb
 
 - **The audit's architect seat was not cross-model, and the finding it carried alone is one of the three must-fixes.** The Gemini seat failed four attempts (`Invalid stream: The model returned an empty response or malformed tool call.`, reproducible, not a quota or auth failure) and an opus substitute ran in its place, so cross-model independence for that seat was lost rather than partial. Where the two seats converge, one of them is an Anthropic model reading the same repo the synthesis did. The synthesis re-ran and reproduced both architect-only findings itself (the per-item warning count, and the capped-task claim), which is what the remediation acted on; the caveat is recorded because "both seats agreed" is weaker evidence here than it looks.
 - **`docs/design/2026-09-01-marquee-post-correction.md` is still staged and unpublished**, and Phase 5 criterion (c) is still DEFERRED. Unchanged by this pass, which touched no outward-facing content.
+
+## Loose-end closeout (post-release, 2026-09-02)
+
+Everything below landed AFTER v2.2.0 was tagged and pushed. The release itself is unaffected: two
+test-hygiene fixes and three doc corrections, no production code touched.
+
+### Design decisions
+
+- **The `examples/_test_broken` leak is fixed with a `Drop` guard, not a moved cleanup line** —
+  `tests/examples_integration_test.rs::BrokenExampleFixture`. The test is `#[should_panic]`, so the
+  `.expect()` is REQUIRED to unwind and every statement after it is unreachable by construction.
+  That is why the original trailing `remove_dir_all` never ran: not a forgotten line, an
+  unreachable one. `Drop` runs during the unwind, which is this test's only exit path.
+- **The `choices-command` guard var is fixed on both sides** — `src/cfg/resolver_tests.rs`.
+  `run_lines_command_refuses_to_recurse_on_the_same_choices_key` gained `#[serial]` (its
+  `ENVS_GUARD_VAR` sibling eleven lines down already had it: one file, two answers), and the three
+  `resolve_choices_command_*` tests in `src/cfg/param_tests.rs` gained `#[serial]` because they are
+  the readers that were failing with a bogus "recursion detected". Serializing only the writer would
+  leave the readers racing each other's view of the process env.
+- **An `EnvGuard` RAII type replaces the manual `remove_var` in both recursion tests.** Both call
+  `.unwrap_err()`, so an unexpected `Ok` panics with the var still set and poisons the next test in
+  the binary. `#[serial]` closes the concurrent window; the guard closes the panic window. They are
+  different bugs and both were live.
+
+### Deviations
+
+- **None from the design doc.** All five items here are defects in tests and docs, not departures
+  from the spec.
+
+### Tradeoffs
+
+- **A visible dated correction on the marquee post rather than a silent rewrite.** A silent fix
+  reads better; the post is what told readers descendants die on Ctrl+C, and some of them run
+  `otto logs`, so the record of the change is worth more than the cleaner paragraph.
+- **Amending Phase 5 criterion (c)'s grep string rather than deleting the criterion.** It was
+  vacuous as written, but the underlying assert (the false sentence is gone from the live post) is
+  real and now actually runs.
+
+### Amendments, with the evidence for each
+
+- **Design doc finding 1 misquoted the post it cited as measured evidence.** It claimed section 5
+  read "They die from `kill_on_drop(true)` when `abandon_run` aborts them." The live post read
+  "They die with the parent." inside the bullet beginning "otto does not forward the signal to your
+  task children". Proved by `marquee read <url> | grep -c 'They die from'` returning 0 against the
+  live post after `marquee login` succeeded. This is a DOC DEFECT: the doc's own claim about an
+  external artifact was falsifiable and false, independent of any code here. Corrected in place with
+  the correction marked and dated, rather than silently swapped, since the wrong quote is what the
+  Phase 5 criterion was built on.
+- **Phase 5 criterion (c) was vacuous and is amended.** `grep -c 'They die from'` returned 0 before
+  any edit was made, so the criterion could not fail. It now greps `'They die with the parent\.'`
+  Verified against the live post after publishing: `0` for the false sentence, `1` for
+  `'reaps the whole group instead: SIGTERM to the process group'`. Criterion (c): PASS, for the
+  first time on its merits.
+- **`docs/design/2026-09-01-marquee-post-correction.md` was rewritten**, not appended to: it was a
+  staging file for an unpublished edit, and it named a sentence that does not exist. It now records
+  the misquote, the real sentence, the published replacement, and the verification commands.
+- **The guard the excellence pass named was the one that caught this.** Grepping for the DEAD phrase
+  rather than the new one is what confirmed the design doc had exactly one remaining occurrence of
+  `They die from \`kill_on_drop`, and that it was the intentional quote inside the new correction
+  text. Every edit in this pass asserted its anchor matched exactly once before writing.
+
+### Open questions
+
+- None. Every open question carried from Phases 1-5 is now closed: the tty-grandchild carve-out is
+  stated in Acceptance Criterion 1, `tty` + `foreach.jobs` is a load error, head-of-line skipping is
+  documented, the marquee correction is published and verified, and both flaky tests are fixed.

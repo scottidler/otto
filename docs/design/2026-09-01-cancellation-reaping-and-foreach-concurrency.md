@@ -31,7 +31,7 @@ grandchild pids: ['57', '58'] cmdlines BEFORE: ['sleep 600', 'sleep 600']
 
 This is not academic for otto-dev: their `logs` task body runs `otto -C "$root" --no-prefix logs | filter_noise`, so each item is bash -> inner otto -> `docker compose logs`. Ctrl+C leaves the inner ottos and the compose tails running, once per service, every time. The `trap 'kill ${pids}' INT TERM EXIT` they deleted was doing real work.
 
-It also falsifies a sentence in the v2.1.0 release post: "They die from `kill_on_drop(true)` when `abandon_run` aborts them." True for the direct child, false below it.
+It also falsifies a sentence in the v2.1.0 release post. **Corrected 2026-09-02, after the implementation audit:** this doc originally quoted that sentence as "They die from `kill_on_drop(true)` when `abandon_run` aborts them." That string is not in the post. The post's section 5 actually reads "They die with the parent", inside the bullet beginning "otto does not forward the signal to your task children". The claim is false the same way either wording is: true for the direct child, false below it. The misquote was never caught because nobody re-fetched the post until Phase 5, and it made the Phase 5 criterion below pass for the wrong reason.
 
 **2. A parallel foreach of never-exiting tasks starves against `-j`.** otto-dev sets `otto.jobs: 8`; the registry has 10 services; `status|logs` deliberately skip the per-verb registry filter (`stack.sh:259-263`), so all 10 participate. A `docker compose logs` tail never exits, so the queued items never get a permit.
 
@@ -228,8 +228,8 @@ No Phase 0. The one environmental assumption this design rests on (that a Ctrl+C
 #### Phase 5: Docs, example, and the release-post correction
 **Model:** sonnet
 - `docs/commands/buffered-foreach.md` gains a `jobs` section; `examples/foreach-buffer/otto.yml` gains a commented `jobs:` line.
-- Correct the v2.1.0 marquee post's teardown sentence: descendants were not reaped before Phase 1. Post: `https://marquee.internal.tatari.dev/p/~scott-idler/otto-v2-1-0-i-built-all-three-the-bone-is-clean/`, section 5, the bullet reading "They die from `kill_on_drop(true)` when `abandon_run` aborts them."
-- **Success criteria:** (a) `otto examples` passes; (b) the reference page's key count matches the schema, enforced by the existing inventory test rather than by reading; (c) `marquee read <the URL above> | grep -c 'They die from'` returns 0 and the replacement sentence names the process group.
+- Correct the v2.1.0 marquee post's teardown sentence: descendants were not reaped before Phase 1. Post: `https://marquee.internal.tatari.dev/p/~scott-idler/otto-v2-1-0-i-built-all-three-the-bone-is-clean/`, section 5, the bullet beginning "otto does not forward the signal to your task children", whose third sentence reads "They die with the parent." (**Amended 2026-09-02:** this bullet named a sentence that is not in the post; see the correction in Problem Statement finding 1.)
+- **Success criteria:** (a) `otto examples` passes; (b) the reference page's key count matches the schema, enforced by the existing inventory test rather than by reading; (c) `marquee read <the URL above> | grep -c 'They die with the parent\.'` returns 0 and the replacement text names the process group. **Amended 2026-09-02:** as written this grepped for `'They die from'`, a string the post never contained, so it returned 0 before any edit and could not fail. The grep now names the sentence the post actually carried, and the trailing period matters: the published correction quotes the old wording inside it, so an unanchored grep for the bare phrase still matches by design.
 
 ### Cross-repo blast radius and ship order
 
