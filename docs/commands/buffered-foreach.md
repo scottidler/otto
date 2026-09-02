@@ -123,7 +123,9 @@ tasks:
   error: serial already means one item at a time, so a concurrency override
   is incoherent (`Task '<name>': foreach.jobs cannot be combined with
   parallel: false; serial means one item at a time, so a concurrency
-  override is incoherent`).
+  override is incoherent`). Running the same task with `--Serial` is
+  rejected for the same reason, when the run is set up rather than when the
+  file loads: `Task '<name>': --Serial cannot be combined with foreach.jobs`.
 - **`jobs: 0` is a load error**, not "unbounded": `foreach jobs: 0 is not a
   valid count; write \`jobs: all\` to run every item at once`.
 - **`jobs: all` with `buffer: true` is legal and expected.** Buffering is a
@@ -134,23 +136,41 @@ tasks:
 
 A foreach task's `tty: true` and `foreach.jobs` ask for opposite things:
 exclusive ownership of the terminal versus one permit per item shared out
-across the group. When both are set on one task, `tty` wins: the task runs
-exclusively as it always has, and the per-group concurrency override is not
-applied. This is not silent — otto logs a warning once per run (`task <name>
-sets tty: true and foreach.jobs; a tty task owns the terminal exclusively,
-so it runs exclusively and the per-group concurrency override is not
-applied`).
+across the group. Setting both on one task is a load error (`Task '<name>':
+foreach.jobs cannot be combined with tty; a tty task owns the terminal
+exclusively, so it runs exclusively and a per-group concurrency override
+cannot be honored`), the same rejection and the same reason `foreach.buffer`
+with `tty` already gets. The message names the task you wrote, not one of
+its expanded items.
 
-### The accepted consequence: a `jobs: all` group can block everything after it
+`tty: true` on a foreach task *without* `jobs` is unaffected. So is a
+`tty: true` task elsewhere in the run: it and a `jobs:` group are kept off
+each other's terminal by the scheduler, which is the next section.
 
-A group with `jobs: all` whose items never exit blocks every later task in
-the run, including a `tty: true` one — for as long as the group runs, which
-for a log tail is forever. **This is not a regression.** A single
+### The accepted consequence: a `jobs: all` group can hold up a later `tty: true` task
+
+A group with `jobs: all` whose items never exit holds up a later `tty: true`
+task for as long as the group runs, which for a log tail is forever. otto
+never puts two writers on one terminal, so a `tty: true` task waits until
+every exempt item has finished. **This is not a regression.** A single
 never-exiting task holds a shared permit forever today and starves a later
 `tty` task identically; `jobs: all` does not introduce the hazard, it just
 makes it possible to hit on purpose. It is the accepted cost of asking for
 the exemption, which is why a group like `logs` belongs last in a task list
 by construction.
+
+**Ordinary tasks are not held up.** A later task without `tty: true` starts
+beside the group, even at `-j 1`: the group's items are exempt from the
+global cap, so they do not occupy it. Only a `tty: true` task waits.
+
+**A waiting `tty: true` task can be skipped past indefinitely.** Admission is
+not first-come-first-served. A `tty: true` task the scheduler cannot admit
+yet goes back to the head of the ready queue and the pass keeps going, so
+exempt items that become ready afterwards start ahead of it. Against a group
+whose items keep arriving, the tty task waits indefinitely. That is
+deliberate: stopping the pass at the first task it cannot admit would mean
+one waiting `tty: true` task keeps a `jobs: all` group from ever starting,
+which is the case the key exists for.
 
 ## Non-goals
 

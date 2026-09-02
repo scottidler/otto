@@ -137,7 +137,7 @@ What replaces it:
   Everything else is untouched. `permits_for` and the shared semaphore keep handling tty-versus-normal exactly as today, so the FIFO guarantee documented at `task_execution.rs:52-53` ("tokio's semaphore is FIFO, so this wait cannot be starved by later single-permit acquires") still holds: the tty path never leaves the queue to wait on anything else.
 
   **This replaces a mechanism that was wrong.** The first version of this fix used an `AtomicUsize` of in-flight exempt items, with the tty path waiting for zero and exempt items checking that no tty task held the semaphore. Panel round 1 (synthesis, not a seat: the text postdated the seats' snapshot) found the TOCTOU: two unsynchronized predicates over two pieces of state, so an exempt item can read "no tty holds the semaphore" while the tty path concurrently reads "counter == 0", and both proceed. A barrier test would pass most runs. It also cost the tty path its FIFO position. Deciding both rules in the serialized loop removes the second predicate rather than trying to order two of them.
-- **Consequence, stated rather than discovered later:** a `jobs: all` group of never-exiting items blocks a later `tty: true` task for as long as the group runs, which for `otto logs` is forever. This is not a regression. A single never-exiting task holds a shared permit forever today and starves a later tty task identically. It is the cost of asking for the exemption, and `logs` is the last task in a run by construction.
+- **Consequence, stated rather than discovered later:** a `jobs: all` group of never-exiting items blocks a later `tty: true` task for as long as the group runs, which for `otto logs` is forever. This is not a regression. A single never-exiting task holds a shared permit forever today and starves a later tty task identically. It is the cost of asking for the exemption, and `logs` is the last task in a run by construction. Ordinary later tasks are NOT affected: exempt items do not occupy the launch cap, so a capped task starts beside the group even at `-j 1`. **Amended after the implementation audit, because the shape of the wait was left to be discovered:** the wait is not FIFO either. A tty task the loop cannot admit yet goes back to the HEAD of the ready queue and the pass continues, so exempt items that become ready afterwards start ahead of it and the tty task can be skipped past indefinitely. That is deliberate, and it is the price of criterion (a): stopping the pass at the first deferral would mean one waiting tty task keeps a `jobs: all` group from ever starting.
 
 **An actionable unknown-field error, and NO api bump.** The strict-parse failure path gets a wrapper: an `unknown field` serde error is re-emitted with a trailing line naming the likely cause and the fix. That is the whole of the otto-side change, and it helps from this release forward.
 
@@ -178,14 +178,18 @@ pub enum ForeachJobs { All, Fixed(NonZeroUsize) }
 
 ### API Design
 
-Load-time rejections, each naming both keys and the task path, in the shape `validate_foreach_buffer` already uses:
+Rejections, each naming the offending keys and the task path, and each failing before anything runs. **What is specified here is the outcome, not the mechanism** - three of these fall out of the deserializer and `deny_unknown_fields` rather than a custom validator, which is right and cheaper than writing four. (The framing clause here said "in the shape `validate_foreach_buffer` already uses" until the implementation audit, which reads as four hand-written validators; the implementation was never under-validating and each row below is pinned by a test.)
 
 | rejected | why |
 |---|---|
 | `jobs` with `parallel: false` | serial means one at a time; a concurrency override is incoherent |
+| `jobs` with `--Serial` | the same request through the other entry point; the flag is only known once the run is set up, so this one is rejected at foreach expansion rather than at load |
+| `jobs` with `tty: true` | a tty task owns the terminal exclusively, so per-item permits cannot be honored; the rejection `foreach.buffer` + `tty` already gets, for the identical reason |
 | `jobs` with no `foreach` | it is a foreach key |
 | `jobs: 0` | write `all` |
 | `jobs: <negative or non-integer>` | serde type error, already loud |
+
+The `--Serial` and `tty: true` rows were added after the implementation audit; the reasoning is in the implementation notes' post-audit section.
 
 `jobs: all` with `buffer: true` is legal and expected: buffering is a display policy, concurrency is a scheduling policy.
 
@@ -239,8 +243,9 @@ No Phase 0. The one environmental assumption this design rests on (that a Ctrl+C
 
 Each criterion's literal command was run against current `main` (`a6cd589`, v2.1.0) on 2026-09-01 and the output recorded.
 
-- [ ] **A cancelled run leaves no descendant of any task body alive.**
+- [ ] **A cancelled run leaves no descendant of a non-`tty` task body alive.**
   `Observed on main:` a parallel foreach whose bodies fork `sleep 600`, interrupted by a literal `0x03` through a pty, left both grandchildren alive: `pid 57 AFTER Ctrl+C -> cmdline='sleep 600'`, same for 58. Criterion currently FALSE, which is the defect.
+  **Amended after the implementation audit.** As first written this said "any task body", which is false and contradicts Phase 1's own criterion (c). A `tty: true` task is deliberately not put in its own process group, because otto shares that group: a `killpg` would signal otto itself, which is exactly what (c) asserts must not happen. Its cancellation therefore signals the direct child by pid, and that child's own children survive. The carve-out is exactly that and no wider - a `tty: true` task's grandchildren. Every other task body's descendants die, which is the defect this doc fixes.
 
 - [ ] **`grep -rn 'killpg\|Pid::from_raw(-' src/` returns at least one hit in the cancellation path.**
   `Observed on main:` zero hits. The only `process_group` reference in `src/` outside a comment is `task_execution.rs:207`, which creates the group nothing signals.
@@ -356,7 +361,7 @@ Minor bump. `foreach.jobs` is opt-in; the cancellation fix is not, and is the re
 |------|------------|--------|------------|
 | `killpg` reaches something otto did not start | Low | High | The pgid is one otto created via `process_group(0)` and recorded at spawn; the `tty` branch never takes a group signal; non-positive pids refused before the syscall |
 | The grace period makes Ctrl+C feel slow | Med | Low | SIGTERM first, and the second Ctrl+C escape hatch (exit 130) already shipped in v2.1.0 bypasses the wait entirely |
-| A `jobs: all` group of never-exiting items blocks every later task, including a `tty:` one | Med | Med | Not a regression: one never-exiting task starves a later tty task identically today. Stated in Architecture as the cost of asking for the exemption, and `logs` is terminal in a run by construction |
+| A `jobs: all` group of never-exiting items holds up a later `tty:` task | Med | Med | Not a regression: one never-exiting task starves a later tty task identically today. Ordinary later tasks are unaffected - exempt items do not occupy the launch cap, so a capped task runs beside the group even at `-j 1`. Stated in Architecture as the cost of asking for the exemption, and `logs` is terminal in a run by construction. (This row said "blocks every later task" until the implementation audit; that was false and contradicted the Architecture paragraph above, which was right) |
 | A later change grows `SUPPORTED_API_VERSIONS` against the policy | Low | Med | Phase 4 criterion (c) asserts the set stays `["1"]`, so growing it fails a test rather than passing review |
 | otto-dev ships `jobs: all` before Phase 1 lands | Med | High | Ship order above: Phase 1 first. Until then every Ctrl+C on `otto logs` leaks an inner otto and a compose tail per service |
 
