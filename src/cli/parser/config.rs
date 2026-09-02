@@ -69,6 +69,10 @@ impl Parser {
             // same task. Shape-only, executes nothing.
             Self::validate_foreach_buffer(&config_spec)?;
 
+            // Reject `foreach.jobs` combined with `foreach.parallel: false`.
+            // Shape-only, executes nothing.
+            Self::validate_foreach_jobs(&config_spec)?;
+
             Ok((config_spec, hash, Some(ottofile)))
         } else {
             Err(eyre!("{}", ottofile_not_found_message()))
@@ -130,6 +134,28 @@ impl Parser {
                 return Err(eyre!(
                     "Task '{task_name}': foreach.buffer cannot be combined with tty; \
                      a tty task owns the terminal exclusively, so there is nothing to buffer"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `foreach.jobs` together with `foreach.parallel: false` is a load
+    /// error: serial means one item at a time, so a per-group concurrency
+    /// override is incoherent (design doc `2026-09-01-cancellation-reaping-
+    /// and-foreach-concurrency.md`, Phase 2). `jobs: 0`, negatives, and
+    /// non-integers are rejected during deserialization itself
+    /// (`ForeachJobs`'s `Deserialize` impl), so this function only has the
+    /// one cross-field shape left to catch.
+    fn validate_foreach_jobs(config: &ConfigSpec) -> Result<()> {
+        for (task_name, task_spec) in &config.tasks {
+            let Some(foreach) = &task_spec.foreach else {
+                continue;
+            };
+            if foreach.jobs.is_some() && !foreach.parallel {
+                return Err(eyre!(
+                    "Task '{task_name}': foreach.jobs cannot be combined with parallel: false; \
+                     serial means one item at a time, so a concurrency override is incoherent"
                 ));
             }
         }

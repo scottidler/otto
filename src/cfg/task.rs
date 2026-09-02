@@ -6,6 +6,7 @@ use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::vec::Vec;
 
@@ -48,7 +49,80 @@ impl Default for ForeachSpec {
             parallel: default_parallel(),
             max_items: default_max_items(),
             buffer: false,
+            jobs: None,
         }
+    }
+}
+
+/// Concurrency for one foreach group: `all` (one permit per item) or a fixed
+/// positive count. `all` is a literal, not a magic `0` meaning unbounded -
+/// per the design doc's Resolved Decisions, `0` is a load error naming the
+/// replacement rather than a synonym for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeachJobs {
+    All,
+    Fixed(NonZeroUsize),
+}
+
+impl Serialize for ForeachJobs {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::All => serializer.serialize_str("all"),
+            Self::Fixed(n) => serializer.serialize_u64(n.get() as u64),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ForeachJobs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ForeachJobsVisitor;
+
+        impl<'de> Visitor<'de> for ForeachJobsVisitor {
+            type Value = ForeachJobs;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("`all` or a positive integer")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                if v == "all" {
+                    Ok(ForeachJobs::All)
+                } else {
+                    Err(DeError::custom(format!(
+                        "foreach jobs '{v}': expected `all` or a positive integer"
+                    )))
+                }
+            }
+
+            // Only the non-negative path is overridden. A negative integer
+            // does not fit a u64, so serde routes it to `visit_i64`, and the
+            // signed float paths are left at their defaults too: both fall
+            // through to the trait's own "invalid type" error built from
+            // `expecting()` above, which is already the loud, specific
+            // message the design doc calls for - no bespoke text needed.
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                match usize::try_from(v).ok().and_then(NonZeroUsize::new) {
+                    Some(n) => Ok(ForeachJobs::Fixed(n)),
+                    None => Err(DeError::custom(
+                        "foreach jobs: 0 is not a valid count; write `jobs: all` to run every item at once",
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(ForeachJobsVisitor)
     }
 }
 
@@ -103,6 +177,17 @@ pub struct ForeachSpec {
     /// exclusively, so there is nothing to buffer.
     #[serde(default)]
     pub buffer: bool,
+
+    /// Concurrency for THIS group's items, overriding the global `-j`/`otto.jobs`.
+    /// `all` gives one permit per item, which is what a group of tasks that never
+    /// exit on their own (a log tail, a watcher, a dev server) requires: under the
+    /// global cap the items past the cap never start, silently. Items carrying this
+    /// key are exempt from the global launch cap and the shared semaphore; `tty:`
+    /// exclusivity against them is enforced by the scheduler's admission loop, not
+    /// by a permit (see the design doc: the virtual parent runs AFTER its items and
+    /// cannot hold one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<ForeachJobs>,
 }
 
 /// Represents a single item from foreach expansion

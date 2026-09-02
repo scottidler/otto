@@ -42,3 +42,36 @@ Success criteria from the design doc, Phase 1:
 
 - **A pre-existing test-isolation flake in `src/cfg/`, not caused by this phase and not fixed by it.** One `otto ci` run failed with `cfg::param::tests::resolve_choices_command_returns_trimmed_non_empty_lines` and `..._zero_lines_is_an_error_unlike_foreach` reporting `'switch:svc' is already being resolved by an outer otto invocation (OTTO_CHOICES_COMMAND=switch:svc)`. Root cause: `src/cfg/resolver_tests.rs:136` (`run_lines_command_refuses_to_recurse_on_the_same_choices_key`) sets that variable process-wide with `std::env::set_var` and is not `#[serial]`, so under `llvm-cov`'s slower instrumented run it overlaps the two tests that read it. The fix is one attribute in a file this phase does not touch; flagging rather than taking it. Two subsequent `otto ci` runs were green.
 - **The tty grandchild leak named under Tradeoffs** is a real remaining hole in "a cancelled run leaves no descendant alive" (the doc's first acceptance criterion), scoped out by the terminal-ownership carve-out. Worth confirming that is intended to stay open.
+
+## Phase 2: `foreach.jobs` schema and validation
+
+### Design decisions
+
+- **`ForeachJobs` gets a hand-written `Deserialize`/`Serialize` pair, not a derive with an untagged enum** — `src/cfg/task.rs` — the same shape `Nargs` already uses one file over (`src/cfg/param.rs`) for a keyword-or-value field. A `Visitor::deserialize_any` lets `jobs: all` and `jobs: 4` share one field with no wrapper syntax, and overriding only `visit_str`/`visit_u64` and leaving every other `visit_*` at its trait default is what makes the negative/float/bool rejections "already loud" for free: the default impl builds its "invalid type" message straight from `expecting()`, so there is no bespoke error text to maintain for shapes the doc explicitly does not want bespoke text for.
+- **Only one custom load-time validator was needed: `Parser::validate_foreach_jobs`** (`src/cli/parser/config.rs`), checking `jobs.is_some() && !parallel`. The API Design table lists four rejected shapes, but the other three turn out to need zero custom code, verified empirically before writing anything (see Deviations): `jobs: 0` is rejected inside `ForeachJobs::deserialize` itself with the "write `all`" message; negative/non-integer is the visitor-default "invalid type" error; and `jobs` written as a sibling of `foreach:` (not nested in it) is already rejected by `TaskSpecHelper`'s existing `deny_unknown_fields` - it has no `jobs` field, and never gains one, so this shape can't reach a post-parse validator at all.
+- **The task path is free from `serde_yaml`, not synthesized.** Empirically confirmed (three throwaway probe tests, since deleted): `serde_yaml` prefixes an error raised from any depth of a nested struct with the dotted path to that struct, e.g. `tasks.logs.foreach.jobs: foreach jobs: 0 is not a valid count...`. Every one of the three deserialize-time rejections therefore already names the task path with no wrapping needed; only the cross-field `validate_foreach_jobs` check needed an explicit `Task '{task_name}':` prefix, matching `validate_foreach_buffer`'s shape.
+- **`ForeachSpec::jobs` doc comment is copied verbatim from the design doc's Data Model section**, per the task brief - it deliberately does not claim the group holds a shared permit (that idea was killed in panel round 1).
+
+### Deviations
+
+- **Empirically verified, not assumed, that "jobs with no foreach" needs no code.** The design doc's API Design table lists it as one of four "load-time rejections... in the shape `validate_foreach_buffer` already uses," which reads as if it wants a custom validator. Written as a throwaway integration test first (`tasks.hi: unknown field 'jobs', expected one of ... at line N column M`) before concluding the existing `deny_unknown_fields` on `TaskSpecHelper` already produces this, naming the task path, with no `jobs` field ever added there. Adding one would have been the wrong seam anyway: it would have grown `TaskSpecHelper`'s own key count and forced a THIRD inventory-test literal, which the task brief said does not exist on `main` (verified: only `src/cfg/task_tests.rs:992` and `:1057` needed edits).
+- **Same-effect, correct seam: relied on `serde_yaml`'s built-in path-prefixing for three of the four rejections' "names the task path" requirement**, rather than wrapping every `ForeachJobs` parse error in a second layer that re-adds a task name the error already carries. Confirmed by direct probe (see Design decisions) rather than assumed from the doc's prose.
+
+### Tradeoffs
+
+- **`ForeachJobs::Fixed` wraps `NonZeroUsize` rather than `usize` with a runtime zero-check** — matches the design doc's literal signature and makes "zero" structurally unrepresentable in the success path, so every call site that pattern-matches `Fixed(n)` gets a value already known positive, with the "0 means write `all`" message living in exactly one place (the deserializer).
+- **`visit_i64` was deliberately left un-overridden** rather than added for a friendlier negative-number message, since the design doc calls the negative/non-integer case "serde type error, already loud" - writing custom text there would have been unrequested scope beyond what criterion (a) needs (fails to load, names the task path, does not panic - all satisfied by the default).
+
+### Verification
+
+Success criteria from the design doc, Phase 2:
+
+- **(a) PASS** — `tests/foreach_jobs_test.rs`: all four rejected shapes (`jobs` + `parallel: false`, `jobs` outside `foreach:`, `jobs: 0`, and `jobs` as `-3`/`1.5`/`sometimes`) fail to load with a non-zero exit, name the task and/or key, and none panics (checked directly: asserted stderr never contains `"panicked"`). `jobs: all` + `buffer: true` and a bare `jobs: 4` both load cleanly, pinning the two legal shapes beside the four illegal ones.
+- **(b) PASS** — built the release binary at this phase's tip and at the unstashed prior commit (`b5eea2b`), ran both against an identical ottofile (foreach + params + a dependent task, no new keys) through `--tasks --format json`, and diffed by SHA-256: `f12926a4ea413b3caa9027d80f8e16422a35992ed3d550c3cb802ea2cb334ad8` on both sides, byte-identical.
+- **(c) PASS** — `ottofile_reference_key_inventory_is_exhaustive` (`src/cfg/task_tests.rs`) passes with the `ForeachSpec` per-struct count at 9 (`:1013`) and the total at 46 (`:1058`), both edited in this phase's commit; `docs/commands/ottofile-reference.md` gained the `tasks.<name>.foreach.jobs` row, its section header, and its `## Total:` line in the same commit.
+
+`otto ci` green, run twice independently (parallel background runs, no shared state): both printed `✅ All CI checks passed!`, coverage 92.0% (22562-22574 / 24532 lines, threshold 87%), `cargo fmt --check` clean after `fmt-fix` auto-applied one reflow to the new test file.
+
+### Open questions
+
+None.

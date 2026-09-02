@@ -152,6 +152,77 @@ fn test_foreach_requires_source() {
 }
 
 // ------------------------------------------------------------------
+// ForeachJobs (design doc 2026-09-01-cancellation-reaping-and-foreach-
+// concurrency.md, Phase 2)
+// ------------------------------------------------------------------
+
+#[test]
+fn test_foreach_jobs_deserializes_all_and_positive_integers() {
+    assert_eq!(serde_yaml::from_str::<ForeachJobs>("all\n").unwrap(), ForeachJobs::All);
+    assert_eq!(
+        serde_yaml::from_str::<ForeachJobs>("4\n").unwrap(),
+        ForeachJobs::Fixed(std::num::NonZeroUsize::new(4).unwrap())
+    );
+    assert_eq!(
+        serde_yaml::from_str::<ForeachJobs>("1\n").unwrap(),
+        ForeachJobs::Fixed(std::num::NonZeroUsize::new(1).unwrap())
+    );
+}
+
+/// `jobs: 0` is a load error naming `all` as the replacement, not a synonym
+/// for unbounded - a magic zero meaning unbounded is the naming-tells-the-
+/// truth violation the design doc's Resolved Decisions reject.
+#[test]
+fn test_foreach_jobs_zero_names_all_as_the_replacement() {
+    let err = serde_yaml::from_str::<ForeachJobs>("0\n").unwrap_err().to_string();
+    assert!(err.contains('0'), "error must name the rejected value: {err}");
+    assert!(err.contains("all"), "error must name 'all' as the replacement: {err}");
+}
+
+/// Negative and non-integer values are already-loud serde type errors - no
+/// bespoke message needed, per the design doc's API Design table.
+#[test]
+fn test_foreach_jobs_negative_and_non_integer_are_loud_type_errors() {
+    for bad in ["-3\n", "1.5\n", "sometimes\n"] {
+        let err = serde_yaml::from_str::<ForeachJobs>(bad).unwrap_err().to_string();
+        assert!(
+            err.contains("all") || err.contains("positive integer"),
+            "error for {bad:?} must describe the expected shape: {err}"
+        );
+    }
+}
+
+/// Round-trips through serialize/deserialize: `all` stays a string, a fixed
+/// count stays a bare integer, matching what an author would write.
+#[test]
+fn test_foreach_jobs_round_trips() {
+    let all = ForeachJobs::All;
+    let all_yaml = serde_yaml::to_string(&all).unwrap();
+    assert_eq!(all_yaml.trim(), "all");
+    assert_eq!(serde_yaml::from_str::<ForeachJobs>(&all_yaml).unwrap(), all);
+
+    let fixed = ForeachJobs::Fixed(std::num::NonZeroUsize::new(4).unwrap());
+    let fixed_yaml = serde_yaml::to_string(&fixed).unwrap();
+    assert_eq!(fixed_yaml.trim(), "4");
+    assert_eq!(serde_yaml::from_str::<ForeachJobs>(&fixed_yaml).unwrap(), fixed);
+}
+
+/// `jobs` defaults to absent and round-trips as absent (`skip_serializing_if`),
+/// so an ottofile that never mentions it never gains the key on re-emit -
+/// the property success criterion (b) rests on.
+#[test]
+fn test_foreach_spec_jobs_defaults_to_none_and_is_omitted_when_serialized() {
+    let spec = ForeachSpec::default();
+    assert_eq!(spec.jobs, None);
+
+    let yaml = serde_yaml::to_string(&spec).unwrap();
+    assert!(
+        !yaml.contains("jobs"),
+        "default ForeachSpec must not emit 'jobs': {yaml}"
+    );
+}
+
+// ------------------------------------------------------------------
 // Command source (design doc 2026-08-28, Phase 6)
 // ------------------------------------------------------------------
 
@@ -943,6 +1014,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         parallel: _,
         max_items: _,
         buffer: _,
+        jobs: _,
     } = ForeachSpec::default();
     let TaskSpecHelper {
         help: _,
@@ -1010,7 +1082,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         ),
         (
             "ForeachSpec",
-            8,
+            9,
             expected_keys_from_deny_unknown_fields::<ForeachSpec>,
             foreach_path,
         ),
@@ -1055,8 +1127,8 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         total += keys.len();
     }
     assert_eq!(
-        total, 45,
-        "total on-disk key count drifted from the design doc's count of 45"
+        total, 46,
+        "total on-disk key count drifted from the design doc's count of 46"
     );
 
     // The per-key loop above only proves each key *name* appears somewhere on
