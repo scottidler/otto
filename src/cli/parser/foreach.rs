@@ -93,6 +93,23 @@ impl Parser {
                     buffered.insert(name.clone());
                 }
 
+                // Check if this task should run serially (CLI --Serial flag OR config parallel: false)
+                let run_serial = serial_tasks.contains(name) || spec.foreach.as_ref().is_some_and(|f| !f.parallel);
+
+                // `--Serial` and `foreach.jobs` are the same incoherence
+                // `validate_foreach_jobs` rejects for `parallel: false`, asked
+                // from the command line instead of the ottofile: serial means
+                // one item at a time, so a per-group concurrency override has
+                // nothing to override. The config half is rejected at load
+                // time; the flag is only known here, after the partitions are
+                // parsed, so this is the seam where both halves can be true.
+                if run_serial && foreach.jobs.is_some() {
+                    return Err(eyre!(
+                        "Task '{name}': --Serial cannot be combined with foreach.jobs; \
+                         serial means one item at a time, so a concurrency override is incoherent"
+                    ));
+                }
+
                 // `jobs:` does not survive expansion either, and unlike
                 // `buffer` it is not a flag: `all` is one permit per item, so
                 // the count can only be resolved here, where the item list and
@@ -105,9 +122,6 @@ impl Parser {
                 {
                     jobs.insert(name.clone(), permits);
                 }
-
-                // Check if this task should run serially (CLI --Serial flag OR config parallel: false)
-                let run_serial = serial_tasks.contains(name) || spec.foreach.as_ref().is_some_and(|f| !f.parallel);
 
                 // Build virtual parent. Its `before:` is replaced with When::Always edges
                 // to every subtask, so the scheduler queues the parent only after all

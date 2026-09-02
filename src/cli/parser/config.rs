@@ -79,6 +79,10 @@ impl Parser {
             // Shape-only, executes nothing.
             Self::validate_foreach_jobs(&config_spec)?;
 
+            // Reject `foreach.jobs` combined with `tty: true` on the same
+            // task. Shape-only, executes nothing.
+            Self::validate_foreach_jobs_tty(&config_spec)?;
+
             Ok((config_spec, hash, Some(ottofile)))
         } else {
             Err(eyre!("{}", ottofile_not_found_message()))
@@ -162,6 +166,34 @@ impl Parser {
                 return Err(eyre!(
                     "Task '{task_name}': foreach.jobs cannot be combined with parallel: false; \
                      serial means one item at a time, so a concurrency override is incoherent"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `foreach.jobs` together with `tty: true` on the same task is a load
+    /// error, for the same reason `validate_foreach_buffer` above rejects
+    /// `buffer` + `tty`: a `tty` task owns the terminal exclusively and runs
+    /// exclusively, so a per-group concurrency override - one permit per item,
+    /// several items writing at once - cannot be honored. Rejecting it here
+    /// rather than resolving it at run time is what makes the answer available
+    /// at the moment the ottofile is read, and keeps one file from giving two
+    /// answers to one question.
+    ///
+    /// `tty:` is inherited by every subtask of a foreach expansion
+    /// (`TaskSpec::expand_foreach_with_items`), so this is checked on the
+    /// authored task, where the user can act on it, and never on an item.
+    fn validate_foreach_jobs_tty(config: &ConfigSpec) -> Result<()> {
+        for (task_name, task_spec) in &config.tasks {
+            let Some(foreach) = &task_spec.foreach else {
+                continue;
+            };
+            if foreach.jobs.is_some() && task_spec.tty == Some(true) {
+                return Err(eyre!(
+                    "Task '{task_name}': foreach.jobs cannot be combined with tty; \
+                     a tty task owns the terminal exclusively, so it runs exclusively \
+                     and a per-group concurrency override cannot be honored"
                 ));
             }
         }

@@ -1037,9 +1037,11 @@ mod foreach_jobs_admission {
     }
 
     /// A task asking for both `tty: true` and `foreach.jobs` is classified as
-    /// tty. The two are opposite requests and only one can be honored;
-    /// `warn_on_tty_with_foreach_jobs` is what keeps the choice from being
-    /// silent.
+    /// tty. No ottofile can produce one - `validate_foreach_jobs_tty` rejects
+    /// the combination at load time - so this pins the classification for a
+    /// `Task` built by hand: `admission_for` is total, and the arm it takes
+    /// must never be the one that puts several writers on a terminal a task
+    /// asked to own.
     #[test]
     fn tty_wins_over_a_group_concurrency_override() {
         let mut both = item("logs:s1", "logs", 8);

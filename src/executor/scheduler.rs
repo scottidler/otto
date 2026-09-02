@@ -360,10 +360,13 @@ fn may_admit(class: Admission, in_flight: InFlight) -> bool {
 
 /// Which of the three admission classes a task belongs to.
 ///
-/// `tty` wins over `jobs:`, because the two ask for opposite things and only
-/// one of them can be honored: exclusive ownership of the terminal cannot be
-/// shared out one-permit-per-item. A task that asks for both is reported once
-/// per run by `warn_on_tty_with_foreach_jobs`, not silently resolved here.
+/// `tty` is checked first, so a task carrying both `tty: true` and
+/// `foreach.jobs` classifies as `Tty` - the conservative half, since it never
+/// puts two writers on one terminal. Nothing loaded from an ottofile can reach
+/// that arm: `validate_foreach_jobs_tty` (`src/cli/parser/config.rs`) rejects
+/// the combination at load time. The ordering stays because this function is
+/// total over a `Task` and the classification has to be right for one built by
+/// hand, not only for one the loader vetted.
 fn admission_for(task: &Task) -> Admission {
     if task.tty {
         return Admission::Tty;
@@ -1320,23 +1323,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         })
     }
 
-    /// Say so, once per run, when a task asks for both `tty: true` and
-    /// `foreach.jobs`.
-    ///
-    /// The two are opposite requests - exclusive ownership of the terminal
-    /// versus one permit per item - and `admission_for` honors `tty`. That
-    /// choice is safe but it ignores a key the ottofile wrote, so it does not
-    /// get to be silent.
-    fn warn_on_tty_with_foreach_jobs(&self) {
-        for task in self.tasks.iter().filter(|t| t.tty && t.foreach_jobs.is_some()) {
-            log::warn!(
-                "task {} sets tty: true and foreach.jobs; a tty task owns the terminal exclusively, \
-                 so it runs exclusively and the per-group concurrency override is not applied",
-                task.name
-            );
-        }
-    }
-
     /// A handle the caller can trip to cancel this run.
     pub fn cancel_signal(&self) -> Arc<CancelSignal> {
         self.cancel.clone()
@@ -1446,7 +1432,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         // `foreach.jobs` walks the same path, at the same cost, as before this
         // key existed.
         let has_exempt_items = self.tasks.iter().any(|t| matches!(admission_for(t), Admission::Exempt));
-        self.warn_on_tty_with_foreach_jobs();
 
         // Track completed and failed tasks for dependency satisfaction checking.
         let mut completed_set = std::collections::HashSet::new();

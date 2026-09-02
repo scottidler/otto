@@ -257,3 +257,134 @@ tasks:
         "TaskView's shape must stay exactly these four fields regardless of foreach.jobs"
     );
 }
+
+/// `foreach.jobs` combined with `tty: true` on the same task fails to load,
+/// naming both keys and the task. Same rejection, and the same reason, as
+/// `foreach.buffer` + `tty` eleven lines above it in
+/// `src/cli/parser/config.rs`: a tty task owns the terminal exclusively, so a
+/// per-group concurrency override cannot be honored. Rejected at load rather
+/// than resolved at run time, so the answer arrives when the ottofile is read
+/// and one file does not give two answers to one question.
+#[test]
+fn jobs_with_tty_fails_to_load_naming_both_keys_and_task() {
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile = write_ottofile(
+        temp_dir.path(),
+        r#"
+otto:
+  api: 1
+
+tasks:
+  logs:
+    tty: true
+    foreach:
+      items: [alpha, beta]
+      jobs: all
+    bash: echo ${item}
+"#,
+    );
+
+    let output = otto(&ottofile, &["--tasks"]);
+    assert!(!output.status.success(), "jobs + tty must fail to load");
+    let err = stderr(&output);
+    assert!(err.contains("jobs"), "error must name 'jobs': {err}");
+    assert!(err.contains("tty"), "error must name 'tty': {err}");
+    assert!(err.contains("logs"), "error must name the task 'logs': {err}");
+}
+
+/// The task name is what the error names, not an expanded item. `tty:` is
+/// inherited by every subtask, so a rejection written against the expansion
+/// would name `logs:alpha` - a name the user never wrote and cannot edit.
+#[test]
+fn the_tty_rejection_names_the_authored_task_not_an_item() {
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile = write_ottofile(
+        temp_dir.path(),
+        r#"
+otto:
+  api: 1
+
+tasks:
+  logs:
+    tty: true
+    foreach:
+      items: [alpha, beta]
+      jobs: all
+    bash: echo ${item}
+"#,
+    );
+
+    let err = stderr(&otto(&ottofile, &["--tasks"]));
+    assert!(
+        !err.contains("logs:alpha") && !err.contains("logs:beta"),
+        "the error must name the authored task, not an expanded item: {err}"
+    );
+}
+
+/// `--Serial` with `foreach.jobs` is rejected, matching the `parallel: false`
+/// rejection: the flag and the key ask the same incoherent thing, and which
+/// entry point the serial request came in through does not change the answer.
+/// Checked by running the task, since `--Serial` is a per-task CLI partition
+/// and is not visible at config-load time.
+#[test]
+fn serial_flag_with_jobs_is_rejected_like_parallel_false() {
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile = write_ottofile(
+        temp_dir.path(),
+        r#"
+otto:
+  api: 1
+
+tasks:
+  logs:
+    foreach:
+      items: [alpha, beta]
+      parallel: true
+      jobs: all
+    bash: echo RAN-${item}
+"#,
+    );
+
+    let output = otto(&ottofile, &["logs", "--Serial"]);
+    assert!(!output.status.success(), "--Serial + jobs must be rejected");
+    let err = stderr(&output);
+    assert!(err.contains("Serial"), "error must name '--Serial': {err}");
+    assert!(err.contains("jobs"), "error must name 'jobs': {err}");
+    assert!(err.contains("logs"), "error must name the task 'logs': {err}");
+
+    // Rejected before anything runs, like every other shape in this file.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("RAN-") && !err.contains("RAN-"),
+        "no item may execute once the combination is rejected: {stdout}{err}"
+    );
+}
+
+/// The same ottofile without `--Serial` still runs: the rejection above is
+/// about the flag, not about the `jobs:` key it was checked beside.
+#[test]
+fn the_same_jobs_task_runs_without_the_serial_flag() {
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile = write_ottofile(
+        temp_dir.path(),
+        r#"
+otto:
+  api: 1
+
+tasks:
+  logs:
+    foreach:
+      items: [alpha, beta]
+      parallel: true
+      jobs: all
+    bash: echo RAN-${item}
+"#,
+    );
+
+    let output = otto(&ottofile, &["logs"]);
+    assert!(
+        output.status.success(),
+        "jobs: all without --Serial must run: {}",
+        stderr(&output)
+    );
+}

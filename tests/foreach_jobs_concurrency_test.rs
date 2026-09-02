@@ -581,3 +581,95 @@ fn an_exempt_group_becoming_ready_during_a_tty_task_waits_for_it() {
         "the run must complete: {output}"
     );
 }
+
+/// A group of two under `jobs: 1`, so the second item is admitted by the loop
+/// and then sits queuing on the group's single permit, plus a task that can
+/// only be launched after that queued item was popped from the ready queue.
+const QUEUED_ITEM_DOES_NOT_BLOCK_THE_LOOP: &str = r#"
+otto:
+  api: 1
+
+tasks:
+  gate:
+    bash: |
+      while [ "$(ls @DIR@/item.s* 2>/dev/null | wc -l)" -lt 1 ]; do sleep 0.05; done
+  after:
+    before: [gate]
+    bash: |
+      touch @DIR@/task.after
+      read line < @DIR@/fifo.after
+  tail:
+    foreach:
+      items: [s1, s2]
+      parallel: true
+      jobs: 1
+    bash: |
+      touch @DIR@/item.${item}
+      read line < @DIR@/fifo.${item}
+"#;
+
+/// **The other half of criterion (f): the permit is acquired INSIDE the
+/// spawned body, in `execute_task`.**
+///
+/// Criterion (f)'s unit test
+/// (`spawn_counts_a_task_in_flight_before_its_body_acquires_a_permit`) builds
+/// its own `ActiveTasks` and its own async block, so it pins that
+/// `ActiveTasks::spawn` inserts before its body runs and nothing else. Move
+/// `semaphore.acquire_many` from inside the body
+/// (`src/executor/scheduler/task_execution.rs`) up into `execute_task` above
+/// `active.spawn` and that test stays green while the design's load-bearing
+/// property is gone: the single-threaded launch loop would then block inside
+/// `execute_task`, waiting on a permit, instead of going on to admit the rest
+/// of the queue. Until this test, only a code comment stood on that site.
+///
+/// The shape, all barriers and no stopwatch: `s1` takes the group's only
+/// permit and blocks on its fifo; `s2` is admitted and queues for that permit;
+/// `gate` returns once an item is running, which makes `after` ready. `after`
+/// can only be launched by a pass that got past `s2`, so its marker is the
+/// proof that popping `s2` did not park the loop.
+///
+/// Break-the-code: hoist the acquire above `active.spawn` in `execute_task`
+/// and `after` never starts, because the loop is parked on a permit `s1` will
+/// not release until this test releases `s1`'s fifo - which it does not do
+/// until after the assertion.
+#[test]
+fn a_queued_exempt_item_does_not_park_the_launch_loop() {
+    let mut fixture = Fixture::new(QUEUED_ITEM_DOES_NOT_BLOCK_THE_LOOP, &["after", "s1", "s2"]);
+    fixture.run(&["-j", "1", "tail", "after"]);
+
+    assert!(
+        wait_for("one item starts", || fixture.started_items().len() == 1),
+        "jobs: 1 must start exactly one item: {:?}",
+        fixture.started_items()
+    );
+    assert!(
+        !ever_true(|| fixture.started_items().len() > 1),
+        "the second item must still be queuing for the group's only permit: {:?}",
+        fixture.started_items()
+    );
+    assert!(
+        wait_for("the task behind the queued item starts", || fixture.started("after")),
+        "the launch loop must keep admitting while an admitted item queues for its permit; \
+         otto's output was: {}",
+        fixture.output()
+    );
+
+    // And the queued item is genuinely queued, not dropped: releasing the
+    // running one hands it the permit.
+    let running = fixture.started_items();
+    assert!(
+        fixture.release(&running[0]),
+        "the running item must be blocked on its fifo"
+    );
+    assert!(
+        wait_for("the queued item starts", || fixture.started_items().len() == 2),
+        "the queued item must start once the permit is freed: {:?}",
+        fixture.started_items()
+    );
+
+    let output = fixture.finish();
+    assert!(
+        output.contains("[tail] finished successfully"),
+        "the group must complete once released: {output}"
+    );
+}
