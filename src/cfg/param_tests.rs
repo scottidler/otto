@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use super::*;
+use serial_test::serial;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -506,6 +507,7 @@ fn choices_and_choices_command_together_is_a_loud_config_error() {
 }
 
 #[test]
+#[serial]
 fn resolve_choices_command_returns_trimmed_non_empty_lines() {
     let spec = spec_for(
         r#"
@@ -523,6 +525,7 @@ fn resolve_choices_command_returns_trimmed_non_empty_lines() {
 }
 
 #[test]
+#[serial]
 fn resolve_choices_command_nonzero_exit_names_task_param_and_command() {
     let spec = spec_for(
         r#"
@@ -544,6 +547,7 @@ fn resolve_choices_command_nonzero_exit_names_task_param_and_command() {
 }
 
 #[test]
+#[serial]
 fn resolve_choices_command_zero_lines_is_an_error_unlike_foreach() {
     let spec = spec_for(
         r#"

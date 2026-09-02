@@ -8,6 +8,29 @@ fn no_envs() -> HashMap<String, String> {
     HashMap::new()
 }
 
+/// Sets a guard var for the life of the binding and removes it on drop.
+///
+/// The recursion tests have to set a process-wide env var, and the process is
+/// shared with every other test in the binary. Removing it on the happy path
+/// is not enough: these tests `.unwrap_err()`, so an unexpected `Ok` panics
+/// with the var still set, and the next test to resolve a `choices-command`
+/// then fails with a bogus "recursion detected". Dropping does the removal on
+/// both paths. `#[serial]` on the tests keeps the window closed meanwhile.
+struct EnvGuard(&'static str);
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        unsafe { std::env::set_var(key, value) };
+        Self(key)
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var(self.0) };
+    }
+}
+
 #[test]
 fn run_lines_command_trims_and_drops_empty_lines() {
     let lines = run_lines_command(
@@ -134,9 +157,10 @@ fn choices_does_not_cache_a_failure() {
 }
 
 #[test]
+#[serial]
 fn run_lines_command_refuses_to_recurse_on_the_same_choices_key() {
     // Stands in for a nested otto: the guard var already names this key.
-    unsafe { std::env::set_var(CHOICES_GUARD_VAR, "switch:svc") };
+    let _guard = EnvGuard::set(CHOICES_GUARD_VAR, "switch:svc");
     let err = run_lines_command(
         "printf 'alpha\n'",
         &PathBuf::from("."),
@@ -147,7 +171,6 @@ fn run_lines_command_refuses_to_recurse_on_the_same_choices_key() {
     )
     .unwrap_err()
     .to_string();
-    unsafe { std::env::remove_var(CHOICES_GUARD_VAR) };
     assert!(err.contains("recursion detected"), "{err}");
     assert!(err.contains("switch:svc"), "{err}");
     assert!(err.contains(CHOICES_GUARD_VAR), "{err}");
@@ -201,7 +224,7 @@ fn run_command_stdout_reports_nonzero_exit_with_command_and_context() {
 #[serial]
 fn run_command_stdout_refuses_to_recurse_on_the_envs_command_key() {
     // Stands in for a nested otto: the guard var already names the key.
-    unsafe { std::env::set_var(ENVS_GUARD_VAR, "otto.envs-command") };
+    let _guard = EnvGuard::set(ENVS_GUARD_VAR, "otto.envs-command");
     let err = run_command_stdout(
         "printf 'FOO=bar\n'",
         &PathBuf::from("."),
@@ -212,7 +235,6 @@ fn run_command_stdout_refuses_to_recurse_on_the_envs_command_key() {
     )
     .unwrap_err()
     .to_string();
-    unsafe { std::env::remove_var(ENVS_GUARD_VAR) };
     assert!(err.contains("recursion detected"), "{err}");
     assert!(err.contains("otto.envs-command"), "{err}");
     assert!(err.contains(ENVS_GUARD_VAR), "{err}");

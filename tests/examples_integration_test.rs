@@ -221,16 +221,30 @@ fn test_tui_demo_parses() {
 // Negative Test - Verify we catch broken examples
 // ============================================================================
 
+/// Removes the fixture directory on drop, however the test leaves.
+///
+/// The cleanup cannot be a trailing statement here: the test is
+/// `#[should_panic]`, so the `.expect()` below is REQUIRED to unwind and any
+/// line after it is unreachable. The directory therefore survived every run,
+/// and a later `otto examples` walked into a deliberately invalid ottofile and
+/// failed. Dropping runs during the unwind, which is the only path this test
+/// has.
+struct BrokenExampleFixture;
+
+impl Drop for BrokenExampleFixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all("examples/_test_broken").ok();
+    }
+}
+
 #[test]
 #[should_panic(expected = "should parse")]
 fn test_validates_broken_examples() {
     // This would fail if we had a broken example (good!)
     // Create a temporary broken example
+    let _fixture = BrokenExampleFixture;
     std::fs::create_dir_all("examples/_test_broken").ok();
     std::fs::write("examples/_test_broken/otto.yml", "invalid: yaml: content: [[[").ok();
 
     validate_example_parses("_test_broken").expect("should parse");
-
-    // Cleanup
-    std::fs::remove_dir_all("examples/_test_broken").ok();
 }
