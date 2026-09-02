@@ -222,13 +222,16 @@ fn a_cancelled_run_reaps_every_task_bodys_grandchildren() {
         .collect();
     // The fixture has to be doing what it claims BEFORE the interrupt, or an
     // "everything is dead" assertion afterwards proves nothing.
-    for pid in &pids {
-        assert!(
-            still_running(pid, GRANDCHILD_MARK),
-            "grandchild {pid} must be running `{GRANDCHILD_MARK}` before the interrupt, saw {:?}",
-            cmdline(pid)
-        );
-    }
+    //
+    // This WAITS rather than asserting outright: the marker carries `$!`, which
+    // bash knows at fork, so the pid is recorded before the child has exec'd
+    // `sleep`. Until that exec lands, `/proc/<pid>/cmdline` still reports the
+    // forked shell. Asserting here read the wrapper's command line on a loaded
+    // machine and failed the precondition before an interrupt was ever sent.
+    run.wait_for(
+        || pids.iter().all(|pid| still_running(pid, GRANDCHILD_MARK)),
+        "both grandchildren to be identifiable in /proc",
+    );
 
     run.interrupt();
     let (code, output) = run.finish();
