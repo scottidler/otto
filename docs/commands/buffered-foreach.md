@@ -96,6 +96,62 @@ when it is not.
   stripped per line, both inside and outside a buffered block. Buffering
   only fixes contiguity, not prefix attribution.
 
+## `foreach.jobs`: per-group concurrency, overriding `-j`/`otto.jobs`
+
+`tasks.<name>.foreach.jobs: all | <N>` (design doc
+`docs/design/2026-09-01-cancellation-reaping-and-foreach-concurrency.md`,
+Phase 2-3) overrides the global concurrency cap for one foreach group's
+items only. It exists for a group of tasks that never exit on their own (a
+log tail, a watcher, a dev server): under the global `-j`/`otto.jobs` cap,
+items past the cap never get a permit and never start, silently.
+
+```yaml
+tasks:
+  logs:
+    foreach:
+      command: "scripts/stack.sh scope logs"
+      as: svc
+      parallel: true
+      jobs: all          # every item gets its own permit, ignoring -j
+```
+
+- **`jobs: all`** gives every item in the group its own permit, so all of
+  them start regardless of the global cap.
+- **`jobs: <N>`** (a positive integer) caps the group at `N` concurrent
+  items, independent of `-j`/`otto.jobs`.
+- **Requires `parallel: true`.** `jobs` with `parallel: false` is a load
+  error: serial already means one item at a time, so a concurrency override
+  is incoherent (`Task '<name>': foreach.jobs cannot be combined with
+  parallel: false; serial means one item at a time, so a concurrency
+  override is incoherent`).
+- **`jobs: 0` is a load error**, not "unbounded": `foreach jobs: 0 is not a
+  valid count; write \`jobs: all\` to run every item at once`.
+- **`jobs: all` with `buffer: true` is legal and expected.** Buffering is a
+  display policy (how output is replayed); `jobs` is a scheduling policy
+  (how many permits the group gets). The two do not interact.
+
+### `tty: true` on the same task
+
+A foreach task's `tty: true` and `foreach.jobs` ask for opposite things:
+exclusive ownership of the terminal versus one permit per item shared out
+across the group. When both are set on one task, `tty` wins: the task runs
+exclusively as it always has, and the per-group concurrency override is not
+applied. This is not silent — otto logs a warning once per run (`task <name>
+sets tty: true and foreach.jobs; a tty task owns the terminal exclusively,
+so it runs exclusively and the per-group concurrency override is not
+applied`).
+
+### The accepted consequence: a `jobs: all` group can block everything after it
+
+A group with `jobs: all` whose items never exit blocks every later task in
+the run, including a `tty: true` one — for as long as the group runs, which
+for a log tail is forever. **This is not a regression.** A single
+never-exiting task holds a shared permit forever today and starves a later
+`tty` task identically; `jobs: all` does not introduce the hazard, it just
+makes it possible to hit on purpose. It is the accepted cost of asking for
+the exemption, which is why a group like `logs` belongs last in a task list
+by construction.
+
 ## Non-goals
 
 - Emitting blocks in completion order instead of item order: excluded by

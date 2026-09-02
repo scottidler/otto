@@ -157,3 +157,26 @@ Success criteria from the design doc, Phase 4. Unit tests in `src/cfg/otto_tests
 ### Open questions
 
 None.
+
+## Phase 5: Docs, example, and the release-post correction
+
+### Design decisions
+
+- **The `jobs` section in `docs/commands/buffered-foreach.md` documents behavior, not schema.** `docs/commands/ottofile-reference.md` already carries the one-line schema row (added in Phase 2); this section's job is the same one `buffer`'s section already does above it in the file — worked example, the accepted consequence stated rather than left for the reader to discover, and the exact rejection error text quoted so a load failure is recognizable. Quoted directly from `src/cli/parser/config.rs::validate_foreach_jobs` and `src/cfg/task.rs`'s `ForeachJobs::deserialize`, read at their current lines, rather than paraphrased, so the doc cannot drift from the message a user actually sees.
+- **The `tty: true` + `foreach.jobs` resolution is documented as Phase 3 actually built it (tty wins, warned once per run), not as the design doc's Architecture section describes it (silence).** Read `admission_for` and `warn_on_tty_with_foreach_jobs` (`src/executor/scheduler.rs`) directly and quoted the real `log::warn!` text, since the Phase 3 notes record this resolution as a deviation the design doc's prose doesn't cover.
+- **The example's `jobs:` line is commented out, not live**, matching the brief ("gains a commented `jobs:` line") and because `foreach-buffer`'s items are static strings, not never-exiting bodies — turning `jobs: all` on for real would change nothing observable and would misrepresent the feature's actual use case (a log tail, a watcher, a dev server).
+
+### Deviations
+
+- **Criterion (c) is not satisfied and cannot be, this phase.** The design doc's Phase 5 success criterion (c) is `marquee read <URL> | grep -c 'They die from'` returning 0, with the replacement naming the process group. Publishing to the marquee post is outward-facing and the task brief explicitly withholds that authority from this phase ("DO NOT publish or modify the marquee release post... The user must approve that separately"). Reported as DEFERRED, not PASS or FAIL: the work (finding the exact current sentence, drafting the replacement) is done and staged in `docs/design/2026-09-01-marquee-post-correction.md`; only the `marquee update` call is withheld pending approval.
+- **`marquee read` could not be run against the live post to re-verify the current sentence.** It failed: `Error: authentication failed: Okta token is missing or expired and no controlling terminal is available (non-interactive session)`. No interactive terminal is available in this session to complete the device-grant login. The correction file uses the sentence as quoted, with citation, in the design doc's own Problem Statement (finding 1) — measured against the post before that doc was written — and states plainly that it was not independently re-fetched this phase. Reported honestly per the task brief ("If `marquee read` fails, say so... rather than guessing the wording") rather than treated as a completed verification.
+- **Reduced gate, by explicit user decision for Phases 4 and 5:** no break-the-code check was run (there is no code in this phase to break — docs, an example comment, and a staged correction file) and coverage was not measured. The gate used was `cargo test --workspace --all-features` (864 unit tests + all integration binaries, 0 failed) plus `cargo fmt --all` (no changes needed) and `cargo clippy --workspace --all-features --all-targets` (clean, no warnings). The orchestrator runs one full `otto ci` before finalization.
+
+### Tradeoffs
+
+- **Quoting the exact validator error text in the doc vs. paraphrasing it.** Quoting risks the doc going stale if the message wording changes later with no matching doc update; paraphrasing risks describing a message the user never actually sees. Chose quoting: `buffered-foreach.md`'s `buffer` section above it already sets this precedent (it quotes the exact truncation-warning line verbatim), so this keeps the file's existing convention rather than starting a new one.
+- **A separate `marquee-post-correction.md` file vs. inlining the correction into these implementation notes.** A standalone file is the artifact Scott approves and then acts on directly (`marquee update` takes post text, not a notes excerpt buried in a phase section); these notes instead point at it. The implementation notes are an append-only project record, not a staging area for outward-facing content that will itself be edited before use.
+
+### Open questions
+
+- **The proposed replacement sentence for the marquee post needs Scott's approval before publishing**, since it is outward-facing. Staged verbatim, with the current sentence, citation, and reasoning, in `docs/design/2026-09-01-marquee-post-correction.md`. It also needs a final `marquee read` re-fetch (after `marquee login`, since this session's Okta token was unavailable non-interactively) to confirm section 5 still contains the sentence exactly as recorded, before publishing.

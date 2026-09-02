@@ -31,6 +31,10 @@ tasks:
       as: service
       parallel: true
       buffer: true
+      # jobs: all        # override -j for this group only: one permit per
+                          # item, for a group whose items never exit on their
+                          # own (a log tail, a watcher). Requires parallel:
+                          # true; jobs: 0 is a load error, write `all` instead.
     bash: |
       echo "=== ${service} ==="
       echo "fleet: ${FLEET}"
