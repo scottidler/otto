@@ -2,7 +2,7 @@ otto:
   api: 1
   jobs: 17
   tasks:
-  - bob
+  - two
 tasks:
   one:
     params:

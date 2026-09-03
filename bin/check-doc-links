@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+#
+# Fail the build when a doc points at a page that isn't there.
+#
+# Links moved into docs/archive/ broke seven times without anyone noticing
+# (docs/design/2026-09-02-second-code-review-remediation.md, Phase 17). A
+# one-off sweep fixes today's misses; this is the structural fix, run every
+# time via `otto docs` (and therefore `otto all`).
+#
+# Scope: every markdown link `[text](target)` whose target names a `.md`
+# file, found in docs/**/*.md, examples/**/*.md, and README.md. A target is
+# skipped if it's an absolute URL (http/https), a mailto link, or a bare
+# in-page anchor (#foo). Everything else is resolved relative to the file
+# that contains it (stripping any trailing #fragment) and must exist on
+# disk.
+#
+# Usage:
+#   bin/check-doc-links
+
+set -uo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+
+fail=0
+
+check_file() {
+    local file="$1"
+    local dir
+    dir="$(dirname "$file")"
+
+    while IFS=: read -r line target; do
+        [ -z "$target" ] && continue
+        case "$target" in
+        http://* | https://* | mailto:* | '#'*) continue ;;
+        esac
+
+        # Only .md links are in scope - the recurrence this guards against.
+        case "$target" in
+        *.md | *.md'#'*) ;;
+        *) continue ;;
+        esac
+
+        local path="${target%%#*}"
+        [ -z "$path" ] && continue
+
+        local resolved="$dir/$path"
+        if [ ! -e "$resolved" ]; then
+            echo "$file:$line: broken link -> $target (resolved: $resolved)"
+            fail=1
+        fi
+    done < <(grep -noP '(?<=\]\()[^)]+(?=\))' "$file")
+}
+
+files=()
+while IFS= read -r -d '' f; do
+    files+=("$f")
+done < <(find docs examples -name '*.md' -print0 2>/dev/null)
+files+=("README.md")
+
+for f in "${files[@]}"; do
+    [ -f "$f" ] && check_file "$f"
+done
+
+if [ "$fail" -eq 0 ]; then
+    echo "✅ check-doc-links: every relative .md link resolves"
+else
+    exit 1
+fi

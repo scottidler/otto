@@ -534,10 +534,10 @@ indicatif = "0.17"  # For progress bars
 
 ## Related Documentation
 
-- [Built-in Commands Design](../capitalized-builtins-design.md)
-- [Clean Command](clean.md)
-- [History Command](history.md)
-- [Stats Command](stats.md)
+- [Built-in Commands Design](capitalized-builtins-design.md)
+- [Clean Command](../commands/clean.md)
+- [History Command](../commands/history.md)
+- [Stats Command](../commands/stats.md)
 
 ## Success Criteria
 

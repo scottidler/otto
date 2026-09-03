@@ -18,6 +18,6 @@ This example demonstrates:
 
 Run the tasks to see file dependencies in action:
 ```bash
-otto -o examples/ex8/otto.yml process
-otto -o examples/ex8/otto.yml check_logs
+otto -o examples/file-dependencies/otto.yml process
+otto -o examples/file-dependencies/otto.yml check_logs
 ```

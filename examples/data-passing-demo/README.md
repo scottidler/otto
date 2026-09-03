@@ -1,293 +1,146 @@
-# Example 14: Data Passing Between Bash and Python
+# Data Passing Between Bash and Python
 
-This example demonstrates Otto's data passing capabilities using `otto_set_output` and `otto_get_input` in both **Bash** and **Python** tasks.
+This example demonstrates otto's data passing capabilities using
+`otto_set_output`, `otto_deserialize_input`, and `otto_get_input`, in both
+**Bash** and **Python** tasks, chained across a dependency graph.
 
 ## What This Demonstrates
 
-1. ✅ **Bash → Bash** data passing
-2. ✅ **Python → Python** data passing
-3. ✅ **Bash → Python** cross-language data flow
-4. ✅ **Python → Bash** cross-language data flow
-5. ✅ Simple values (strings, numbers)
-6. ✅ Complex values (JSON objects, arrays)
-7. ✅ Multiple dependencies in a single task
+1. Bash → Bash data passing (`task_a` → `task_b`)
+2. Bash → Python cross-language data flow (`task_b` → `task_c`)
+3. A consumer three hops downstream that only declares its direct
+   dependency, and therefore can only read that dependency's outputs
+   (`report`, which declares `before: [task_c]` and cannot see `task_a`
+   or `task_b` directly)
+4. Simple string values, and doing arithmetic on a value read back as a
+   string
 
 ## Task Flow
 
 ```
-bash_producer (bash)
-    ↓
-bash_consumer (bash) ─────┐
-    ↓                     ↓
-bash_to_python (python)   |
-    ↓                     |
-                          |
-python_producer (python)  |
-    ↓                     |
-python_consumer (python) ─┤
-    ↓                     |
-python_to_bash (bash) ────┘
-    ↓
-final_report (bash)
+task_a (bash, producer)
+    |
+    v
+task_b (bash, consumer of task_a, producer for task_c)
+    |
+    v
+task_c (python, consumer of task_b, producer for report)
+    |
+    v
+report (bash, consumer of task_c; validates the whole pipeline)
 ```
 
 ## Running the Example
 
-### Run All Tasks
 ```bash
-otto final_report
-```
-
-This will run all tasks in dependency order.
-
-### Run Individual Tasks
-
-```bash
-# Bash producer and consumer
-otto bash_producer
-otto bash_consumer
-
-# Python producer and consumer
-otto python_producer
-otto python_consumer
-
-# Cross-language examples
-otto bash_to_python
-otto python_to_bash
-
-# Final report
-otto final_report
+otto -o examples/data-passing-demo report   # runs the whole chain
+otto -o examples/data-passing-demo task_a   # or run any task by name
 ```
 
 ## How It Works
 
-### Setting Output (Bash)
+### Setting output (Bash)
 
 ```bash
-# In any bash task
-otto_set_output "key" "value"
-otto_set_output "count" "42"
-otto_set_output "status" "success"
+otto_set_output "message" "hello"
+otto_set_output "number" "42"
 ```
 
-### Getting Input (Bash)
+### Reading input (Bash)
+
+A dependency's output has to be deserialized before `otto_get_input` can see
+it - the generated prologue does this automatically for every task listed in
+`before:`, so a task body reading its own declared dependencies (the common
+case) never calls `otto_deserialize_input` itself:
 
 ```bash
-# In a dependent bash task
-value=$(otto_get_input "task_name.key")
-count=$(otto_get_input "task_name.count")
-status=$(otto_get_input "task_name.status")
+received_message=$(otto_get_input "task_a.message")
+received_number=$(otto_get_input "task_a.number")
 ```
 
-### Setting Output (Python)
+This example's `task_b` and `task_c` call `otto_deserialize_input` explicitly
+anyway, to show the mechanism the generated prologue runs on your behalf.
 
-```yaml
-tasks:
-  my_task:
-    python: |
-      import json
+### Setting output (Python)
 
-      # Simple values
-      otto_set_output("key", "value")
-      otto_set_output("count", "42")
-
-      # Complex values - serialize to JSON
-      data = {"nested": "object"}
-      otto_set_output("data", json.dumps(data))
-
-      tags = ["tag1", "tag2"]
-      otto_set_output("tags", json.dumps(tags))
+```python
+otto_set_output("tripled", str(tripled))
 ```
 
-### Getting Input (Python)
+### Reading input (Python)
 
-```yaml
-tasks:
-  dependent_task:
-    before: [my_task]
-    python: |
-      import json
-
-      # Simple values
-      value = otto_get_input("task_name.key")
-      count = otto_get_input("task_name.count")
-
-      # Complex values - deserialize from JSON
-      data_json = otto_get_input("task_name.data")
-      data = json.loads(data_json) if data_json else {}
-
-      tags_json = otto_get_input("task_name.tags")
-      tags = json.loads(tags_json) if tags_json else []
-```
-
-## Behind the Scenes
-
-When you call `otto_set_output`, Otto:
-1. Stores the key-value pair in an array/dict
-2. At task completion, serializes to JSON file: `output.<task_name>.json`
-
-When you call `otto_get_input`, Otto:
-1. Reads from symlinked input file: `input.<dependency>.json`
-2. Extracts the requested key
-3. Returns the value
-
-### File Locations
-
-After running, you can inspect the data files:
-
-```bash
-# Find your run directory
-cd ~/.otto/ex14-*/*/tasks/
-
-# View a task's output
-cat bash_producer/output.bash_producer.json
-
-# View a task's input (symlink to dependency)
-cat bash_consumer/input.bash_producer.json
-
-# They point to the same data!
-ls -la bash_consumer/input.bash_producer.json
-```
-
-Example output file:
-```json
-{
-  "timestamp": "2025-12-08_14:30:45",
-  "random_number": "742",
-  "status": "success",
-  "message": "Data generated from bash"
-}
+```python
+otto_deserialize_input("task_b")
+doubled = otto_get_input("task_b.doubled")
 ```
 
 ## Key Learnings
 
-### 1. Manual Deserialization (Not Shown Here)
+### 1. A dependency is only visible to a task that declares it
 
-The tasks in this example don't manually call `otto_deserialize_input` because the builtins handle it. But you can call it explicitly if needed:
+`report` declares `before: [task_c]` only, so it can read `task_c.tripled`
+but has no way to read `task_a.number` or `task_b.doubled` directly - it
+only knows about them because `task_c` already read and re-derived them.
+There is no ambient sharing across the whole run.
 
-```bash
-# Manually load a dependency
-otto_deserialize_input "task_name"
-value=$(otto_get_input "task_name.key")
-```
+### 2. Complex data types
 
-### 2. Complex Data Types
-
-For complex data (objects, arrays), always serialize to JSON:
+For anything beyond a plain string, serialize to JSON on the way out and
+parse it on the way in:
 
 ```python
-# ✅ Good
-data = {"key": "value"}
-otto_set_output("data", json.dumps(data))
-
-# ❌ Bad - will stringify incorrectly
-otto_set_output("data", str(data))  # Don't do this!
+import json
+otto_set_output("data", json.dumps({"key": "value"}))
 ```
 
-### 3. Cross-Language Compatibility
-
-- Bash outputs are always strings
-- Python can output any JSON-serializable type
-- Always serialize complex types to JSON strings
-- Use `jq` in bash to parse JSON
-
-### 4. Naming Convention
-
-By convention, use `<task_name>.<key>` when accessing data:
-
 ```bash
-# Clear and explicit
-value=$(otto_get_input "bash_producer.timestamp")
-
-# Not recommended (won't work without task prefix)
-# value=$(otto_get_input "timestamp")
+json_data=$(otto_get_input "producer.data")
+value=$(echo "$json_data" | jq -r '.key')
 ```
 
-## Debugging
+### 3. Naming convention
 
-### View Task Outputs
-
-```bash
-# Find the run directory
-cd ~/.otto/ex14-*/latest/tasks
-
-# View what each task produced
-cat bash_producer/output.bash_producer.json
-cat python_producer/output.python_producer.json
-
-# Check task logs
-cat bash_producer/stdout.log
-cat python_producer/stdout.log
-```
-
-### Check Symlinks
+Values are always addressed as `<task_name>.<key>`:
 
 ```bash
-# See how dependencies are linked
-ls -la bash_consumer/input.*.json
-ls -la final_report/input.*.json
-
-# The symlinks show data flow!
+value=$(otto_get_input "task_a.message")
 ```
 
 ## Common Issues
 
-### Issue: `otto_get_input` reports `no input '<key>'`
+### `otto_get_input` reports `no input '<key>'`
 
-Otto prints `otto: no input '<key>'; available: <the keys that are there>` and
-returns non-zero. It used to return empty at exit 0, which said nothing; the
-diagnostic replaced that, so read the `available:` list first - it usually names
-the key you meant, with different spelling.
+otto prints `otto: no input '<key>'; available: <the keys that are there>`
+and returns non-zero. Read the `available:` list first - it usually names
+the key you meant, with different spelling. See
+[`docs/commands/ottofile-reference.md`](../../docs/commands/ottofile-reference.md#passing-data-between-tasks-otto_set_output-and-otto_get_input)
+for the full behavior, including which shell shapes actually see the
+non-zero exit status.
 
-Note the non-zero status only fails the task in the form
-`x=$(otto_get_input k)` under `set -e`. In `local x=$(...)` and
-`echo "$(...)"`, bash discards it. The printed message is the reliable signal.
-See `docs/commands/ottofile-reference.md` for the full table.
-
-**Cause:** Task dependency not declared in `before:`
+**Cause:** the producing task isn't in this task's `before:` list.
 
 **Solution:**
 ```yaml
 my_task:
-  before: [dependency_task]  # ← Make sure this is set!
+  before: [dependency_task]
   bash: |
     value=$(otto_get_input "dependency_task.key")
 ```
 
-### Issue: JSON parsing fails in bash
+## Inspecting the run
 
-**Cause:** Complex data not properly serialized
-
-**Solution:** Use `jq` to parse:
 ```bash
-json_data=$(otto_get_input "python_task.data")
-value=$(echo "$json_data" | jq -r '.key')
+# Find the run directory (see docs/directory-layout.md)
+ls ~/.otto/data-passing-demo-*/
+
+# View what a task produced
+cat ~/.otto/data-passing-demo-*/<run-timestamp>/tasks/task_a/output.task_a.json
+
+# View a task's copy of its dependency's output
+cat ~/.otto/data-passing-demo-*/<run-timestamp>/tasks/task_b/input.task_a.json
 ```
-
-### Issue: Python can't deserialize data
-
-**Cause:** Forgot to serialize when setting output
-
-**Solution:**
-```python
-# When setting
-import json
-otto_set_output("data", json.dumps({"key": "value"}))
-
-# When getting
-data_json = otto_get_input("task.data")
-data = json.loads(data_json) if data_json else {}
-```
-
-## Next Steps
-
-- Try modifying tasks to pass different data types
-- Add more tasks to the dependency chain
-- Experiment with error handling (what if a key doesn't exist?)
-- Look at `examples/ex11/` for a simpler bash-only example
 
 ## Related Examples
 
-- **ex11** - Simpler bash-only data passing
-- **ex10** - Environment variables (different approach)
-- **ex8** - File dependencies (not task data)
+- [`examples/file-dependencies`](../file-dependencies) - file-based dependencies, not task-to-task data
+- [`examples/environment-variables`](../environment-variables) - the `envs:` approach instead of `otto_set_output`/`otto_get_input`

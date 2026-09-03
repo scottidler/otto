@@ -38,7 +38,7 @@ fn builtin_clap_commands() -> Vec<(Command, &'static str)> {
         ),
         (
             ConvertCommand::command(),
-            "[built-in] Convert Makefile to Otto YAML format",
+            "[built-in] Convert a Makefile on stdin to an ottofile",
         ),
         (
             GraphCommand::command(),

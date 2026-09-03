@@ -1,6 +1,7 @@
 # Ottofile Key Reference
 
-Every key an ottofile (`.otto.yml`/`otto.yml`/`otto.yaml`) can contain. Since
+Every key an ottofile (`otto.yml`, `.otto.yml`, `otto.yaml`, `.otto.yaml`,
+`Ottofile`, or `OTTOFILE`) can contain. Since
 `docs/design/2026-08-29-strict-ottofile-schema.md` shipped, any key NOT on
 this page is a hard, loud config-load error naming the field, its path, and
 (usually) its line/column — not a silent no-op. This page exists because its
@@ -302,6 +303,84 @@ accept arbitrary keys:
    environment variable names, values are strings.
 3. **`params:` (`tasks.<name>.params`)** — keys are rich param titles parsed
    by `divine()`, values are `tasks.<name>.params.<title>:`.
+
+## Environment and shell helpers
+
+None of what follows is declared in the ottofile. otto injects these
+environment variables and shell functions into a task's execution
+environment itself, or reads them from its own environment at startup.
+
+### Per-task variables
+
+Set on every task's `Command` before spawn
+(`src/executor/scheduler/task_execution.rs`, `execute_task`):
+
+| Variable | Value |
+|---|---|
+| `OTTO_TASK` | The task's name. |
+| `OTTO_TASK_DIR` | This task's run directory: `.../tasks/<task-name>/` (see [`docs/directory-layout.md`](../directory-layout.md)). |
+| `OTTO_WORKSPACE` | The current project directory (`<name>-<hash>/`), the parent of every run. |
+| `OTTO_TASKS_DIR` | The current run's `tasks/` directory, the parent of every task's `OTTO_TASK_DIR`. |
+| `OTTO_USER` | The user otto is running as (`$USER`, or `unknown` if unset). |
+
+A foreach subtask additionally gets (`src/cfg/task.rs`, `expand_foreach_with_items`):
+
+| Variable | Value |
+|---|---|
+| `OTTO_FOREACH_ITEM` | The item's value. Also bound under the name `foreach.as` gives it. |
+| `OTTO_FOREACH_INDEX` | Its zero-based position in declaration order. |
+
+One `OTTO_INPUT_<TASK>_<KEY>` variable also lands per key a declared
+dependency produced with `otto_set_output`, folded through the rule
+described just above in **Passing data between tasks**.
+
+### Variables otto reads from its own environment
+
+Read once, at startup or first use, from whatever environment ran `otto` -
+these are not injected into a task, though a task inherits any of them that
+were already set in that shell:
+
+| Variable | Meaning |
+|---|---|
+| `OTTO_HOME` | Overrides otto's state directory (default `$HOME/.otto`; `src/executor/layout.rs`). |
+| `OTTO_DB_PATH` | Overrides the SQLite database path, independent of `OTTO_HOME` (`src/executor/state/db.rs`). |
+| `OTTO_MAX_LOG_BYTES` | Overrides the 10 MB threshold at which `main.rs` rotates `otto.log` to `otto.log.1`. |
+| `OTTOFILE` | An alternate way to set `-o`/`--ottofile`; the flag wins if both are given. |
+
+### Bash color variables
+
+Every `bash:`/`action:` body sourcing the generated `builtins.sh` gets nine
+ANSI color constants for free (`src/executor/action.rs`, `create_builtins`):
+`RED`, `GREEN`, `YELLOW`, `BLUE`, `MAGENTA`, `CYAN`, `WHITE`, `BOLD`, `DIM`,
+and `NC` (reset).
+
+### Shell functions
+
+`otto_set_output`/`otto_get_input` are documented above, for cross-task data
+passing. Two more functions exist alongside them, but a task body does not
+call them directly - otto's generated prologue and epilogue call them
+automatically (`src/executor/action.rs:416-429,526`):
+
+| Function | Called from | Does |
+|---|---|---|
+| `otto_serialize_output` | The generated epilogue, once per task. | Writes `OTTO_OUTPUT` to `output.<task>.json`/`.env`. |
+| `otto_deserialize_input` | The generated prologue, once per declared dependency. | Reads that dependency's `input.<dep>.env` into `OTTO_INPUT`. |
+
+The same four names exist as Python functions inside the generated
+`otto_builtins.py`, bound at module level, for tasks whose interpreter is
+Python rather than bash (`src/executor/action.rs:783-786`).
+
+### Per-task option: `--Serial`
+
+A task declaring `foreach:` gets one extra CLI flag that is per-task rather
+than global, so it does not appear in `otto --help`'s option table (see
+[`docs/grammar.md`](../grammar.md) for the full flag grammar) -
+(`src/cli/builtins.rs`, `BUILTIN_PARAMS`; injected in
+`src/cli/parser/command.rs`, `task_to_command`):
+
+| Flag | Effect |
+|---|---|
+| `--Serial` | Run this task's foreach subtasks one at a time instead of in parallel - the command-line equivalent of `foreach.parallel: false`. Rejected at load together with `foreach.jobs` on the same task: an ordering constraint and a concurrency cap are the same incoherence. |
 
 ## Total: 46 fixed keys across the seven structs
 

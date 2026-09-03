@@ -220,6 +220,7 @@ tasks:
     help: "Build documentation"
     bash: |
       cargo doc --no-deps --workspace
+      bin/check-doc-links
       echo "✅ Documentation built"
 
   # Validate example ottofiles

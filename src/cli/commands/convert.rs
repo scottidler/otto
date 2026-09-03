@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use crate::makefile::{Diagnostic, MakefileParser, OttoConverter};
 
-/// Convert Makefile to Otto YAML format
+/// Convert a Makefile on stdin to an ottofile
 #[derive(Parser, Debug)]
 #[command(name = "Convert")]
-#[command(about = "Convert Makefile to Otto YAML format")]
+#[command(about = "Convert a Makefile on stdin to an ottofile")]
 pub struct ConvertCommand {
     /// Treat warnings as errors
     #[arg(long)]

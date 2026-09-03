@@ -652,5 +652,5 @@ otto/
 - [GitHub Releases API Documentation](https://docs.github.com/en/rest/releases)
 - [Rustup Self-Update Implementation](https://github.com/rust-lang/rustup/blob/master/src/cli/self_update.rs)
 - [Cargo Install Implementation](https://github.com/rust-lang/cargo/blob/master/src/cargo/ops/cargo_install.rs)
-- [Clean Command Documentation](commands/clean.md)
+- [Clean Command Documentation](../commands/clean.md)
 - [Built-in Commands Design](capitalized-builtins-design.md)

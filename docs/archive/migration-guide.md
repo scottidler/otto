@@ -370,7 +370,7 @@ otto stats
 sqlite3 ~/.otto/otto.db "SELECT * FROM runs ORDER BY timestamp DESC LIMIT 10"
 ```
 
-See [Architecture: SQLite Integration](architecture/sqlite-integration.md) for schema details.
+See [Architecture: SQLite Integration](../architecture/sqlite-integration.md) for schema details.
 
 ### Q: Is this a breaking change?
 
@@ -403,7 +403,7 @@ otto clean --dry-run
 If you encounter problems:
 
 1. Check this migration guide
-2. Review [Architecture Documentation](architecture/sqlite-integration.md)
+2. Review [Architecture Documentation](../architecture/sqlite-integration.md)
 3. Run with `-v` flag for verbose output
 4. Report issues with:
    - Otto version (`otto --version`)
@@ -413,8 +413,8 @@ If you encounter problems:
 
 ## Related Documentation
 
-- [History Command](commands/history.md)
-- [Stats Command](commands/stats.md)
-- [Clean Command](commands/clean.md)
-- [Architecture: SQLite Integration](architecture/sqlite-integration.md)
+- [History Command](../commands/history.md)
+- [Stats Command](../commands/stats.md)
+- [Clean Command](../commands/clean.md)
+- [Architecture: SQLite Integration](../architecture/sqlite-integration.md)
 - [Implementation Plan](sqlite-implementation-plan.md)
