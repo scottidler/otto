@@ -161,33 +161,6 @@ fn test_foreign_keys_enabled() -> Result<()> {
 }
 
 #[test]
-fn test_health_check() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("test.db");
-
-    let db = DatabaseManager::new(db_path)?;
-    db.health_check()?;
-
-    Ok(())
-}
-
-#[test]
-fn test_stats() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("test.db");
-
-    let db = DatabaseManager::new(db_path)?;
-    let stats = db.stats()?;
-
-    // New database should have zero records
-    assert_eq!(stats.project_count, 0);
-    assert_eq!(stats.run_count, 0);
-    assert_eq!(stats.task_count, 0);
-
-    Ok(())
-}
-
-#[test]
 fn test_with_connection() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let db_path = temp_dir.path().join("test.db");

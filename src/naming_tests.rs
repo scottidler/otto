@@ -119,3 +119,17 @@ fn is_identifier_is_a_whole_name_rule_not_a_per_byte_class() {
     assert!(!is_identifier("2024"));
     assert!("UP_2024".chars().any(|c| !is_identifier(&c.to_string())));
 }
+
+#[test]
+fn project_name_from_uses_the_ottofiles_parent_directory_name() {
+    let ottofile = std::path::Path::new("/home/user/repos/otto/otto.yml");
+    assert_eq!(project_name_from(Some(ottofile), "abc12345"), "otto");
+}
+
+#[test]
+fn project_name_from_falls_back_to_the_hash_with_no_ottofile_or_no_parent() {
+    assert_eq!(project_name_from(None, "abc12345"), "abc12345");
+    // A bare filename has no parent directory to name.
+    let ottofile = std::path::Path::new("otto.yml");
+    assert_eq!(project_name_from(Some(ottofile), "abc12345"), "abc12345");
+}

@@ -196,7 +196,7 @@ async fn test_relative_paths() -> Result<()> {
     assert_eq!(ws.join_root("src/lib.rs"), PathBuf::from("/project/src/lib.rs"));
 
     // Test relative_script_cache_path
-    let cache_path = ws.script_cache("task1", "hash123");
+    let cache_path = ws.cache_dir().join("hash123.sh");
     let relative = ws.relative_script_cache_path(&cache_path);
     assert!(relative.to_string_lossy().contains(".cache"));
 
@@ -250,9 +250,7 @@ async fn test_task_paths() -> Result<()> {
     ws.init().await?;
 
     let task = "test_task";
-    let script_hash = "abcd1234";
 
-    assert!(ws.script_cache(task, script_hash).starts_with(&ws.cache));
     assert!(ws.task(task).starts_with(&ws.run));
     assert!(ws.script(task, false).ends_with("script.sh"));
     assert!(ws.script(task, true).ends_with("script.py"));
@@ -464,7 +462,7 @@ async fn test_workspace_with_memory_state_store() -> Result<()> {
     assert!(ws.db_run_id().is_some());
 
     // Verify we can query the store
-    let runs = store.get_recent_runs(10, None)?;
+    let runs = store.get_runs_with_filters(None, None, 10)?;
     assert_eq!(runs.len(), 1);
 
     Ok(())
@@ -534,7 +532,7 @@ async fn test_record_run_complete_with_memory_store() -> Result<()> {
     ws.record_run_complete_in_db(true).await;
 
     // Verify the run was marked complete
-    let runs = store.get_recent_runs(10, None)?;
+    let runs = store.get_runs_with_filters(None, None, 10)?;
     assert_eq!(runs.len(), 1);
     assert_eq!(
         runs[0].status,

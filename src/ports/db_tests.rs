@@ -6,6 +6,26 @@ fn create_test_metadata(hash: &str, timestamp: u64) -> RunMetadata {
     RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), hash.to_string(), timestamp)
 }
 
+/// Fetch every task recorded for `run_id`, ordered by `started_at` ascending.
+///
+/// The `StateStore` port dropped `get_run_tasks` (design doc
+/// `2026-09-02-second-code-review-remediation.md`, Phase 10): nothing in
+/// production ever called it through the trait, only tests. Tests still need
+/// to inspect a run's tasks, so this reads `MemoryStateStore`'s own state
+/// directly rather than through a port method with no other caller.
+fn run_tasks(store: &MemoryStateStore, run_id: i64) -> Vec<TaskRecord> {
+    let mut result: Vec<TaskRecord> = store
+        .tasks
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|t| t.run_id == run_id)
+        .cloned()
+        .collect();
+    result.sort_by_key(|t| t.started_at);
+    result
+}
+
 /// The in-memory fake and the SQLite store must agree about retention, or a
 /// test that passes against the fake proves nothing about the real thing.
 /// Their retention loops used to be duplicated line for line.
@@ -209,7 +229,7 @@ fn test_memory_store_record_run_start() {
 
     assert!(run_id > 0);
 
-    let runs = store.get_recent_runs(10, None).unwrap();
+    let runs = store.get_runs_with_filters(None, None, 10).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].timestamp, 1234567890);
     assert_eq!(runs[0].status, RunStatus::Running);
@@ -225,7 +245,7 @@ fn test_memory_store_record_run_complete() {
         .record_run_complete(run_id, RunStatus::Success, Some(1024))
         .unwrap();
 
-    let runs = store.get_recent_runs(10, None).unwrap();
+    let runs = store.get_runs_with_filters(None, None, 10).unwrap();
     assert_eq!(runs[0].status, RunStatus::Success);
     assert_eq!(runs[0].size_bytes, Some(1024));
 }
@@ -243,7 +263,7 @@ fn test_memory_store_record_task() {
 
     assert!(task_id > 0);
 
-    let tasks = store.get_run_tasks(run_id).unwrap();
+    let tasks = run_tasks(&store, run_id);
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].name, "build");
     assert_eq!(tasks[0].status, TaskStatus::Running);
@@ -261,7 +281,7 @@ fn test_memory_store_task_complete() {
 
     store.record_task_complete(task_id, 0, TaskStatus::Completed).unwrap();
 
-    let tasks = store.get_run_tasks(run_id).unwrap();
+    let tasks = run_tasks(&store, run_id);
     assert_eq!(tasks[0].status, TaskStatus::Completed);
     assert_eq!(tasks[0].exit_code, Some(0));
 }
@@ -285,14 +305,14 @@ fn test_memory_store_task_skipped() {
 
     assert!(task_id > 0);
 
-    let tasks = store.get_run_tasks(run_id).unwrap();
+    let tasks = run_tasks(&store, run_id);
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].status, TaskStatus::Skipped);
     assert_eq!(tasks[0].skip_kind, Some(SkipKind::Unreachable));
 }
 
 #[test]
-fn test_memory_store_get_recent_runs_with_filter() {
+fn test_memory_store_get_runs_with_filters_project_filter() {
     let store = MemoryStateStore::new();
 
     let metadata1 = create_test_metadata("abc123", 1234567890);
@@ -301,10 +321,10 @@ fn test_memory_store_get_recent_runs_with_filter() {
     let metadata2 = create_test_metadata("def456", 1234567891);
     store.record_run_start(&metadata2).unwrap();
 
-    let all_runs = store.get_recent_runs(10, None).unwrap();
+    let all_runs = store.get_runs_with_filters(None, None, 10).unwrap();
     assert_eq!(all_runs.len(), 2);
 
-    let filtered_runs = store.get_recent_runs(10, Some("abc123")).unwrap();
+    let filtered_runs = store.get_runs_with_filters(None, Some("abc123"), 10).unwrap();
     assert_eq!(filtered_runs.len(), 1);
     assert_eq!(filtered_runs[0].timestamp, 1234567890);
 }
@@ -359,10 +379,10 @@ fn test_memory_store_delete_run() {
     let deleted = store.delete_run(run_id, false).unwrap();
     assert!(deleted.is_some());
 
-    let runs = store.get_recent_runs(10, None).unwrap();
+    let runs = store.get_runs_with_filters(None, None, 10).unwrap();
     assert_eq!(runs.len(), 0);
 
-    let tasks = store.get_run_tasks(run_id).unwrap();
+    let tasks = run_tasks(&store, run_id);
     assert_eq!(tasks.len(), 0);
 }
 

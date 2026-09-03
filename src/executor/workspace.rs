@@ -259,11 +259,6 @@ impl<F: FileSystem> Workspace<F> {
         &self.fs
     }
 
-    /// Get path for a cached script
-    pub fn script_cache(&self, task: &str, hash: &str) -> PathBuf {
-        self.cache.join(task).join(hash)
-    }
-
     /// Get task directory for current run
     pub fn task(&self, name: &str) -> PathBuf {
         self.run.join("tasks").join(name)

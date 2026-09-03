@@ -316,7 +316,7 @@ fn test_clean_actually_deletes_with_database() -> Result<()> {
     // Verify database record was deleted
     use otto::executor::state::StateManager;
     let manager = StateManager::with_db_path(otto_home.join("otto.db"))?;
-    let runs = manager.get_recent_runs(10, None)?;
+    let runs = manager.get_runs_with_filters(None, None, 10)?;
     assert_eq!(runs.len(), 0, "Database should have no runs after cleanup");
 
     Ok(())

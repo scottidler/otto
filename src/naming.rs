@@ -79,6 +79,26 @@ pub fn is_subtask(name: &str) -> bool {
     split_subtask(name).is_some()
 }
 
+/// The display name for a project recorded in the state database: the name of
+/// the directory its ottofile lives in, or `hash` when there is no ottofile
+/// path (or it has no parent directory to name).
+///
+/// e.g. `/home/user/repos/otto/otto.yml` -> `"otto"`.
+///
+/// Copied three times before this - `StateManager::ensure_project`,
+/// `schema::migrate_v1_to_v2`'s name backfill, and
+/// `MemoryStateStore::get_or_create_project` - once per state backend plus the
+/// migration that seeded the column those backends now read.
+#[must_use]
+pub fn project_name_from(ottofile: Option<&std::path::Path>, hash: &str) -> String {
+    ottofile
+        .and_then(|path| path.parent())
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or(hash)
+        .to_string()
+}
+
 /// Whether `name` is a shell/environment identifier: `[A-Za-z_][A-Za-z0-9_]*`.
 ///
 /// The whole-name rule, spelled out rather than pulled through a regex

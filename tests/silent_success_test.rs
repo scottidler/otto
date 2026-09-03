@@ -241,13 +241,8 @@ fn failing_task_records_its_real_exit_code() {
     assert_ne!(code, 0, "{stdout}{stderr}");
 
     let store = otto::executor::state::StateManager::with_db_path(home.join("otto.db")).expect("open state db");
-    let runs = store.get_recent_runs(1, None).expect("recent runs");
-    let run = runs.first().expect("the run should be recorded");
-    let tasks = store.get_run_tasks(run.id).expect("run tasks");
-    let boom = tasks
-        .iter()
-        .find(|t| t.name == "boom")
-        .expect("boom should be recorded");
+    let history = store.get_task_history("boom", 1).expect("task history");
+    let boom = history.first().expect("boom should be recorded");
 
     assert_eq!(
         boom.exit_code,
@@ -264,13 +259,8 @@ fn skipped_task_records_why_it_was_skipped() {
     assert_ne!(code, 0, "{stdout}{stderr}");
 
     let store = otto::executor::state::StateManager::with_db_path(home.join("otto.db")).expect("open state db");
-    let runs = store.get_recent_runs(1, None).expect("recent runs");
-    let run = runs.first().expect("the run should be recorded");
-    let tasks = store.get_run_tasks(run.id).expect("run tasks");
-    let second = tasks
-        .iter()
-        .find(|t| t.name == "second")
-        .expect("the skipped task should reach the run record");
+    let history = store.get_task_history("second", 1).expect("task history");
+    let second = history.first().expect("the skipped task should reach the run record");
 
     let reason = second
         .skip_reason

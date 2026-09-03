@@ -44,8 +44,6 @@ pub trait StateStore: Send + Sync {
     ) -> Result<i64>;
 
     // Query methods
-    fn get_recent_runs(&self, limit: usize, project_filter: Option<&str>) -> Result<Vec<RunRecord>>;
-    fn get_run_tasks(&self, run_id: i64) -> Result<Vec<TaskRecord>>;
     fn get_task_history(&self, task_name: &str, limit: usize) -> Result<Vec<TaskRecord>>;
     fn get_overall_stats(&self) -> Result<OverallStats>;
     fn get_all_projects(&self) -> Result<Vec<ProjectSummary>>;
@@ -122,12 +120,7 @@ impl MemoryStateStore {
 
         // Create new project
         let id = self.next_project_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let name = ottofile_path
-            .and_then(|p| p.parent())
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or(hash)
-            .to_string();
+        let name = crate::naming::project_name_from(ottofile_path.map(PathBuf::as_path), hash);
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -303,38 +296,6 @@ impl StateStore for MemoryStateStore {
         self.tasks.write().unwrap().push(task);
 
         Ok(task_id)
-    }
-
-    fn get_recent_runs(&self, limit: usize, project_filter: Option<&str>) -> Result<Vec<RunRecord>> {
-        let runs = self.runs.read().unwrap();
-        let projects = self.projects.read().unwrap();
-
-        let mut result: Vec<RunRecord> = runs
-            .iter()
-            .filter(|r| {
-                if let Some(hash) = project_filter {
-                    projects.iter().any(|p| p.id == r.project_id && p.hash == hash)
-                } else {
-                    true
-                }
-            })
-            .cloned()
-            .collect();
-
-        result.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
-        result.truncate(limit);
-
-        Ok(result)
-    }
-
-    fn get_run_tasks(&self, run_id: i64) -> Result<Vec<TaskRecord>> {
-        let tasks = self.tasks.read().unwrap();
-
-        let mut result: Vec<TaskRecord> = tasks.iter().filter(|t| t.run_id == run_id).cloned().collect();
-
-        result.sort_by_key(|r| r.started_at);
-
-        Ok(result)
     }
 
     fn get_task_history(&self, task_name: &str, limit: usize) -> Result<Vec<TaskRecord>> {

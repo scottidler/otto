@@ -12,6 +12,30 @@ fn create_test_manager() -> Result<(StateManager, TempDir)> {
     Ok((manager, temp_dir))
 }
 
+/// Fetch every task recorded for `run_id`, ordered by `started_at` ascending.
+///
+/// The `StateStore` port dropped `get_run_tasks` (design doc
+/// `2026-09-02-second-code-review-remediation.md`, Phase 10): nothing in
+/// production ever called it through the trait, only tests. Tests still need
+/// to inspect a run's tasks, so the query moves here rather than disappearing
+/// with no replacement.
+fn run_tasks(manager: &StateManager, run_id: i64) -> Result<Vec<TaskRecord>> {
+    manager.db.with_connection(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, name, status, script_hash, exit_code,
+                    started_at, ended_at, duration_seconds,
+                    stdout_path, stderr_path, script_path, skip_reason, skip_kind
+             FROM tasks
+             WHERE run_id = ?1
+             ORDER BY started_at ASC",
+        )?;
+
+        let rows = stmt.query_map(params![run_id], StateManager::row_to_task_record)?;
+
+        rows.collect::<Result<Vec<_>, _>>().context("Failed to fetch tasks")
+    })
+}
+
 /// Run `f` with `OTTO_HOME` pointed at `otto_home`, restoring it afterwards.
 fn with_otto_home<T>(otto_home: &std::path::Path, f: impl FnOnce() -> T) -> T {
     let previous = std::env::var("OTTO_HOME").ok();
@@ -64,7 +88,7 @@ fn delete_run_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("Refusing to delete run directory"), "{err}");
     assert!(victim.join("precious.txt").exists(), "the symlink target must survive");
-    let rows = manager.get_recent_runs(10, None)?;
+    let rows = manager.get_runs_with_filters(None, None, 10)?;
     assert_eq!(
         rows.len(),
         1,
@@ -155,7 +179,7 @@ fn two_runs_in_the_same_second_both_persist() -> Result<()> {
     manager.record_run_complete(first, RunStatus::Success, Some(1))?;
     manager.record_run_complete(second, RunStatus::Failed, Some(2))?;
 
-    let runs = manager.get_recent_runs(10, None)?;
+    let runs = manager.get_runs_with_filters(None, None, 10)?;
     assert_eq!(runs.len(), 2, "both runs survive");
     let mut statuses: Vec<&str> = runs.iter().map(|r| r.status.as_str()).collect();
     statuses.sort_unstable();
@@ -190,7 +214,7 @@ fn a_task_exit_code_is_recorded_verbatim() -> Result<()> {
     let task_id = manager.record_task_start(run_id, "boom", None, None, None, None)?;
     manager.record_task_complete(task_id, 7, TaskStatus::Failed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks[0].exit_code, Some(7));
     assert_eq!(tasks[0].status, TaskStatus::Failed);
     Ok(())
@@ -212,7 +236,7 @@ fn an_unknown_run_status_is_an_error_not_a_failure() -> Result<()> {
         .db
         .with_connection(|conn| Ok(conn.execute("UPDATE runs SET status = 'wat'", [])?))?;
 
-    let err = manager.get_recent_runs(10, None).unwrap_err().to_string();
+    let err = manager.get_runs_with_filters(None, None, 10).unwrap_err().to_string();
     assert!(err.contains("Failed to fetch runs"), "{err}");
     Ok(())
 }
@@ -257,8 +281,8 @@ fn delete_run_never_drives_the_run_count_negative() -> Result<()> {
     Ok(())
 }
 
-/// A skipped task carries a start time, so `get_run_tasks` - which orders by
-/// `started_at` - does not sort every skip ahead of the run.
+/// A skipped task carries a start time, so an ordering-by-`started_at` query
+/// over a run's tasks does not sort every skip ahead of the run.
 #[test]
 fn a_skipped_task_records_when_it_was_skipped() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
@@ -267,7 +291,7 @@ fn a_skipped_task_records_when_it_was_skipped() -> Result<()> {
     let run_id = manager.record_run_start(&metadata)?;
     manager.record_task_skipped(run_id, "gated", None, Some("dep failed"), Some(SkipKind::Unreachable))?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks[0].status, TaskStatus::Skipped);
     assert!(tasks[0].started_at.is_some(), "a skip happens at a moment");
     assert_eq!(tasks[0].skip_kind, Some(SkipKind::Unreachable));
@@ -289,9 +313,8 @@ fn an_unknown_skip_kind_is_an_error_not_a_missing_reason() -> Result<()> {
         .db
         .with_connection(|conn| Ok(conn.execute("UPDATE tasks SET skip_kind = 'not-a-kind'", [])?))?;
 
-    let err = manager
-        .get_run_tasks(run_id)
-        .expect_err("an unrecognized skip kind must be a named error, not a silent None");
+    let err =
+        run_tasks(&manager, run_id).expect_err("an unrecognized skip kind must be a named error, not a silent None");
     assert!(format!("{err:#}").contains("unknown skip kind"), "{err:#}");
     Ok(())
 }
@@ -328,7 +351,7 @@ fn record_run_start_rolls_back_the_project_when_the_run_insert_fails() -> Result
         manager.get_all_projects()?.is_empty(),
         "the project upsert must roll back with the run it was recorded for"
     );
-    assert!(manager.get_recent_runs(10, None)?.is_empty());
+    assert!(manager.get_runs_with_filters(None, None, 10)?.is_empty());
     Ok(())
 }
 
@@ -356,7 +379,7 @@ fn record_task_complete_clamps_a_backwards_clock() -> Result<()> {
 
     manager.record_task_complete(task_id, 0, TaskStatus::Completed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(
         tasks[0].duration_seconds,
         Some(0.0),
@@ -380,7 +403,7 @@ fn record_task_complete_leaves_no_duration_when_the_task_never_started() -> Resu
 
     manager.record_task_complete(task_id, 0, TaskStatus::Completed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks[0].status, TaskStatus::Completed);
     assert_eq!(tasks[0].duration_seconds, None);
     Ok(())
@@ -413,7 +436,7 @@ fn record_task_start_records_the_script_hash() -> Result<()> {
     let run_id = manager.record_run_start(&metadata)?;
     manager.record_task_start(run_id, "build", Some("deadbeefcafe"), None, None, None)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks[0].script_hash.as_deref(), Some("deadbeefcafe"));
     Ok(())
 }
@@ -439,7 +462,7 @@ fn test_record_run_complete() -> Result<()> {
     let run_id_1 = manager.record_run_start(&metadata)?;
     manager.record_run_complete(run_id_1, RunStatus::Success, Some(1024))?;
 
-    let runs = manager.get_recent_runs(1, None)?;
+    let runs = manager.get_runs_with_filters(None, None, 1)?;
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, RunStatus::Success);
     assert_eq!(runs[0].size_bytes, Some(1024));
@@ -449,7 +472,7 @@ fn test_record_run_complete() -> Result<()> {
 }
 
 #[test]
-fn test_get_recent_runs() -> Result<()> {
+fn test_get_runs_with_filters() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     for i in 0..5 {
@@ -461,7 +484,7 @@ fn test_get_recent_runs() -> Result<()> {
         manager.record_run_start(&metadata)?;
     }
 
-    let runs = manager.get_recent_runs(3, None)?;
+    let runs = manager.get_runs_with_filters(None, None, 3)?;
     assert_eq!(runs.len(), 3);
 
     assert!(runs[0].timestamp > runs[1].timestamp);
@@ -471,7 +494,7 @@ fn test_get_recent_runs() -> Result<()> {
 }
 
 #[test]
-fn test_get_recent_runs_with_project_filter() -> Result<()> {
+fn test_get_runs_with_filters_project_filter() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     for i in 0..3 {
@@ -490,7 +513,7 @@ fn test_get_recent_runs_with_project_filter() -> Result<()> {
         manager.record_run_start(&metadata2)?;
     }
 
-    let runs = manager.get_recent_runs(10, Some("abc123"))?;
+    let runs = manager.get_runs_with_filters(None, Some("abc123"), 10)?;
     assert_eq!(runs.len(), 3);
 
     // All runs should be for abc123
@@ -532,7 +555,7 @@ fn test_full_metadata_recording() -> Result<()> {
 
     manager.record_run_start(&metadata)?;
 
-    let runs = manager.get_recent_runs(1, None)?;
+    let runs = manager.get_runs_with_filters(None, None, 1)?;
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].cwd, Some(PathBuf::from("/home/user/project")));
     assert_eq!(runs[0].user, Some("testuser".to_string()));
@@ -596,7 +619,7 @@ fn test_record_task_start() -> Result<()> {
 
     assert!(task_id > 0);
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].name, "test-task");
     assert_eq!(tasks[0].status, TaskStatus::Running);
@@ -615,7 +638,7 @@ fn test_record_task_complete() -> Result<()> {
     let task_id = manager.record_task_start(run_id, "test-task", None, None, None, None)?;
     manager.record_task_complete(task_id, 0, TaskStatus::Completed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].status, TaskStatus::Completed);
     assert_eq!(tasks[0].exit_code, Some(0));
@@ -635,7 +658,7 @@ fn test_record_task_failed() -> Result<()> {
     let task_id = manager.record_task_start(run_id, "test-task", None, None, None, None)?;
     manager.record_task_complete(task_id, 1, TaskStatus::Failed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].status, TaskStatus::Failed);
     assert_eq!(tasks[0].exit_code, Some(1));
@@ -659,7 +682,7 @@ fn test_record_task_skipped() -> Result<()> {
     )?;
     assert!(task_id > 0);
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].name, "test-task");
     assert_eq!(tasks[0].status, TaskStatus::Skipped);
@@ -678,7 +701,7 @@ fn test_record_task_skipped() -> Result<()> {
 }
 
 #[test]
-fn test_get_run_tasks() -> Result<()> {
+fn tasks_for_a_run_are_ordered_by_started_at() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc123".to_string(), 1234567890);
@@ -692,7 +715,7 @@ fn test_get_run_tasks() -> Result<()> {
     manager.record_task_complete(task_id2, 1, TaskStatus::Failed)?;
     manager.record_task_complete(task_id3, 0, TaskStatus::Completed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 3);
 
     // Tasks should be ordered by started_at
@@ -753,7 +776,7 @@ fn test_task_with_all_fields() -> Result<()> {
 
     manager.record_task_complete(task_id, 0, TaskStatus::Completed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 1);
 
     let task = &tasks[0];
@@ -905,14 +928,14 @@ fn test_delete_run_database_only() -> Result<()> {
     let run_id_9 = manager.record_run_start(&metadata)?;
     manager.record_run_complete(run_id_9, RunStatus::Success, Some(1024))?;
 
-    let runs_before = manager.get_recent_runs(10, None)?;
+    let runs_before = manager.get_runs_with_filters(None, None, 10)?;
     assert_eq!(runs_before.len(), 1);
 
     let deleted = manager.delete_run(run_id_9, false)?;
     assert!(deleted.is_some());
     assert_eq!(deleted.unwrap().timestamp, 1234567890);
 
-    let runs_after = manager.get_recent_runs(10, None)?;
+    let runs_after = manager.get_runs_with_filters(None, None, 10)?;
     assert_eq!(runs_after.len(), 0);
 
     Ok(())
@@ -931,12 +954,12 @@ fn test_delete_run_with_tasks() -> Result<()> {
     let task_id2 = manager.record_task_start(run_id, "task2", None, None, None, None)?;
     manager.record_task_complete(task_id2, 1, TaskStatus::Failed)?;
 
-    let tasks_before = manager.get_run_tasks(run_id)?;
+    let tasks_before = run_tasks(&manager, run_id)?;
     assert_eq!(tasks_before.len(), 2);
 
     manager.delete_run(run_id, false)?;
 
-    let tasks_after = manager.get_run_tasks(run_id)?;
+    let tasks_after = run_tasks(&manager, run_id)?;
     assert_eq!(tasks_after.len(), 0);
 
     Ok(())
@@ -963,7 +986,7 @@ fn test_delete_run_updates_project_count() -> Result<()> {
 
     manager.delete_run(run_ids[1], false)?;
 
-    let runs = manager.get_recent_runs(10, Some("abc123"))?;
+    let runs = manager.get_runs_with_filters(None, Some("abc123"), 10)?;
     assert_eq!(runs.len(), 2);
     assert_eq!(
         manager.get_all_projects()?[0].run_count,
@@ -1058,7 +1081,7 @@ fn test_find_old_runs_complex_policy() -> Result<()> {
 /// A row whose `args` column is not valid JSON must surface a named error,
 /// not panic and not silently drop the row.
 #[test]
-fn get_recent_runs_reports_corrupt_args_json_rather_than_panicking() -> Result<()> {
+fn get_runs_with_filters_reports_corrupt_args_json_rather_than_panicking() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     let metadata = RunMetadata::minimal(
@@ -1075,7 +1098,7 @@ fn get_recent_runs_reports_corrupt_args_json_rather_than_panicking() -> Result<(
     })?;
 
     let err = manager
-        .get_recent_runs(10, None)
+        .get_runs_with_filters(None, None, 10)
         .expect_err("corrupt args JSON must be a named error, not a panic or a silently empty list");
     // eyre's plain Display shows only the outermost context; `{:#}` walks
     // the full chain down to the actual `bad_column` message.
@@ -1090,7 +1113,7 @@ fn get_recent_runs_reports_corrupt_args_json_rather_than_panicking() -> Result<(
 /// A row whose `status` column holds a value no `RunStatus` variant parses
 /// must surface a named error, not panic and not silently drop the row.
 #[test]
-fn get_recent_runs_reports_an_unknown_status_rather_than_panicking() -> Result<()> {
+fn get_runs_with_filters_reports_an_unknown_status_rather_than_panicking() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     let metadata = RunMetadata::minimal(
@@ -1107,7 +1130,7 @@ fn get_recent_runs_reports_an_unknown_status_rather_than_panicking() -> Result<(
     })?;
 
     let err = manager
-        .get_recent_runs(10, None)
+        .get_runs_with_filters(None, None, 10)
         .expect_err("an unrecognized status must be a named error, not a panic or a silently empty list");
     assert!(format!("{err:#}").contains("unknown run status"), "{err:#}");
 

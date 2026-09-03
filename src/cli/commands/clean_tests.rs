@@ -597,7 +597,7 @@ async fn test_execute_with_database_dry_run() -> Result<()> {
     let store = create_store_with_runs();
 
     // Verify initial state
-    let initial_runs = store.get_recent_runs(100, None)?;
+    let initial_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(initial_runs.len(), 4);
 
     let cmd = CleanCommand {
@@ -614,7 +614,7 @@ async fn test_execute_with_database_dry_run() -> Result<()> {
     assert!(result.is_ok());
 
     // Dry run should not delete anything
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(final_runs.len(), 4);
     Ok(())
 }
@@ -624,7 +624,7 @@ async fn test_execute_with_database_actual_delete() -> Result<()> {
     let store = create_store_with_runs();
 
     // Verify initial state
-    let initial_runs = store.get_recent_runs(100, None)?;
+    let initial_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(initial_runs.len(), 4);
 
     let cmd = CleanCommand {
@@ -641,7 +641,7 @@ async fn test_execute_with_database_actual_delete() -> Result<()> {
     assert!(result.is_ok());
 
     // Should have deleted 3 old runs (40 day, 35 day, 45 day)
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(final_runs.len(), 1);
     Ok(())
 }
@@ -664,7 +664,7 @@ async fn test_execute_with_database_project_filter() -> Result<()> {
     assert!(result.is_ok());
 
     // Should have deleted 2 old runs from abc123, kept def456's old run
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     // Remaining: recent abc123 + old def456
     assert_eq!(final_runs.len(), 2);
     Ok(())
@@ -688,7 +688,7 @@ async fn test_execute_with_database_keep_last() -> Result<()> {
     assert!(result.is_ok());
 
     // Should keep the 2 most recent runs
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(final_runs.len(), 2);
     Ok(())
 }
@@ -712,7 +712,7 @@ async fn test_execute_with_database_keep_failed_longer() -> Result<()> {
 
     // Should have deleted 2 old successful runs (40 day, 45 day)
     // but kept the 35-day failed run (within 60-day retention)
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(final_runs.len(), 2);
     Ok(())
 }
@@ -769,7 +769,7 @@ async fn test_delete_run_from_store() -> Result<()> {
     let old_timestamp = now - (40 * 86400);
 
     // Verify run exists
-    let initial_runs = store.get_recent_runs(100, None)?;
+    let initial_runs = store.get_runs_with_filters(None, None, 100)?;
     let target = initial_runs
         .iter()
         .find(|r| r.timestamp == old_timestamp)
@@ -780,7 +780,7 @@ async fn test_delete_run_from_store() -> Result<()> {
     assert!(deleted.is_some());
 
     // Verify it's gone
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert!(!final_runs.iter().any(|r| r.timestamp == old_timestamp));
     Ok(())
 }
@@ -836,7 +836,7 @@ async fn test_execute_with_database_ignores_missing_otto_home() -> Result<()> {
 
     // The 3 old runs (40, 35, 45 days) should have been deleted via the
     // injected store despite `OTTO_HOME` not existing on disk.
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(final_runs.len(), 1);
     assert!(
         !missing_otto_home.exists(),
