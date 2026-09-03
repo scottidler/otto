@@ -57,7 +57,7 @@ async fn test_file_dependencies_timestamp_precision() -> Result<()> {
     .await?;
 
     // When timestamps are very close, should be conservative and rebuild
-    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild = scheduler.needs_rebuild(&task).await;
     // This might be true or false depending on timestamp precision, but should be consistent
     println!("Timestamp precision test - needs rebuild: {needs_rebuild}");
 
@@ -98,7 +98,7 @@ async fn test_file_dependencies_empty_lists() -> Result<()> {
     .await?;
 
     // Should always need to run when there are no file dependencies to check
-    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild = scheduler.needs_rebuild(&task).await;
     assert!(needs_rebuild, "Task with no file dependencies should always run");
 
     Ok(())
@@ -145,7 +145,7 @@ async fn test_file_dependencies_directory_as_input() -> Result<()> {
     .await?;
 
     // Should handle directory dependencies (gets modification time of directory)
-    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild = scheduler.needs_rebuild(&task).await;
     assert!(needs_rebuild, "Task should need to run when output doesn't exist");
 
     Ok(())
@@ -191,7 +191,7 @@ async fn test_large_number_of_file_dependencies() -> Result<()> {
 
     // Should handle large numbers of file dependencies efficiently
     let start = std::time::Instant::now();
-    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild = scheduler.needs_rebuild(&task).await;
     let duration = start.elapsed();
 
     assert!(needs_rebuild, "Task should need to run when output doesn't exist");
@@ -240,7 +240,7 @@ async fn test_file_dependencies_circular_detection() -> Result<()> {
     .await?;
 
     // Should handle circular file dependencies gracefully
-    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild = scheduler.needs_rebuild(&task).await;
     // Should be conservative when input and output are the same file
     println!("Circular dependency test - needs rebuild: {needs_rebuild}");
 
@@ -281,7 +281,7 @@ async fn test_file_dependencies_integration_with_real_execution() -> Result<()> 
     )
     .await?;
 
-    let needs_rebuild_1 = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild_1 = scheduler.needs_rebuild(&task).await;
     assert!(needs_rebuild_1, "Should need to run initially");
 
     scheduler.execute_all().await?;
@@ -293,14 +293,14 @@ async fn test_file_dependencies_integration_with_real_execution() -> Result<()> 
     let output_content = tokio::fs::read_to_string(&output_file).await?;
     assert_eq!(output_content, "Hello, World!", "Output should match input");
 
-    let needs_rebuild_2 = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild_2 = scheduler.needs_rebuild(&task).await;
     assert!(!needs_rebuild_2, "Should not need to run when output is up-to-date");
 
     // Modify input file to trigger rebuild
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     tokio::fs::write(&input_file, "Modified content!").await?;
 
-    let needs_rebuild_3 = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild_3 = scheduler.needs_rebuild(&task).await;
     assert!(needs_rebuild_3, "Should need to run when input is modified");
 
     Ok(())
@@ -562,20 +562,30 @@ async fn test_duration_tracking_accuracy() -> Result<()> {
     Ok(())
 }
 
+/// An input path whose timestamp cannot be read means "run the task".
+///
+/// This was `test_file_dependency_check_error_handling`, and it asserted
+/// nothing about an unreadable dependency: the output file did not exist, so
+/// `needs_rebuild` returned at that check and never looked at the input at all.
+/// The output file exists here, which is what forces the timestamp comparison
+/// with an input that has no timestamp to give.
 #[tokio::test]
 #[serial]
-async fn test_file_dependency_check_error_handling() -> Result<()> {
+async fn test_an_unreadable_file_dependency_runs_the_task() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let work_dir = PathBuf::from(temp_dir.path());
     setup_test_db(&work_dir);
 
-    // Create a task with a file dependency in a path that will cause issues
+    // `/dev/null` is not a directory, so every metadata call below it fails.
+    let output = work_dir.join("output.txt");
+    tokio::fs::write(&output, "stale but present").await?;
+
     let task = Task::new(
         "error_test".to_string(),
         None,
         vec![],
         vec!["/dev/null/impossible/path".to_string()],
-        vec![work_dir.join("output.txt").to_string_lossy().to_string()],
+        vec![output.to_string_lossy().to_string()],
         HashMap::new(),
         HashMap::new(),
         "echo handled error".to_string(),
@@ -583,13 +593,27 @@ async fn test_file_dependency_check_error_handling() -> Result<()> {
 
     let workspace = Workspace::new(work_dir).await?;
     workspace.init().await?;
-    let scheduler = TaskScheduler::new(vec![task], Arc::new(workspace), ExecutionContext::new(), 2, false).await?;
+    let scheduler = TaskScheduler::new(
+        vec![task.clone()],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        2,
+        false,
+    )
+    .await?;
 
-    // Should handle the error gracefully and still run the task
-    let result = scheduler.execute_all().await;
+    assert!(
+        scheduler.needs_rebuild(&task).await,
+        "an input with no readable timestamp must not be treated as older than the output"
+    );
 
-    // The task should complete despite file dependency check errors
-    assert!(result.is_ok(), "Should handle file dependency errors gracefully");
+    // And the run itself completes: the task is started, not skipped.
+    scheduler.execute_all().await?;
+    assert_eq!(
+        scheduler.get_task_status("error_test").await,
+        TaskStatus::Completed,
+        "the task must run rather than be skipped as up to date"
+    );
 
     Ok(())
 }

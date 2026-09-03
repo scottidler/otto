@@ -97,6 +97,20 @@ where
     std::fs::read_to_string(path).expect("capture file is readable")
 }
 
+/// Poll until a task body writes `marker`, so the cancel is gated on the run's
+/// own progress instead of on a duration.
+async fn wait_for_marker(marker: &std::path::Path) {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(25);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if marker.exists() {
+            return;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    panic!("timed out waiting for {}", marker.display());
+}
+
 /// The position of `needle` in `text`, as a failure-reporting assertion.
 fn at(text: &str, needle: &str) -> usize {
     text.find(needle)
@@ -124,13 +138,26 @@ async fn test_a_cancelled_buffered_group_flushes_in_item_order_without_stopping_
         std::env::set_var("OTTO_HOME", &otto_home);
     }
 
+    // Each long-running body announces itself before it sleeps. The cancel
+    // waits for those announcements rather than for a duration: the shape this
+    // test is about (alpha and gamma running, beta finished, delta and epsilon
+    // never started) is a state, and a fixed sleep asserts nothing about it.
+    let markers = work_dir.join("markers");
+    std::fs::create_dir_all(&markers)?;
+    let alpha_started = markers.join("alpha.started");
+    let gamma_started = markers.join("gamma.started");
+
     let items = ["alpha", "beta", "gamma", "delta", "epsilon"];
     let mut tasks = vec![
         // A partial log on disk, so "its logs are partial and are not replayed"
         // is asserted against real bytes rather than an empty file.
-        subtask("say", "alpha", "echo 'alpha partial line'\nsleep 30"),
+        subtask(
+            "say",
+            "alpha",
+            &format!("echo 'alpha partial line'\ntouch {}\nsleep 30", alpha_started.display()),
+        ),
         subtask("say", "beta", "echo 'beta produced this'"),
-        subtask("say", "gamma", "sleep 30"),
+        subtask("say", "gamma", &format!("touch {}\nsleep 30", gamma_started.display())),
         subtask("say", "delta", "sleep 30"),
         subtask("say", "epsilon", "sleep 30"),
     ];
@@ -146,7 +173,11 @@ async fn test_a_cancelled_buffered_group_flushes_in_item_order_without_stopping_
     let capture_path = temp_dir.path().join("terminal.txt");
     let captured = capture_terminal(&capture_path, || async move {
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            // gamma only starts once beta has finished and given up its permit,
+            // so gamma's marker is also the proof that beta's block is held and
+            // that neither delta nor epsilon can have started.
+            wait_for_marker(&alpha_started).await;
+            wait_for_marker(&gamma_started).await;
             cancel.cancel();
         });
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), scheduler.execute_all())

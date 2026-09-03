@@ -518,17 +518,17 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 
                     TaskReport::success(task_name.clone()).with_drain(drain_issues)
                 }
-                Err(TaskFailure { error, exit_code: code }) => {
+                Err(TaskFailure { error }) => {
                     error!("Task {task_name} failed: {error}");
-                    // The body's own observation wins; `code` only carries a
-                    // value on paths that set it before failing.
-                    let recorded = code.or(exit_code);
 
                     // Record task failure in database (graceful degradation)
                     if let Some(task_id) = db_task_id
                         && let Some(store) = workspace.state_store()
                     {
-                        let code = recorded.unwrap_or(1);
+                        // `exit_code` is set by the run block when a process
+                        // actually exited, and is `None` on every path that
+                        // failed before or without one; 1 stands in for those.
+                        let code = exit_code.unwrap_or(1);
                         // Degrading gracefully is not the same as saying
                         // nothing: this used to be `let _ =`, so a failure to
                         // record a failure vanished entirely.
@@ -545,7 +545,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         let mut statuses = task_statuses.lock().await;
                         statuses.insert(task_name.clone(), TaskStatus::Failed(error.to_string()));
                     }
-                    TaskReport::failure(task_name.clone(), error, recorded).with_drain(drain_issues)
+                    TaskReport::failure(task_name.clone(), error).with_drain(drain_issues)
                 }
             };
 

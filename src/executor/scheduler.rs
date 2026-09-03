@@ -105,14 +105,10 @@ pub struct DrainIssue {
 /// name out with `error_str.split_whitespace().nth(1)`; for a spawn failure
 /// ("No such file or directory (os error 2)") that yielded "such", so the real
 /// task was never removed from the active set and the run hung until killed.
-/// `exit_code` is carried for the same reason: the database used to re-parse it
-/// out of the message and fall back to 1, so `exit 7` was recorded as 1.
 #[derive(Debug)]
 pub struct TaskReport {
     /// The task this report is about.
     pub name: String,
-    /// The process exit code, when a process ran and exited with one.
-    pub exit_code: Option<i32>,
     /// `None` when the task succeeded.
     pub error: Option<eyre::Report>,
     /// Streams whose drain did not complete. Empty means the logs are whole.
@@ -125,16 +121,14 @@ impl TaskReport {
     fn success(name: String) -> Self {
         Self {
             name,
-            exit_code: Some(0),
             error: None,
             drain: Vec::new(),
         }
     }
 
-    fn failure(name: String, error: eyre::Report, exit_code: Option<i32>) -> Self {
+    fn failure(name: String, error: eyre::Report) -> Self {
         Self {
             name,
-            exit_code,
             error: Some(error),
             drain: Vec::new(),
         }
@@ -160,37 +154,32 @@ enum Wakeup {
     Cancelled,
 }
 
-/// Failure of a task body, carrying the process exit code when there was one.
+/// Failure of a task body.
 ///
 /// Every `?` inside the body used to abandon the task without sending anything;
 /// this type is what lets the whole body be one fallible expression whose single
-/// exit path reports.
+/// exit path reports. The exit code is not carried here: the body's own
+/// `exit_code` local is in scope on that single report path, so a second copy
+/// travelling through this type could only ever agree with it or be wrong.
 struct TaskFailure {
     error: eyre::Report,
-    exit_code: Option<i32>,
 }
 
 impl From<eyre::Report> for TaskFailure {
     fn from(error: eyre::Report) -> Self {
-        Self { error, exit_code: None }
+        Self { error }
     }
 }
 
 impl From<std::io::Error> for TaskFailure {
     fn from(error: std::io::Error) -> Self {
-        Self {
-            error: error.into(),
-            exit_code: None,
-        }
+        Self { error: error.into() }
     }
 }
 
 impl From<tokio::sync::AcquireError> for TaskFailure {
     fn from(error: tokio::sync::AcquireError) -> Self {
-        Self {
-            error: error.into(),
-            exit_code: None,
-        }
+        Self { error: error.into() }
     }
 }
 
@@ -1574,29 +1563,18 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             // If nothing is active and the ready queue is empty, sweep for newly-resolvable
             // blocked tasks (typically downstream of a Skipped task).
             if active_tasks.is_empty() {
-                let mut newly_ready = Vec::new();
-                let mut newly_skipped: Vec<Task> = Vec::new();
-                blocked_tasks.retain(|task| {
-                    let states = classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                    if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
-                        newly_skipped.push(task.clone());
-                        return false;
-                    }
-                    if states.iter().all(|s| matches!(s, EdgeState::Satisfied)) {
-                        newly_ready.push(task.clone());
-                        return false;
-                    }
-                    true
-                });
-                let progressed = !newly_ready.is_empty() || !newly_skipped.is_empty();
-                for t in newly_ready {
-                    ready_queue.push_back(t);
-                }
-                for t in newly_skipped {
-                    let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                    self.mark_skipped(&t, record, &mut skipped_set, &mut cursor).await;
-                    completed_tasks += 1;
-                }
+                let progressed = self
+                    .sweep_blocked(
+                        &mut blocked_tasks,
+                        &mut ready_queue,
+                        &mut completed_tasks,
+                        &serial_groups,
+                        &completed_set,
+                        &failed_set,
+                        &mut skipped_set,
+                        &mut cursor,
+                    )
+                    .await;
                 if !progressed && ready_queue.is_empty() {
                     // Nothing more we can do; bail out of the loop.
                     break;
@@ -1615,7 +1593,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 name = active_tasks.reap_unreported() => Wakeup::Report(Some(TaskReport::failure(
                     name.clone(),
                     eyre!("Task {name} panicked"),
-                    None,
                 ))),
                 () = self.cancel.cancelled() => Wakeup::Cancelled,
             } {
@@ -1628,7 +1605,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     name: completed_task,
                     error: None,
                     drain: report_drain,
-                    ..
                 }) => {
                     info!("Task {completed_task} completed successfully");
 
@@ -1742,34 +1718,22 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     active_tasks.reported(&completed_task);
 
                     // Sweep blocked_tasks: newly-ready and newly-unreachable.
-                    let mut newly_ready = Vec::new();
-                    let mut newly_skipped: Vec<Task> = Vec::new();
-                    blocked_tasks.retain(|task| {
-                        let states = classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
-                            newly_skipped.push(task.clone());
-                            return false;
-                        }
-                        if states.iter().all(|s| matches!(s, EdgeState::Satisfied)) {
-                            newly_ready.push(task.clone());
-                            return false;
-                        }
-                        true
-                    });
-                    for t in newly_ready {
-                        ready_queue.push_back(t);
-                    }
-                    for t in newly_skipped {
-                        let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        self.mark_skipped(&t, record, &mut skipped_set, &mut cursor).await;
-                        completed_tasks += 1;
-                    }
+                    self.sweep_blocked(
+                        &mut blocked_tasks,
+                        &mut ready_queue,
+                        &mut completed_tasks,
+                        &serial_groups,
+                        &completed_set,
+                        &failed_set,
+                        &mut skipped_set,
+                        &mut cursor,
+                    )
+                    .await;
                 }
                 Some(TaskReport {
                     name: task_name,
                     error: Some(e),
                     drain: report_drain,
-                    ..
                 }) => {
                     error!("Task {task_name} failed: {e}");
 
@@ -1806,28 +1770,17 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     completed_tasks += 1;
 
                     // Sweep blocked_tasks: newly-ready and newly-unreachable.
-                    let mut newly_ready = Vec::new();
-                    let mut newly_skipped: Vec<Task> = Vec::new();
-                    blocked_tasks.retain(|task| {
-                        let states = classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
-                            newly_skipped.push(task.clone());
-                            return false;
-                        }
-                        if states.iter().all(|s| matches!(s, EdgeState::Satisfied)) {
-                            newly_ready.push(task.clone());
-                            return false;
-                        }
-                        true
-                    });
-                    for t in newly_ready {
-                        ready_queue.push_back(t);
-                    }
-                    for t in newly_skipped {
-                        let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        self.mark_skipped(&t, record, &mut skipped_set, &mut cursor).await;
-                        completed_tasks += 1;
-                    }
+                    self.sweep_blocked(
+                        &mut blocked_tasks,
+                        &mut ready_queue,
+                        &mut completed_tasks,
+                        &serial_groups,
+                        &completed_set,
+                        &failed_set,
+                        &mut skipped_set,
+                        &mut cursor,
+                    )
+                    .await;
 
                     if final_error.is_none() {
                         final_error = Some(e);

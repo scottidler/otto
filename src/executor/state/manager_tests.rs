@@ -566,6 +566,7 @@ fn test_full_metadata_recording() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn test_try_new_graceful_failure() {
     // Both branches of `try_new`, under an OTTO_HOME this test owns.
     //
@@ -578,6 +579,11 @@ fn test_try_new_graceful_failure() {
     // resolved to `$HOME/.otto/otto.db` and tripped the guard in `db.rs` that
     // exists precisely to catch a test opening the real database. Green locally,
     // red on the first runner that ever saw it.
+    //
+    // `#[serial]` for the same reason `with_otto_home` says it is safe: this
+    // body reads and writes the process-global environment, and every other
+    // test that touches `OTTO_HOME` is in that group. Without it, a `#[serial]`
+    // test's `set_var` lands between this one's `set_var` and its assertion.
     let temp_dir = TempDir::new().unwrap();
 
     // Usable home -> Some, and the store it opened is the one we named.
