@@ -12,8 +12,12 @@ mod common;
 
 use common::{OTTO_BIN, isolate, otto_cmd};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Child, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn write_ottofile(dir: &Path, contents: &str) -> PathBuf {
@@ -406,4 +410,307 @@ tasks:
             format!("{MARKER}\n")
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The stdin half of the same rule: a non-`tty` task cannot read the terminal,
+// by either route, and `tty: true` is how a task gets one.
+//
+// Both routes need a real terminal to test, so these run under `script`. The
+// reads use `head -c1`, a real `read(2)`, deliberately: bash's `read -t N` polls
+// before it reads and times out cleanly, so it never reproduces the hang these
+// tests exist to keep out.
+// ---------------------------------------------------------------------------
+
+/// How long a pty run gets before the test gives up. The behavior it guards
+/// against is an UNBOUNDED hang - before 2026-09-02 the `head -c1` fixtures ran
+/// until an external `timeout` killed them - so the bound only has to be finite
+/// and slack enough not to flake on a loaded machine.
+const PTY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A pty-driven otto run with its stdin held open, so a test can feed the
+/// terminal. Both pipes are drained from their own threads: a full pipe buffer
+/// would stall the run instead of the test.
+struct PtyRun {
+    child: Child,
+    output: mpsc::Receiver<Vec<u8>>,
+}
+
+impl PtyRun {
+    fn start(args: &[&str], proj: &Path, home: &Path, markers: &Path) -> Self {
+        let mut argv = vec![OTTO_BIN];
+        argv.extend_from_slice(args);
+        let mut cmd = common::pty_cmd(&argv);
+        isolate(&mut cmd, home);
+        cmd.current_dir(proj)
+            .env("MARKERS", markers)
+            // `bash -ic` sources the developer's own startup files, which print
+            // whatever they print. Pointing HOME at the fixture keeps the
+            // interactive-shell case reading the same nothing everywhere.
+            .env("HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("script should run otto under a pty");
+
+        let (tx, output) = mpsc::channel::<Vec<u8>>();
+        let pipes: [Box<dyn Read + Send>; 2] = [
+            Box::new(child.stdout.take().expect("stdout")),
+            Box::new(child.stderr.take().expect("stderr")),
+        ];
+        for mut pipe in pipes {
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = pipe.read_to_end(&mut buf);
+                let _ = tx.send(buf);
+            });
+        }
+        drop(tx);
+        Self { child, output }
+    }
+
+    /// Poll `predicate` until it holds, or fail naming `what`.
+    fn wait_for(&mut self, predicate: impl Fn() -> bool, what: &str) {
+        let deadline = Instant::now() + PTY_TIMEOUT;
+        while Instant::now() < deadline {
+            if predicate() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = self.child.kill();
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Type `line` at the terminal. The pty is in canonical mode, so the newline
+    /// is what hands the bytes to the reader.
+    fn type_line(&mut self, line: &str) {
+        let stdin = self.child.stdin.as_mut().expect("stdin");
+        stdin.write_all(line.as_bytes()).expect("write to the pty");
+        stdin.write_all(b"\n").expect("newline");
+        stdin.flush().expect("flush");
+    }
+
+    /// Reap otto within [`PTY_TIMEOUT`], returning its exit code and output.
+    ///
+    /// The timeout is the assertion for the hang cases: reaching it means the
+    /// task is still blocked on a read that must not have been possible.
+    fn finish(mut self) -> (i32, String) {
+        let deadline = Instant::now() + PTY_TIMEOUT;
+        let code = loop {
+            match self.child.try_wait().expect("try_wait") {
+                Some(status) => break status.code().unwrap_or(-1),
+                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+                None => {
+                    let _ = self.child.kill();
+                    panic!("otto did not exit within {PTY_TIMEOUT:?}; the task is still blocked on its read");
+                }
+            }
+        };
+        let mut text = String::new();
+        while let Ok(bytes) = self.output.recv() {
+            text.push_str(&common::pty_stdout(&bytes));
+        }
+        (code, text)
+    }
+}
+
+/// Write `ottofile` into a fresh temp project and return (home, proj, markers).
+fn pty_project(temp: &TempDir, ottofile: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let home = temp.path().join("home");
+    let proj = temp.path().join("proj");
+    let markers = proj.join("markers");
+    fs::create_dir_all(&home).expect("home");
+    fs::create_dir_all(&markers).expect("markers");
+    fs::write(proj.join("otto.yml"), ottofile).expect("ottofile");
+    (home, proj, markers)
+}
+
+const READ_STDIN_OTTOFILE: &str = r#"
+otto:
+  api: 1
+
+tasks:
+  rd:
+    bash: |
+      echo before-read
+      head -c1
+      echo after-read
+"#;
+
+/// Route one: a non-`tty` task's fd 0 is `/dev/null` when otto's own stdin is a
+/// terminal, so a real read gets EOF instead of blocking on keystrokes nobody is
+/// routing to it. Before this the same fixture printed `before-read` and nothing
+/// else, forever.
+#[test]
+fn a_non_tty_task_reading_stdin_under_a_pty_gets_eof() {
+    let temp = TempDir::new().unwrap();
+    let (home, proj, markers) = pty_project(&temp, READ_STDIN_OTTOFILE);
+
+    let run = PtyRun::start(&["rd"], &proj, &home, &markers);
+    let (code, output) = run.finish();
+
+    assert_eq!(
+        code, 0,
+        "the read should have hit EOF and the task succeeded:\n{output}"
+    );
+    assert!(
+        output.contains("after-read"),
+        "the task never got past its read:\n{output}"
+    );
+}
+
+const DEV_TTY_OTTOFILE: &str = r#"
+otto:
+  api: 1
+
+tasks:
+  rd:
+    bash: |
+      echo before-read
+      head -c1 </dev/tty
+      echo after-read
+"#;
+
+/// Route two: nulling fd 0 does nothing about `/dev/tty`, which reopens the
+/// controlling terminal by name. A non-`tty` child has no controlling terminal
+/// (`setsid`), so the open fails with the program's own error text instead of the
+/// task stopping on SIGTTIN.
+#[test]
+fn a_non_tty_task_opening_dev_tty_fails_instead_of_hanging() {
+    let temp = TempDir::new().unwrap();
+    let (home, proj, markers) = pty_project(&temp, DEV_TTY_OTTOFILE);
+
+    let run = PtyRun::start(&["rd"], &proj, &home, &markers);
+    let (code, output) = run.finish();
+
+    assert_ne!(code, 0, "opening /dev/tty must fail the task:\n{output}");
+    assert!(
+        output.contains("/dev/tty"),
+        "the failure must name /dev/tty, so the user knows to set tty: true:\n{output}"
+    );
+    assert!(
+        !output.contains("after-read"),
+        "the read must not have succeeded:\n{output}"
+    );
+}
+
+const INTERACTIVE_SHELL_OTTOFILE: &str = r#"
+otto:
+  api: 1
+
+tasks:
+  rd:
+    bash: |
+      echo before-read
+      bash -ic 'head -c1 </dev/tty'
+      echo after-read
+"#;
+
+/// The hole that sank the `SIG_IGN` mechanism: an interactive shell resets the
+/// job-control dispositions and stops anyway. `setsid` is not defeatable that
+/// way, because there is no controlling terminal left to stop on.
+///
+/// Asserted on a substring, not on the whole stream: `bash -ic` without a
+/// terminal also prints a job-control warning of its own.
+#[test]
+fn a_non_tty_task_opening_dev_tty_from_an_interactive_shell_fails_too() {
+    let temp = TempDir::new().unwrap();
+    let (home, proj, markers) = pty_project(&temp, INTERACTIVE_SHELL_OTTOFILE);
+
+    let run = PtyRun::start(&["rd"], &proj, &home, &markers);
+    let (code, output) = run.finish();
+
+    assert_ne!(code, 0, "opening /dev/tty must fail the task:\n{output}");
+    assert!(
+        output.contains("/dev/tty"),
+        "an interactive shell must fail the same way a non-interactive one does:\n{output}"
+    );
+    assert!(
+        !output.contains("after-read"),
+        "the read must not have succeeded:\n{output}"
+    );
+}
+
+const TTY_READ_OTTOFILE: &str = r#"
+otto:
+  api: 1
+
+tasks:
+  ask:
+    tty: true
+    bash: |
+      touch "${MARKERS}/start"
+      printf 'read=[%s]\n' "$(head -c1 </dev/tty)"
+"#;
+
+/// The other side of the policy: `tty: true` is how a task gets a terminal, and
+/// it still has one. Without this the two tests above would be satisfied by
+/// breaking terminal access for every task.
+#[test]
+fn a_tty_task_reads_the_byte_typed_at_the_terminal() {
+    let temp = TempDir::new().unwrap();
+    let (home, proj, markers) = pty_project(&temp, TTY_READ_OTTOFILE);
+
+    let mut run = PtyRun::start(&["ask"], &proj, &home, &markers);
+    let start = markers.join("start");
+    run.wait_for(|| start.exists(), "the tty task to start");
+    run.type_line("x");
+    let (code, output) = run.finish();
+
+    assert_eq!(
+        code, 0,
+        "the tty task should have read its byte and succeeded:\n{output}"
+    );
+    assert!(
+        output.contains("read=[x]"),
+        "a tty task must still be able to read the terminal:\n{output}"
+    );
+}
+
+const CAT_OTTOFILE: &str = r#"
+otto:
+  api: 1
+
+tasks:
+  rd:
+    bash: |
+      cat
+"#;
+
+/// The rule is terminal-only. A pipe never produces SIGTTIN and never blocks on
+/// a terminal nobody is typing at, so `echo hi | otto rd` keeps working: nulling
+/// stdin unconditionally would have broken every CI job that feeds a task.
+#[test]
+fn a_non_tty_task_with_piped_stdin_reads_the_pipe() {
+    let temp = TempDir::new().unwrap();
+    let (home, proj, _markers) = pty_project(&temp, CAT_OTTOFILE);
+
+    let mut child = common::otto_std_cmd(&home)
+        .current_dir(&proj)
+        .arg("rd")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("otto should start");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"hi\n")
+        .expect("write the pipe");
+    let output = child.wait_with_output().expect("otto should finish");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "a piped-stdin task must succeed:\n{combined}");
+    assert!(
+        combined.contains("hi"),
+        "a pipe on stdin must still reach the task:\n{combined}"
+    );
 }

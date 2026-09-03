@@ -215,28 +215,67 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     // workspace open.
                     .kill_on_drop(true);
 
-                // Its own process group, so a signal aimed at otto does not race
-                // ahead of otto's own teardown, and so the child's own children are
-                // reachable as a group: `abandon_run` signals this pgid, which is
-                // the only thing that reaches a grandchild. Until that reaping
-                // existed, this line created a group nothing ever signalled and
-                // the reachability the sentence above claims was never used.
-                // NOT for a `tty: true` task: that task owns the terminal, and a
-                // background process group reading from it gets SIGTTIN and stops.
-                // Its registry entry records that (`own_group: false`), so
-                // cancellation signals its pid alone - otto is in that group.
-                #[cfg(unix)]
+                // A non-`tty` task cannot read the terminal, by either route.
+                // `tty: true` is how a task gets one. A prompt in a non-`tty`
+                // body is a task failure carrying the program's own error text,
+                // not a silent hang. The two halves below are one rule and must
+                // stay together: `setsid` alone does not hold for a bash body,
+                // because a session leader with a terminal on fd 0 acquires that
+                // terminal as its controlling terminal at startup.
                 if !tty {
-                    cmd.process_group(0);
+                    // Route one, fd 0. Only when otto's own stdin IS a terminal:
+                    // a pipe or a file is still inherited, so `echo x | otto t`
+                    // keeps working, and a pipe never produces SIGTTIN anyway.
+                    // A pty fd inherited into another session is not that
+                    // child's controlling terminal, so reading it neither stops
+                    // nor fails - it blocks forever waiting for keystrokes
+                    // nobody is routing there. `/dev/null` turns that into EOF.
+                    if std::io::stdin().is_terminal() {
+                        cmd.stdin(std::process::Stdio::null());
+                    }
+
+                    // Route two, `/dev/tty`. Its own SESSION, which is also its
+                    // own process group: a signal aimed at otto does not race
+                    // ahead of otto's own teardown, the child's own children are
+                    // reachable as a group (`abandon_run` signals this pgid,
+                    // which is the only thing that reaches a grandchild), AND
+                    // the child has no controlling terminal, so `open("/dev/tty")`
+                    // fails with ENXIO for every program in the body whatever it
+                    // does with its signal dispositions. This replaces a plain
+                    // `process_group(0)`: `setsid` returns EPERM if the caller is
+                    // already a group leader, so the two cannot be stacked, and
+                    // it yields `pgid == pid` either way. Ignoring SIGTTIN
+                    // instead is defeatable by the child - an interactive shell
+                    // resets the disposition and still stops, and `sudo`
+                    // reinstalls its own handler and spins.
+                    // NOT for a `tty: true` task: that task owns the terminal, so
+                    // it stays in otto's session and group. Its registry entry
+                    // records that (`own_group: false`), so cancellation signals
+                    // its pid alone - otto is in that group.
+                    #[cfg(unix)]
+                    // SAFETY: `pre_exec` runs between fork and exec, where only
+                    // async-signal-safe calls are legal. `setsid` is one, it
+                    // takes no arguments and touches no memory this process
+                    // shares, and the closure allocates nothing.
+                    unsafe {
+                        cmd.pre_exec(|| {
+                            if libc::setsid() == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            Ok(())
+                        });
+                    }
                 }
 
                 // Execute without timeout - runs until completion or failure
                 let result = async {
                     if tty {
-                        // The task owns the terminal: inherit stdout/stderr (stdin is
-                        // already inherited - otto never redirects it) and skip
-                        // TaskStreams entirely, so there is no capture and no [task]
-                        // prefix. The logs still exist, carrying the marker line.
+                        // The task owns the terminal: inherit stdout/stderr and
+                        // skip TaskStreams entirely, so there is no capture and no
+                        // [task] prefix. stdin stays inherited too - this is the
+                        // one path that is allowed to read the terminal, which is
+                        // the whole point of the flag. The logs still exist,
+                        // carrying the marker line.
                         write_tty_log_markers(&tasks_dir, &task_name).await?;
                         let mut child = cmd
                             .stdout(std::process::Stdio::inherit())
@@ -271,9 +310,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         .stderr(std::process::Stdio::piped())
                         .spawn()
                         .map_err(|e| eyre!("Task {task_name} could not start {interpreter}: {e}"))?;
-                    // `own_group` mirrors the `process_group(0)` above exactly,
-                    // including its `cfg`: claiming a group otto never created
-                    // would send cancellation at a pgid that is not one.
+                    // `own_group` mirrors the `setsid` above exactly, including
+                    // its `cfg`: claiming a group otto never created would send
+                    // cancellation at a pgid that is not one. A session leader is
+                    // always a group leader, so `pgid == pid` holds here.
                     register_child(&live_children, &task_name, child.id(), cfg!(unix)).await;
 
                     // Setup output streams

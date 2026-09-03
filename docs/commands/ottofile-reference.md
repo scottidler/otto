@@ -98,7 +98,7 @@ value is a task, whose own keys are fixed and listed here.
 | `tasks.<name>.action` | string | none | Legacy path to an executable action. Deprecated in favor of `bash`/`python`. |
 | `tasks.<name>.foreach` | map | none | Dynamic subtask generation. See **`tasks.<name>.foreach:`** below. |
 | `tasks.<name>.on-failure` | list of strings | `[]` | **Kebab key.** Task names to run when this task fails; parse-time sugar that desugars into `after:` edges with `when: failure` on the named tasks. |
-| `tasks.<name>.tty` | boolean | none (absent = false) | Give this task the terminal: inherit stdout/stderr instead of capturing them, drop the `[task]` output prefix, and run it exclusively (no other task runs alongside it). |
+| `tasks.<name>.tty` | boolean | none (absent = false) | Give this task the terminal: inherit stdout/stderr instead of capturing them, drop the `[task]` output prefix, and run it exclusively (no other task runs alongside it). A non-`tty` task cannot read the terminal: stdin is `/dev/null` when otto's is a terminal, and it has no controlling terminal, so `/dev/tty` cannot be opened. Set `tty: true` for anything that prompts. |
 
 **`parallel:` is not a task-level key.** It belongs under `foreach:` — see
 below. Writing it here (the bug this whole design doc was written to catch)

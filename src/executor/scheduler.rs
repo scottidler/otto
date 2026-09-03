@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{self, BufRead, Write},
+    io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -44,7 +44,7 @@ const OUTPUT_PROCESSING_TIMEOUT_SECS: u64 = 5;
 /// blocks are flushed by otto, so nothing downstream is waiting on the child.
 /// Long enough for a trap handler, short enough that Ctrl+C does not feel
 /// wedged, and a teardown that still will not end has the second Ctrl+C
-/// (`install_interrupt_handler`, exit 130) as its escape hatch.
+/// (`install_stop_handler`, exit 130) as its escape hatch.
 const CANCEL_GRACE: Duration = Duration::from_millis(500);
 
 /// Capacity of the task-completion channel. Each started task sends exactly one
@@ -243,7 +243,8 @@ impl CancelSignal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ChildHandle {
     /// The child's pid. When `own_group` is true this is also its pgid, since
-    /// `process_group(0)` makes the child its own group leader.
+    /// `setsid()` makes the child a session leader, and a session leader always
+    /// leads its own process group.
     pid: u32,
     /// Whether the child leads its own process group, which is what makes the
     /// whole subtree it started reachable with one `killpg`. False for a
@@ -606,8 +607,8 @@ fn signal_child(handle: ChildHandle, signal: libc::c_int) -> Result<(), SignalFa
         .ok_or(SignalFailure::NotAPid(handle.pid))?;
     // SAFETY: `kill` and `killpg` take integers and return one, so there is no
     // memory to get wrong. The target is a pid otto spawned itself and recorded
-    // at spawn time, and the group is one otto created via `process_group(0)`,
-    // never a number read from the filesystem or from another process.
+    // at spawn time, and the group is one otto created via `setsid()`, never a
+    // number read from the filesystem or from another process.
     let rc = unsafe {
         if handle.own_group {
             libc::killpg(pid, signal)

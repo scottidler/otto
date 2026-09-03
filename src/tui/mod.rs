@@ -118,11 +118,13 @@ impl TerminalGuard<TuiTerminal> {
     }
 }
 
-/// Best-effort terminal restore for the panic path.
+/// Best-effort terminal restore for the paths that never reach the guard's
+/// `Drop`: a panic unwinding past it, and the second-signal `process::exit`
+/// (`app.rs`, `install_stop_handler`), which runs no destructors at all.
 ///
 /// Errors are dropped on purpose: this runs while the process is already dying,
-/// and a `?` here would replace the panic message the user needs with an io error.
-pub fn restore_terminal_on_panic() {
+/// and a `?` here would replace the message the user needs with an io error.
+pub fn restore_terminal_best_effort() {
     if !claim_terminal_restore() {
         return;
     }
@@ -138,7 +140,7 @@ pub fn install_panic_hook() {
     PANIC_HOOK.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            restore_terminal_on_panic();
+            restore_terminal_best_effort();
             previous(info);
         }));
     });
@@ -161,7 +163,7 @@ pub fn init_terminal() -> io::Result<TerminalGuard<TuiTerminal>> {
     match Terminal::new(backend) {
         Ok(terminal) => Ok(TerminalGuard::new(TuiTerminal { terminal })),
         Err(e) => {
-            restore_terminal_on_panic();
+            restore_terminal_best_effort();
             Err(e)
         }
     }

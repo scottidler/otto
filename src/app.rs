@@ -6,7 +6,7 @@ use crate::cli::parser::{Task, ottofile_base_dir};
 use crate::cli::{CleanCommand, ConvertCommand, ParseOutcome, Parser};
 use crate::executor::{DagVisualizer, TaskScheduler, Workspace};
 use eyre::{Report, Result, eyre};
-use log::info;
+use log::{error, info};
 use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
@@ -467,7 +467,9 @@ pub async fn execute_with_terminal_output(
     // terminal's SIGINT default-killed otto outright and `abandon_run` never
     // ran, so a buffered foreach group lost every completed-but-unreplayed
     // block. Taken before `execute_all` borrows the scheduler.
-    install_interrupt_handler(scheduler.cancel_signal());
+    // Nothing extra to do on either signal here: the plain path has no
+    // dashboard flag to set and no terminal to hand back.
+    install_stop_handler(scheduler.cancel_signal(), || {}, || {});
 
     // Execute all tasks, capturing result
     let result = scheduler.execute_all().await;
@@ -485,49 +487,91 @@ pub async fn execute_with_terminal_output(
     result
 }
 
-/// Turn Ctrl+C into a scheduler cancel on the non-TUI path, and a second Ctrl+C
-/// into an immediate exit.
+/// Await the first of SIGINT, SIGTERM and SIGHUP; report which one it was.
 ///
-/// The first interrupt sets the same `CancelSignal` the TUI path sets
-/// (`execute_with_tui`), so the run goes through `abandon_run`: the report
-/// channel is drained, completed buffered blocks are replayed in item order,
-/// killed children get their log paths printed, and the unstarted items get
-/// did-not-start lines. Installing nothing, which is what shipped through
-/// v2.0.5, meant the terminal's default SIGINT disposition killed otto between
-/// those two states and printed nothing.
+/// All three mean the same thing to a run - stop - and all three are fatal by
+/// default, which is the bug: a default disposition kills otto between "children
+/// spawned" and "children reaped" and orphans every one of them. Only SIGINT was
+/// handled before this, so `kill <otto>` and a closing terminal both left the
+/// subtree running. `None` means the signal machinery could not be installed at
+/// all, which leaves the default dispositions in place rather than pretending a
+/// handler exists.
+async fn next_stop_signal() -> Option<(&'static str, i32)> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())
+        .inspect_err(|e| error!("could not listen for SIGTERM: {e}"))
+        .ok()?;
+    let mut hangup = signal(SignalKind::hangup())
+        .inspect_err(|e| error!("could not listen for SIGHUP: {e}"))
+        .ok()?;
+    tokio::select! {
+        received = tokio::signal::ctrl_c() => received.ok().map(|()| ("SIGINT", libc::SIGINT)),
+        received = terminate.recv() => received.map(|()| ("SIGTERM", libc::SIGTERM)),
+        received = hangup.recv() => received.map(|()| ("SIGHUP", libc::SIGHUP)),
+    }
+}
+
+/// Turn the first stop signal into a scheduler cancel, and the second into an
+/// immediate exit. Used by both the plain path and the `--tui` path.
+///
+/// The first signal sets the `CancelSignal`, so the run goes through
+/// `abandon_run`: the report channel is drained, completed buffered blocks are
+/// replayed in item order, killed children get their log paths printed, and the
+/// unstarted items get did-not-start lines. Installing nothing, which is what
+/// shipped through v2.0.5, meant the terminal's default SIGINT disposition
+/// killed otto between those two states and printed nothing. SIGTERM and SIGHUP
+/// are here for the same reason and not by analogy: a `kill` from a supervisor
+/// and a terminal hangup each killed otto outright, `abandon_run` never ran, and
+/// the children survived because they are not in otto's group.
 ///
 /// **otto does not forward the terminal's signal to task children, by design.**
-/// A terminal Ctrl+C is delivered to the whole foreground process group, but
-/// every task child is put in its own group (`task_execution.rs`,
-/// `cmd.process_group(0)`), so the children do not receive it and otto's
+/// A terminal Ctrl+C, and a hangup, are delivered to the pty's foreground
+/// process group and session, but every non-`tty` task child runs in its own
+/// session (`task_execution.rs`, `setsid`), so it receives neither and otto's
 /// teardown is not raced. They are killed by otto instead, on its own schedule:
 /// `abandon_run` signals each recorded process group, SIGTERM then SIGKILL, so
 /// the task's whole subtree dies rather than only its direct child. The one
-/// exception is a `tty: true` task: it deliberately stays in otto's group so it
-/// can own the terminal, so it takes the Ctrl+C directly, exactly as it would
-/// under any other runner, and cancellation signals its pid alone.
+/// exception is a `tty: true` task: it deliberately stays in otto's session and
+/// group so it can own the terminal, so it takes the terminal's signal directly,
+/// exactly as it would under any other runner, and cancellation signals its pid
+/// alone - its own grandchildren are outside the reaping, as the 2026-09-01 doc
+/// records.
 ///
-/// The second interrupt is the escape hatch, and it is not optional: with a
-/// handler installed the default disposition is gone, so a teardown wedged on a
-/// child that will not die would otherwise be unkillable from the keyboard. It
-/// exits 130 (128 + SIGINT) without closing the run out in the database - the
-/// run stays `running` and `otto Clean` ages it out, which is the honest record
-/// of what happened.
+/// The second signal is the escape hatch, and it is not optional: with a handler
+/// installed the default disposition is gone, so a teardown wedged on a child
+/// that will not die would otherwise be unkillable from the keyboard. It exits
+/// 128 plus the signal's number (130, 143, 129) without closing the run out in
+/// the database - the run stays `running` and `otto Clean` ages it out, which is
+/// the honest record of what happened.
 ///
-/// The ordinary interrupt path keeps the normal failure exit: `abandon_run`
-/// returns `Err`, so `execute_all` fails, the run is recorded not-ok, and
-/// `main` exits non-zero.
-fn install_interrupt_handler(cancel: Arc<crate::executor::scheduler::CancelSignal>) {
+/// The ordinary path keeps the normal failure exit: `abandon_run` returns `Err`,
+/// so `execute_all` fails, the run is recorded not-ok, and `main` exits
+/// non-zero.
+///
+/// `on_first` runs after the cancel and `before_exit` runs before the
+/// second-signal exit, because the `--tui` path has a quit flag to set and a
+/// terminal to hand back and the plain path has neither. Everything else about
+/// the two paths' signal handling is identical, so it lives here once.
+fn install_stop_handler(
+    cancel: Arc<crate::executor::scheduler::CancelSignal>,
+    on_first: impl FnOnce() + Send + 'static,
+    before_exit: impl FnOnce() + Send + 'static,
+) {
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_err() {
+        let Some((name, _)) = next_stop_signal().await else {
             return;
-        }
-        info!("Interrupt received; cancelling the run");
+        };
+        info!("{name} received; cancelling the run");
         cancel.cancel();
+        on_first();
 
-        if tokio::signal::ctrl_c().await.is_ok() {
-            eprintln!("otto: second interrupt; exiting without finishing teardown");
-            std::process::exit(130);
+        if let Some((name, number)) = next_stop_signal().await {
+            // Whatever the caller has to undo comes first: a message printed
+            // onto the alternate screen is a message nobody ever sees.
+            before_exit();
+            eprintln!("otto: second signal ({name}); exiting without finishing teardown");
+            std::process::exit(128 + number);
         }
     });
 }
@@ -629,16 +673,22 @@ pub async fn execute_with_tui(
     let cancel = scheduler.cancel_signal();
     let scheduler_handle = tokio::spawn(async move { scheduler.execute_all().await });
 
-    let ctrl_c_pressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ctrl_c_flag = ctrl_c_pressed.clone();
+    // The flag alone is not enough, and a hangup is why. `TuiApp::run` reads it
+    // once per loop iteration AFTER drawing, but after SIGHUP every write to the
+    // terminal fails EIO, so the draw returns `Err` and the flag is never read.
+    // Cancelling directly from the handler is what makes the run stop in that
+    // case; the flag is what makes the dashboard quit in the ordinary one.
+    let shutdown_requested = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_flag = shutdown_requested.clone();
+    install_stop_handler(
+        cancel.clone(),
+        move || shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst),
+        // A second signal exits the process outright, so the guard's `Drop`
+        // never runs and the user would keep the alternate screen and raw mode.
+        crate::tui::restore_terminal_best_effort,
+    );
 
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            ctrl_c_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    });
-
-    app.set_shutdown_flag(ctrl_c_pressed);
+    app.set_shutdown_flag(shutdown_requested);
 
     // Run TUI (blocks until user quits or Ctrl+C)
     let tui_result = app.run(terminal.terminal_mut());
@@ -651,12 +701,26 @@ pub async fn execute_with_tui(
         eprintln!("Warning: Failed to restore terminal: {}", e);
     }
 
-    // Handle TUI errors
-    tui_result.map_err(|e| eyre::eyre!("TUI error: {}", e))?;
+    // Handle TUI errors. A draw error is how a hangup reaches this path: every
+    // terminal write fails EIO, `run()` returns `Err`, and propagating that
+    // straight out - which is what this line used to do - returned from here
+    // BEFORE the cancel below, leaving the scheduler and its whole subtree
+    // running with nobody watching. Cancel first, drain the scheduler, then
+    // propagate. No "dashboard closed" message: the dashboard did not close, the
+    // terminal went away, and saying otherwise would name the wrong cause.
+    if let Err(e) = tui_result {
+        if !scheduler_handle.is_finished() {
+            cancel.cancel();
+            let _ = scheduler_handle.await;
+        }
+        return Err(eyre::eyre!("TUI error: {}", e));
+    }
 
     // The dashboard is gone, so nothing is watching the run any more. Cancel it and
     // say so. Before this, quitting left the user staring at a bare prompt while
     // children they could no longer see ran to completion, with no way to stop them.
+    // `CancelSignal::cancel` is idempotent (`scheduler.rs`), so a run the signal
+    // handler already cancelled passes through here harmlessly.
     if !scheduler_handle.is_finished() {
         eprintln!("otto: dashboard closed, cancelling the run...");
         cancel.cancel();

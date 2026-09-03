@@ -155,8 +155,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     /// `kill_on_drop(true)` SIGKILLs the direct child when its body's future is
     /// dropped and reaches nothing below it, so a task body running
     /// `bash -> otto -> docker compose logs` left the bottom two alive after
-    /// every Ctrl+C. Each non-tty child is its own process group leader
-    /// (`task_execution.rs`, `cmd.process_group(0)`), so `reap_live_children`
+    /// every Ctrl+C. Each non-tty child leads its own session, and so its own
+    /// process group (`task_execution.rs`, `setsid`), so `reap_live_children`
     /// signals the group and takes the whole subtree; `abort_all` still runs
     /// afterwards, as the backstop that guarantees the direct children are gone.
     ///
