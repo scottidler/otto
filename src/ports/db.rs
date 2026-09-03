@@ -247,14 +247,23 @@ impl StateStore for MemoryStateStore {
             .as_secs();
 
         let mut tasks = self.tasks.write().unwrap();
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-            task.status = status;
-            task.exit_code = Some(exit_code);
-            task.ended_at = Some(ended_at);
-            if let Some(started_at) = task.started_at {
-                task.duration_seconds = Some((ended_at - started_at) as f64);
-            }
-        }
+        let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) else {
+            // Same rule as the SQLite store, which reports zero rows updated:
+            // completing a task that is not there leaves it `running` forever.
+            // This used to return `Ok(())`, so a test against the fake proved
+            // the opposite of what the real store does.
+            return Err(eyre::eyre!("No task with id {task_id} to mark complete"));
+        };
+
+        task.status = status;
+        task.exit_code = Some(exit_code);
+        task.ended_at = Some(ended_at);
+        // `saturating_sub`, matching the SQLite store's `MAX(?3 - started_at, 0)`:
+        // a clock that stepped backwards used to underflow this u64 subtraction
+        // and panic in debug, or write a duration of ~1.8e19 seconds in release.
+        task.duration_seconds = task
+            .started_at
+            .map(|started_at| ended_at.saturating_sub(started_at) as f64);
 
         Ok(())
     }
@@ -375,6 +384,12 @@ impl StateStore for MemoryStateStore {
         let projects = self.projects.read().unwrap();
 
         let mut stats_map: std::collections::HashMap<i64, TaskStats> = std::collections::HashMap::new();
+        // Every recorded duration per project, so avg/min/max are computed the
+        // same way the SQLite store's AVG/MIN/MAX do: over the rows that have a
+        // duration, ignoring the ones that do not. The fake used to leave all
+        // three `None` unconditionally, so `otto Stats`'s duration columns were
+        // never exercised by anything that asserted a number.
+        let mut durations: std::collections::HashMap<i64, Vec<f64>> = std::collections::HashMap::new();
 
         for task in tasks.iter().filter(|t| t.name == task_name) {
             if let Some(run) = runs.iter().find(|r| r.id == task.run_id)
@@ -404,6 +419,10 @@ impl StateStore for MemoryStateStore {
                     _ => {}
                 }
 
+                if let Some(duration) = task.duration_seconds {
+                    durations.entry(project.id).or_default().push(duration);
+                }
+
                 if let Some(started_at) = task.started_at
                     && (stats.last_executed.is_none() || started_at > stats.last_executed.unwrap())
                 {
@@ -413,17 +432,30 @@ impl StateStore for MemoryStateStore {
             }
         }
 
+        for (project_id, recorded) in durations {
+            let Some(stats) = stats_map.get_mut(&project_id) else {
+                continue;
+            };
+            stats.avg_duration_seconds = Some(recorded.iter().sum::<f64>() / recorded.len() as f64);
+            stats.min_duration_seconds = recorded.iter().copied().reduce(f64::min);
+            stats.max_duration_seconds = recorded.iter().copied().reduce(f64::max);
+        }
+
         Ok(stats_map.into_values().collect())
     }
 
     fn get_all_task_stats(&self, limit: Option<usize>) -> Result<Vec<TaskStats>> {
-        let tasks = self.tasks.read().unwrap();
-
-        let task_names: std::collections::HashSet<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        // The read guard is dropped before the loop: `get_task_stats` takes the
+        // same lock again, and `RwLock`'s read side is not reentrant when a
+        // writer is queued behind it.
+        let task_names: std::collections::HashSet<String> = {
+            let tasks = self.tasks.read().unwrap();
+            tasks.iter().map(|t| t.name.clone()).collect()
+        };
 
         let mut all_stats = Vec::new();
         for task_name in task_names {
-            all_stats.extend(self.get_task_stats(task_name)?);
+            all_stats.extend(self.get_task_stats(&task_name)?);
         }
 
         all_stats.sort_by_key(|s| std::cmp::Reverse(s.total_executions));

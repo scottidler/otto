@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, params};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use super::db::DatabaseManager;
+use super::db::{DatabaseManager, TransactionGuard};
 use super::metadata::RunMetadata;
 use super::retention::{Retention, RunAge};
 use super::schema::{RunStatus, SkipKind, TaskStatus};
@@ -145,6 +145,14 @@ impl StateManager {
         }
     }
 
+    /// Record the start of a run: the project upsert, the run row, and the
+    /// project's run counter.
+    ///
+    /// All three in one immediate transaction. They used to be four autocommit
+    /// statements, so a crash - or a failure - between the run INSERT and the
+    /// counter UPDATE drifted `projects.run_count` permanently against the rows
+    /// in `runs`, in either direction. The `MAX(run_count - 1, 0)` guard in
+    /// [`Self::delete_run`] exists because of exactly that drift.
     pub fn record_run_start(&self, metadata: &RunMetadata) -> Result<i64> {
         log::debug!(
             "record_run_start: hash={} timestamp={}",
@@ -152,6 +160,10 @@ impl StateManager {
             metadata.timestamp
         );
         self.db.with_connection(|conn| {
+            // Read-then-write (the upsert reads back the project id, the counter
+            // reads the current count), so the write lock is taken up front.
+            let tx = TransactionGuard::immediate(conn)?;
+
             // First, ensure project exists
             let project_id = self.ensure_project(conn, &metadata.hash, metadata.ottofile.as_ref())?;
 
@@ -190,6 +202,7 @@ impl StateManager {
                 params![metadata.timestamp as i64, project_id],
             )?;
 
+            tx.commit()?;
             Ok(run_id)
         })
     }
@@ -261,7 +274,17 @@ impl StateManager {
         })
     }
 
-    /// Record the completion of a task
+    /// Record the completion of a task.
+    ///
+    /// One statement, the same shape as [`Self::record_run_complete`]: the
+    /// duration is computed in SQL from the row's own start time and clamped at
+    /// zero. It used to be a `SELECT started_at` followed by an `UPDATE`, with
+    /// the subtraction done in Rust and unclamped - so a clock that stepped
+    /// backwards between start and end wrote a negative duration into the stats,
+    /// and a concurrent delete between the two statements turned the completion
+    /// into a silent no-op. `started_at` is nullable, hence the `CASE`: a task
+    /// with no recorded start has no duration, not a duration measured from the
+    /// epoch.
     pub fn record_task_complete(&self, task_id: i64, exit_code: i32, status: TaskStatus) -> Result<()> {
         log::debug!("record_task_complete: task_id={task_id} exit_code={exit_code} status={status:?}");
         let ended_at = SystemTime::now()
@@ -270,21 +293,15 @@ impl StateManager {
             .as_secs();
 
         self.db.with_connection(|conn| {
-            // `started_at` is nullable in the schema, so it is read as one:
-            // reading it as `i64` turned any task without a start time into a
-            // hard error out of a completion path that must not fail.
-            let started_at: Option<i64> =
-                conn.query_row("SELECT started_at FROM tasks WHERE id = ?1", params![task_id], |row| {
-                    row.get(0)
-                })?;
-
-            let duration_seconds = started_at.map(|started| (ended_at as i64 - started) as f64);
-
             let updated = conn.execute(
                 "UPDATE tasks
-                 SET status = ?1, exit_code = ?2, ended_at = ?3, duration_seconds = ?4
-                 WHERE id = ?5",
-                params![status.as_str(), exit_code, ended_at as i64, duration_seconds, task_id],
+                 SET status = ?1, exit_code = ?2, ended_at = ?3,
+                     duration_seconds = CASE
+                         WHEN started_at IS NULL THEN NULL
+                         ELSE MAX(?3 - started_at, 0)
+                     END
+                 WHERE id = ?4",
+                params![status.as_str(), exit_code, ended_at as i64, task_id],
             )?;
 
             if updated == 0 {
@@ -440,10 +457,23 @@ impl StateManager {
     }
 
     /// Helper to convert a database row to a TaskRecord
+    ///
+    /// Same rule as [`Self::row_to_run_record`] for every stored enum: an
+    /// unreadable value is reported, not smoothed over. `skip_kind` used to go
+    /// through `and_then(SkipKind::parse)`, so an unrecognised kind read back as
+    /// "this task was skipped for no recorded reason" while the status column
+    /// next to it rejected the same corruption.
     fn row_to_task_record(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         let status_str: String = row.get(3)?;
         let status = TaskStatus::parse(&status_str)
             .ok_or_else(|| bad_column(3, format!("unknown task status {status_str:?}")))?;
+
+        let skip_kind = match row.get::<_, Option<String>>(13)? {
+            Some(kind_str) => Some(
+                SkipKind::parse(&kind_str).ok_or_else(|| bad_column(13, format!("unknown skip kind {kind_str:?}")))?,
+            ),
+            None => None,
+        };
 
         Ok(TaskRecord {
             id: row.get(0)?,
@@ -459,7 +489,7 @@ impl StateManager {
             stderr_path: row.get::<_, Option<String>>(10)?.map(PathBuf::from),
             script_path: row.get::<_, Option<String>>(11)?.map(PathBuf::from),
             skip_reason: row.get(12)?,
-            skip_kind: row.get::<_, Option<String>>(13)?.as_deref().and_then(SkipKind::parse),
+            skip_kind,
         })
     }
 
@@ -943,28 +973,42 @@ impl StateManager {
     /// Delete one run, by id, and optionally the directory it wrote into.
     ///
     /// Keyed on `id` rather than the timestamp so two runs from the same second
-    /// are two runs. The row deletion and the project's run-count adjustment are
-    /// one transaction; the directory is removed afterwards, because a failed
-    /// unlink must not roll a committed delete back into existence.
+    /// are two runs.
+    ///
+    /// Ordering, which is the whole point of the split below: the directory path
+    /// is resolved and fenced *before* `BEGIN`, the rows go in one immediate
+    /// transaction, and `remove_dir_all` runs only after the commit. It used to
+    /// commit first and fence afterwards, so a run directory that had been
+    /// replaced by a symlink - the case the fence exists for - lost its rows and
+    /// kept its directory, orphaned with nothing pointing at it. The unlink stays
+    /// after the commit for the opposite reason: a failed unlink must not roll a
+    /// committed delete back into existence.
     pub fn delete_run(&self, run_id: i64, delete_filesystem: bool) -> Result<Option<RunRecord>> {
         log::debug!("delete_run: run_id={run_id} delete_filesystem={delete_filesystem}");
+
+        let Some((run_record, project_hash, project_name)) = self.read_run_with_project(run_id)? else {
+            return Ok(None);
+        };
+
+        // Before BEGIN: a refusal here leaves the database untouched.
+        let doomed_dir = if delete_filesystem {
+            self.resolve_run_directory(&run_record, &project_name, &project_hash)?
+        } else {
+            None
+        };
+
         let deleted = self.db.with_connection(|conn| {
-            let tx = conn.unchecked_transaction()?;
+            let tx = TransactionGuard::immediate(conn)?;
 
-            let query = format!("SELECT {RUN_COLUMNS} FROM runs r WHERE r.id = ?1");
-            let run: Option<RunRecord> = conn
-                .query_row(&query, params![run_id], Self::row_to_run_record)
-                .optional()?;
-
-            let Some(run_record) = run else {
-                return Ok(None);
-            };
-
-            let project: (String, String) = conn.query_row(
-                "SELECT hash, COALESCE(name, hash) FROM projects WHERE id = ?1",
-                params![run_record.project_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
+            // Re-read under the write lock: the row was read outside it, and a
+            // concurrent otto may have deleted it in between. Deleting rows that
+            // are already gone would still decrement `run_count`.
+            let present: bool = conn.query_row("SELECT COUNT(*) FROM runs WHERE id = ?1", params![run_id], |row| {
+                Ok(row.get::<_, i64>(0)? > 0)
+            })?;
+            if !present {
+                return Ok(false);
+            }
 
             // Explicit rather than relying on the CASCADE, which is only armed
             // when foreign keys are on.
@@ -979,21 +1023,44 @@ impl StateManager {
             )?;
 
             tx.commit()?;
-            Ok(Some((run_record, project)))
+            Ok(true)
         })?;
 
-        let Some((run_record, (project_hash, project_name))) = deleted else {
+        if !deleted {
             return Ok(None);
-        };
+        }
 
-        if delete_filesystem {
-            self.delete_run_directory(&run_record, &project_name, &project_hash)?;
+        if let Some(dir) = doomed_dir {
+            std::fs::remove_dir_all(&dir).context("Failed to delete run directory")?;
         }
 
         Ok(Some(run_record))
     }
 
-    /// Remove the directory a run wrote into.
+    /// Read one run row together with its project's hash and display name.
+    fn read_run_with_project(&self, run_id: i64) -> Result<Option<(RunRecord, String, String)>> {
+        self.db.with_connection(|conn| {
+            let query = format!("SELECT {RUN_COLUMNS} FROM runs r WHERE r.id = ?1");
+            let Some(run_record) = conn
+                .query_row(&query, params![run_id], Self::row_to_run_record)
+                .optional()?
+            else {
+                return Ok(None);
+            };
+
+            let (hash, name): (String, String) = conn.query_row(
+                "SELECT hash, COALESCE(name, hash) FROM projects WHERE id = ?1",
+                params![run_record.project_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+
+            Ok(Some((run_record, hash, name)))
+        })
+    }
+
+    /// Resolve the directory a run wrote into and check it is safe to delete,
+    /// returning the canonical path to remove, or `None` if there is nothing on
+    /// disk.
     ///
     /// The path comes from the run row, which records it at run start. Cleanup
     /// used to rebuild `otto-<hash>` under a hardcoded `$HOME/.otto`, which
@@ -1006,7 +1073,12 @@ impl StateManager {
     /// while the directory name carries a hash of the project's *path*
     /// (`workspace.rs`), and for a pre-v5 row nothing recorded the latter. A
     /// derivation that misses is reported rather than passed off as a delete.
-    fn delete_run_directory(&self, run: &RunRecord, project_name: &str, project_hash: &str) -> Result<()> {
+    fn resolve_run_directory(
+        &self,
+        run: &RunRecord,
+        project_name: &str,
+        project_hash: &str,
+    ) -> Result<Option<PathBuf>> {
         let otto_home = resolve_otto_home().context("Cannot locate the otto home to delete a run directory")?;
 
         let run_dir = match run.run_dir {
@@ -1018,11 +1090,11 @@ impl StateManager {
             // Reported, not skipped: a missing directory means the row and the
             // disk had already drifted apart, which is the thing worth knowing.
             log::warn!(
-                "Run {} had no directory at {}; deleted its database rows only",
+                "Run {} had no directory at {}; deleting its database rows only",
                 run.timestamp,
                 run_dir.display()
             );
-            return Ok(());
+            return Ok(None);
         }
 
         // Same fence as the filesystem-scan path in `clean`: never delete
@@ -1031,8 +1103,7 @@ impl StateManager {
         // link's target instead.
         let canonical = crate::executor::pruning::ensure_deletable_under_root(&run_dir, &otto_home)
             .context("Refusing to delete run directory")?;
-        std::fs::remove_dir_all(&canonical).context("Failed to delete run directory")?;
-        Ok(())
+        Ok(Some(canonical))
     }
 
     /// Ensure a project exists in the database, creating it if necessary

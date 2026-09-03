@@ -82,12 +82,122 @@ fn memory_and_sqlite_stores_agree_about_retention() {
     }
 }
 
+/// The two backends must agree about task stats, durations included.
+///
+/// `stats_tests.rs` drives `otto Stats` through the fake alone, so anything the
+/// fake did not compute was never exercised end to end - and the fake never
+/// computed `avg`/`min`/`max` at all, leaving all three `None` while SQLite's
+/// `AVG`/`MIN`/`MAX` returned numbers. The duration columns of `otto Stats`
+/// were therefore untested by construction.
+///
+/// The durations here are sub-second, so both backends land on 0.0: the assertion
+/// is `Some(0.0) == Some(0.0)`, and the defect showed up as `None` on one side.
+/// `last_executed` is deliberately not compared - each backend reads its own
+/// `SystemTime::now()`.
+#[test]
+fn memory_and_sqlite_stores_agree_about_task_stats() {
+    use crate::executor::state::StateManager;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let sqlite = StateManager::with_db_path(temp_dir.path().join("stats-parity.db")).unwrap();
+    let memory = MemoryStateStore::new();
+
+    // A completed task, a failed one, and a skipped one - the last of which has
+    // no duration, so it must not drag the average down on either side.
+    for store in [&sqlite as &dyn StateStore, &memory as &dyn StateStore] {
+        let run_id = store
+            .record_run_start(&create_test_metadata("abc12345", 1_700_000_000))
+            .unwrap();
+        let ok = store
+            .record_task_start(run_id, "build", Some("h1"), None, None, None)
+            .unwrap();
+        store.record_task_complete(ok, 0, TaskStatus::Completed).unwrap();
+        let bad = store
+            .record_task_start(run_id, "build", Some("h2"), None, None, None)
+            .unwrap();
+        store.record_task_complete(bad, 1, TaskStatus::Failed).unwrap();
+        store
+            .record_task_skipped(
+                run_id,
+                "build",
+                Some("h3"),
+                Some("dep failed"),
+                Some(SkipKind::Unreachable),
+            )
+            .unwrap();
+    }
+
+    /// The deterministic half of a `TaskStats` row: the four counts and the
+    /// three durations. Named, because comparing seven-tuples by hand is how a
+    /// parity assertion silently stops comparing a field.
+    #[derive(Debug, PartialEq)]
+    struct Comparable {
+        total: u64,
+        successful: u64,
+        failed: u64,
+        skipped: u64,
+        avg: Option<f64>,
+        min: Option<f64>,
+        max: Option<f64>,
+    }
+
+    fn comparable(stats: Vec<TaskStats>) -> Vec<Comparable> {
+        let mut rows: Vec<Comparable> = stats
+            .into_iter()
+            .map(|s| Comparable {
+                total: s.total_executions,
+                successful: s.successful_executions,
+                failed: s.failed_executions,
+                skipped: s.skipped_executions,
+                avg: s.avg_duration_seconds,
+                min: s.min_duration_seconds,
+                max: s.max_duration_seconds,
+            })
+            .collect();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.total));
+        rows
+    }
+
+    let from_sqlite = comparable(sqlite.get_task_stats("build").unwrap());
+    let from_memory = comparable(memory.get_task_stats("build").unwrap());
+    assert_eq!(from_sqlite, from_memory, "backends disagree about get_task_stats");
+    assert_eq!(
+        from_sqlite,
+        vec![Comparable {
+            total: 3,
+            successful: 1,
+            failed: 1,
+            skipped: 1,
+            avg: Some(0.0),
+            min: Some(0.0),
+            max: Some(0.0),
+        }],
+        "three executions, one of each status, with durations computed over the two that have one"
+    );
+
+    assert_eq!(
+        comparable(sqlite.get_all_task_stats(None).unwrap()),
+        comparable(memory.get_all_task_stats(None).unwrap()),
+        "backends disagree about get_all_task_stats"
+    );
+}
+
 /// Both backends refuse to complete a run that does not exist.
 #[test]
 fn memory_store_reports_completing_a_missing_run() {
     let store = MemoryStateStore::new();
     let err = store.record_run_complete(99, RunStatus::Success, None).unwrap_err();
     assert!(err.to_string().contains("No run with id 99"), "{err}");
+}
+
+/// And both refuse to complete a task that does not exist. The fake returned
+/// `Ok(())` where SQLite reports zero rows updated, so a test written against
+/// the fake proved the opposite of the real store's behavior.
+#[test]
+fn memory_store_reports_completing_a_missing_task() {
+    let store = MemoryStateStore::new();
+    let err = store.record_task_complete(99, 0, TaskStatus::Completed).unwrap_err();
+    assert!(err.to_string().contains("No task with id 99"), "{err}");
 }
 
 #[test]

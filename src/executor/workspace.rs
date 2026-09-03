@@ -366,13 +366,20 @@ impl<F: FileSystem> Workspace<F> {
 
         // Convert ExecutionContext to RunMetadata. The run directory is
         // recorded, not left to be reconstructed later from a guess.
+        //
+        // The hostname comes from `current_system_info`, which existed for this
+        // and had no production caller: every history row was written with a
+        // NULL hostname while `docs/history.md`'s JSON example promised one.
+        // The user still comes from the context, which resolved it once at run
+        // start and is what `run.yaml` records.
+        let (_, hostname) = RunMetadata::current_system_info();
         let metadata = RunMetadata::full(
             context.ottofile.clone(),
             context.hash.clone(),
             context.timestamp,
             Some(context.cwd.clone()),
             Some(context.user.clone()),
-            None, // hostname not in ExecutionContext yet
+            hostname,
             Some(context.args.clone()),
         )
         .with_run_dir(self.run.clone());

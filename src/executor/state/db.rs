@@ -23,6 +23,50 @@ const WAL_PRAGMA_BACKOFF: Duration = Duration::from_millis(20);
 /// The database file name inside the otto home.
 const DB_FILE_NAME: &str = "otto.db";
 
+/// A `BEGIN IMMEDIATE` transaction over a shared `&Connection`.
+///
+/// `Connection::transaction_with_behavior` needs `&mut Connection`, which
+/// neither the migration path nor `with_connection`'s closure has, and
+/// `unchecked_transaction` only gives the deferred behavior. A deferred
+/// transaction starts read-only and has to upgrade to a write lock on its first
+/// write; SQLite refuses to make that upgrade wait, returning `SQLITE_BUSY` at
+/// once rather than deadlocking, so `busy_timeout` cannot help there. Taking the
+/// write lock up front is the case `busy_timeout` does cover, which is why every
+/// read-then-write path in this module uses this and not `unchecked_transaction`.
+///
+/// This drives the statements directly and rolls back on drop if `commit` was
+/// never called.
+///
+/// It lives here rather than in `migrations.rs` because it is connection-level
+/// plumbing that both the cold-start path and `manager.rs`'s record/delete paths
+/// need.
+pub(super) struct TransactionGuard<'c> {
+    conn: &'c Connection,
+    committed: bool,
+}
+
+impl<'c> TransactionGuard<'c> {
+    pub(super) fn immediate(conn: &'c Connection) -> Result<Self> {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .context("Failed to begin an immediate transaction")?;
+        Ok(Self { conn, committed: false })
+    }
+
+    pub(super) fn commit(mut self) -> Result<()> {
+        self.conn.execute_batch("COMMIT").context("Failed to commit")?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for TransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
+}
+
 /// Database manager for Otto's SQLite database
 pub struct DatabaseManager {
     conn: Arc<Mutex<Connection>>,

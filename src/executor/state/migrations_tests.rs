@@ -329,6 +329,12 @@ fn test_migrate_v4_to_v5_drops_the_timestamp_uniqueness() -> Result<()> {
 #[test]
 fn test_migrate_v4_to_v5_preserves_rows_and_task_links() -> Result<()> {
     let conn = Connection::open_in_memory()?;
+    // Foreign keys ON, as `DatabaseManager::new` leaves them in production.
+    // This ran with them OFF, which is SQLite's default for a bare
+    // `Connection` - so the `PRAGMA foreign_keys=OFF` toggle the v4-to-v5
+    // rebuild depends on was never actually exercised, and the
+    // `pragma_foreign_key_check` assertion below could not fail.
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     init_v4_schema(&conn)?;
     conn.execute(
         "INSERT INTO projects (hash, name, first_seen, last_seen) VALUES ('abc12345', 'widget', 1, 1)",
@@ -356,6 +362,49 @@ fn test_migrate_v4_to_v5_preserves_rows_and_task_links() -> Result<()> {
     assert_eq!(joined, 1, "task rows still join to their run");
     let fk_ok: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
     assert_eq!(fk_ok, 0, "the rebuild leaves no dangling foreign keys");
+    // And the toggle put them back: a rebuild that left foreign keys off would
+    // silently disarm every CASCADE for the rest of the process's life.
+    let fk_on: i64 = conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    assert_eq!(fk_on, 1, "foreign keys are restored after the rebuild");
+    Ok(())
+}
+
+/// A step and its version bump land together or not at all.
+///
+/// The schema change, the version bump, and every read the step makes to decide
+/// what to change are one transaction. A partial step whose version bump landed
+/// leaves a database whose recorded version lies about its shape, and the retry
+/// then dies on a duplicate column - which used to be permanent.
+///
+/// The failure is injected with a trigger that aborts `migrate_v1_to_v2`'s
+/// backfill UPDATE, after its `ALTER TABLE projects ADD COLUMN name` has already
+/// run inside the same transaction.
+#[test]
+fn test_a_failed_step_rolls_back_its_schema_change_and_its_version() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    init_v1_schema(&conn)?;
+    conn.execute(
+        "INSERT INTO projects (hash, ottofile_path, first_seen, last_seen)
+         VALUES ('abc12345', '/home/u/repos/widget/otto.yml', 1, 1)",
+        [],
+    )?;
+    conn.execute_batch(
+        "CREATE TRIGGER abort_the_backfill BEFORE UPDATE ON projects
+         BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+    )?;
+
+    let err = migrate(&conn).unwrap_err();
+
+    assert!(err.to_string().contains("v1 to v2"), "{err:#}");
+    assert_eq!(
+        get_current_version(&conn)?,
+        1,
+        "the version bump rolled back with the step"
+    );
+    assert!(
+        !has_column(&conn, "projects", "name")?,
+        "the ALTER rolled back with the version bump"
+    );
     Ok(())
 }
 

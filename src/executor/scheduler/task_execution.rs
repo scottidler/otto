@@ -173,10 +173,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 let action_processor = ActionProcessor::new(workspace.clone(), &task_name)?;
                 let processed_action = action_processor.process(&task.action, &task)?;
 
-                // Extract script path and determine interpreter
-                let (script_path, interpreter) = match processed_action {
-                    ProcessedAction::Bash { path, .. } => (path, "bash"),
-                    ProcessedAction::Python3 { path, .. } => (path, "python3"),
+                // Extract script path, interpreter, and the hash the processor
+                // already computed over the rendered script - which is what the
+                // `tasks.script_hash` column is for.
+                let (script_path, interpreter, script_hash) = match processed_action {
+                    ProcessedAction::Bash { path, hash, .. } => (path, "bash", hash),
+                    ProcessedAction::Python3 { path, hash, .. } => (path, "python3", hash),
                 };
 
                 // Record task start in database with paths (graceful degradation)
@@ -185,6 +187,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     let stderr_path = tasks_dir.join(&task_name).join("stderr.log");
                     let name = task_name.clone();
                     let script = script_path.clone();
+                    let hash = script_hash.clone();
 
                     // rusqlite is synchronous and holds a mutex across the
                     // write, so it runs on the blocking pool rather than
@@ -193,7 +196,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         store.record_task_start(
                             run_id,
                             &name,
-                            None, // TODO: Compute script hash in future phase
+                            Some(&hash),
                             Some(&stdout_path),
                             Some(&stderr_path),
                             Some(&script),
