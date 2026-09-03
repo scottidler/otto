@@ -363,10 +363,9 @@ fn required_param_error(task_name: &str, missing: &[&str]) -> eyre::Report {
 
 /// The clap `num_args` range implied by a param's `nargs:`.
 ///
-/// `Nargs::Range(min, max)` stores `min` already offset by one (see
-/// `cfg/param.rs`'s `Serialize`/`Deserialize`, which round-trip `nargs:
-/// "2:5"` through `Range(1, 5)`), so the count a user actually wrote back is
-/// `min + 1`.
+/// `Nargs::Range(min, max)` stores the counts the user wrote: `nargs: "2:5"`
+/// is `Range(2, 5)` and a bare `nargs: "3"` is `Range(3, 3)`, which clap
+/// reads as exactly three values.
 fn nargs_to_num_args(nargs: &Nargs) -> clap::builder::ValueRange {
     match nargs {
         Nargs::One => (1..=1).into(),
@@ -374,7 +373,7 @@ fn nargs_to_num_args(nargs: &Nargs) -> clap::builder::ValueRange {
         Nargs::OneOrZero => (0..=1).into(),
         Nargs::OneOrMore => (1..).into(),
         Nargs::ZeroOrMore => (0..).into(),
-        Nargs::Range(min, max) => (*min + 1..=*max).into(),
+        Nargs::Range(min, max) => (*min..=*max).into(),
     }
 }
 
@@ -934,8 +933,10 @@ impl Parser {
         self.hash = hash;
         self.ottofile = ottofile;
 
-        if !jobs_explicit {
-            self.jobs = self.config_spec.otto.jobs;
+        // `otto.jobs` is an `Option`: absent leaves the CPU-count default that
+        // clap already filled in, present overrides it.
+        if !jobs_explicit && let Some(jobs) = self.config_spec.otto.jobs {
+            self.jobs = jobs;
         }
 
         // Inject built-in commands

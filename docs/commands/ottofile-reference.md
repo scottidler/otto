@@ -122,13 +122,17 @@ here too.
 
 ## `tasks.<name>.foreach:` (`ForeachSpec`) — 9 keys
 
+Exactly one of `command`, `glob`, `items`, `range` must be set: zero sources
+and two sources are both rejected at load, naming the task and every source
+found.
+
 | key | type | default | notes |
 |---|---|---|---|
 | `tasks.<name>.foreach.glob` | string | none | File glob pattern; each match becomes one subtask item. |
 | `tasks.<name>.foreach.items` | list of strings | `[]` | Explicit list of items. |
-| `tasks.<name>.foreach.range` | string | none | Numeric range, e.g. `"1-10"` (1 through 10 inclusive). |
+| `tasks.<name>.foreach.range` | string | none | Numeric range, e.g. `"1-10"` (1 through 10 inclusive). Counted at load, not expanded: a range wider than `max_items` is a config error before a single item exists. |
 | `tasks.<name>.foreach.command` | string | none | Shell command whose stdout lines become the items. Resolves lazily (never for `--help`) and at most once per invocation. Mutually exclusive with `glob`/`items`/`range`. |
-| `tasks.<name>.foreach.as` | string | `"item"` | **Kebab-shaped on disk** (the Rust field is `var_name`, renamed). Variable name bound to the current item in each subtask. |
+| `tasks.<name>.foreach.as` | string | `"item"` | **Kebab-shaped on disk** (the Rust field is `var_name`, renamed). Variable name bound to the current item in each subtask. It becomes a shell variable, so it must be an identifier (letters, digits and underscore, not starting with a digit); anything else is rejected at load naming `foreach.as`. |
 | `tasks.<name>.foreach.parallel` | boolean | `true` | Whether subtasks run concurrently or serially. This is the key that must live HERE, not one level up on the task — the motivating bug for this whole design doc was `parallel:` written beside `foreach:` instead of inside it. |
 | `tasks.<name>.foreach.max_items` | integer | `1000` | Maximum item count before erroring. |
 | `tasks.<name>.foreach.buffer` | boolean | `false` | Run subtasks concurrently but print each subtask's output as one contiguous block, in item order. Rejected at load if the task also sets `tty: true` (a tty task owns the terminal exclusively). |
@@ -159,7 +163,7 @@ ignored, key.
 | `...params.<title>.default` | string | none | Default value when the param is unset. |
 | `...params.<title>.choices` | list of strings | `[]` | Static allowed-value set. |
 | `...params.<title>.choices-command` | string | none | **Kebab key.** Shell command whose stdout lines become the allowed value set (dynamic choices), resolved lazily and at most once per invocation. |
-| `...params.<title>.nargs` | string | `"1"` | One of `"0"`, `"1"`, `"?"` (zero-or-one), `"+"` (one-or-more), `"*"` (zero-or-more), a bare integer `"N"` (max count, min 0), or `"N:M"` (min:max, 1-indexed on disk). Wired to clap's `num_args`: a value of more than one collects every space-separated value from one occurrence. |
+| `...params.<title>.nargs` | string | `"1"` | One of `"0"`, `"1"`, `"?"` (zero-or-one), `"+"` (one-or-more), `"*"` (zero-or-more), a bare integer `"N"` (exactly N), or `"N:M"` (min:max). Wired to clap's `num_args`: a value of more than one collects every space-separated value from one occurrence. A bounded zero-to-N is not expressible: `"0:N"` is rejected at load (`min must be at least 1`), so use `"?"` for zero-or-one or `"*"` for zero-or-more. |
 | `...params.<title>.help` | string | none | Help text shown for this param. |
 | `...params.<title>.required` | boolean | `false` | clap enforces the value (a usage error instead of an empty variable). Rejected at load together with a `FLG` param, `default:`, or an `nargs` of `"0"`/`"?"`/`"*"` (all mean "may appear zero times"), and rejected if it declares a required positional after an optional one (clap panics on that shape). Fires only when the task is named on the command line: a task pulled in only as a dependency has no CLI partition and runs with the param unset, matching `choices`. |
 

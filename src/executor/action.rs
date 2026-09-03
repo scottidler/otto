@@ -58,12 +58,6 @@ fn param_value_to_string(value: &crate::cfg::param::Value) -> String {
     match value {
         crate::cfg::param::Value::Item(s) => s.clone(),
         crate::cfg::param::Value::List(l) => l.join(" "),
-        crate::cfg::param::Value::Dict(d) => {
-            // Convert dict to space-separated key=value pairs
-            let mut pairs: Vec<String> = d.iter().map(|(k, v)| format!("{k}={v}")).collect();
-            pairs.sort();
-            pairs.join(" ")
-        }
         crate::cfg::param::Value::Empty => String::new(),
     }
 }

@@ -199,3 +199,34 @@ fn test_when_serialize_kebab_case() {
     assert_eq!(serde_yaml::to_string(&When::Failure).unwrap().trim(), "failure");
     assert_eq!(serde_yaml::to_string(&When::Always).unwrap().trim(), "always");
 }
+
+/// A task keyed `2024:` loads (YAML hands the map an integer and the key is
+/// stringified), so an edge naming it must too - the two are the same name
+/// written in the same place. It used to fail with "invalid type: integer".
+#[test]
+fn a_numeric_edge_target_deserializes_as_the_stringified_name() {
+    let edge: EdgeSpec = serde_yaml::from_str("2024").unwrap();
+    assert_eq!(edge.task, "2024");
+    assert_eq!(edge.when, When::Success);
+    assert!(edge.from_sugar, "must re-emit as the bare form it was written as");
+}
+
+#[test]
+fn a_negative_edge_target_deserializes_as_the_stringified_name() {
+    let edge: EdgeSpec = serde_yaml::from_str("-1").unwrap();
+    assert_eq!(edge.task, "-1");
+}
+
+#[test]
+fn a_boolean_edge_target_deserializes_as_the_stringified_name() {
+    let edge: EdgeSpec = serde_yaml::from_str("true").unwrap();
+    assert_eq!(edge.task, "true");
+}
+
+/// The accepted scalars stringify; a shape that is neither a name nor a
+/// `{task, when}` object is still a loud error.
+#[test]
+fn a_sequence_edge_target_is_still_rejected() {
+    let err = serde_yaml::from_str::<EdgeSpec>("[a, b]").unwrap_err().to_string();
+    assert!(err.contains("expected a task name string"), "{err}");
+}

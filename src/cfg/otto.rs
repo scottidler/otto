@@ -55,7 +55,7 @@ struct ApiHeaderOtto {
 /// Reject an ottofile whose declared `otto.api` this otto does not speak.
 ///
 /// Tolerant by construction: a document that does not even yield an
-/// [`ApiHeader`] (unparseable YAML, an `otto:` block of the wrong shape) is
+/// `ApiHeader` (unparseable YAML, an `otto:` block of the wrong shape) is
 /// passed through so the typed parse can report the real, specific error.
 pub fn check_api_version(content: &str) -> Result<()> {
     let Ok(header) = serde_yaml::from_str::<ApiHeader>(content) else {
@@ -130,10 +130,6 @@ fn default_api() -> String {
     CURRENT_API_VERSION.to_string()
 }
 
-fn default_jobs() -> usize {
-    num_cpus::get()
-}
-
 fn default_tasks() -> Vec<String> {
     vec!["*".to_string()]
 }
@@ -160,9 +156,9 @@ fn default_prune_interval_hours() -> u64 {
 
 /// `deny_unknown_fields` turns a stale or misplaced `otto.retention` key into
 /// a loud config-load error naming the field, rather than a silently-ignored
-/// no-op. Per `borg/src/config.rs:281-285`. Every field here is plain
-/// snake_case with no rename; `otto Convert` emits exactly these names, so
-/// its own output stays loadable under this attribute.
+/// no-op. Every field here is plain snake_case with no rename; `otto Convert`
+/// emits exactly these names, so its own output stays loadable under this
+/// attribute.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionSpec {
@@ -231,12 +227,12 @@ pub fn default_otto() -> OttoSpec {
 /// `debug_assert!(max_parallel >= 1)` never fires because the loop never
 /// reaches it. Measured before this guard: `timeout 12s otto build` exited
 /// 124 with zero output.
-fn deserialize_jobs<'de, D>(deserializer: D) -> Result<usize, D::Error>
+fn deserialize_jobs<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let jobs = usize::deserialize(deserializer)?;
-    if jobs == 0 {
+    let jobs = Option::<usize>::deserialize(deserializer)?;
+    if jobs == Some(0) {
         return Err(serde::de::Error::custom(
             "otto.jobs: 0 is not a valid job count; use 1 or more (omit the key to default to the CPU count)",
         ));
@@ -256,10 +252,6 @@ fn is_default_about(v: &String) -> bool {
     *v == default_about()
 }
 
-fn is_default_jobs(v: &usize) -> bool {
-    *v == default_jobs()
-}
-
 // `default_tasks()` is `["*"]`, not `[]` - `Vec::is_empty` would leave the
 // default value emitted on every partially-customized `otto:` block (e.g.
 // one that sets only `jobs:`), which is exactly the null-noise this bullet
@@ -270,9 +262,8 @@ fn is_default_tasks(v: &[String]) -> bool {
 
 /// `deny_unknown_fields` turns a stale or misplaced `otto:` key into a loud
 /// config-load error naming the field, rather than a silently-ignored no-op.
-/// Per `borg/src/config.rs:281-285`. Does not reach `envs`' free-form keys:
-/// the attribute governs `OttoSpec`'s own field names, not the contents of
-/// the `HashMap` that `envs` holds.
+/// Does not reach `envs`' free-form keys: the attribute governs `OttoSpec`'s
+/// own field names, not the contents of the `HashMap` that `envs` holds.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OttoSpec {
@@ -288,12 +279,19 @@ pub struct OttoSpec {
     /// Default parallelism, used only when `-j/--jobs` was not given
     /// explicitly on the command line (see `Parser::parse`'s `value_source`
     /// check). The CLI flag always wins when present.
+    ///
+    /// `None` means the ottofile did not set it, and the CPU count is resolved
+    /// in the one place that owns the default (`cli::parser`'s `DEFAULT_JOBS`).
+    /// It used to be a `usize` pre-filled with the host's CPU count and skipped
+    /// on serialize when it still equalled that count, so `jobs: 4` on a 4-core
+    /// host was dropped on re-emit and an ottofile that never wrote the key was
+    /// indistinguishable from one that wrote the host's count.
     #[serde(
-        default = "default_jobs",
-        skip_serializing_if = "is_default_jobs",
+        default,
+        skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_jobs"
     )]
-    pub jobs: usize,
+    pub jobs: Option<usize>,
 
     #[serde(default = "default_tasks", skip_serializing_if = "is_default_tasks")]
     pub tasks: Vec<String>,
@@ -318,7 +316,7 @@ impl Default for OttoSpec {
             name: default_name(),
             about: default_about(),
             api: default_api(),
-            jobs: default_jobs(),
+            jobs: None,
             tasks: default_tasks(),
             envs: HashMap::new(),
             envs_command: None,

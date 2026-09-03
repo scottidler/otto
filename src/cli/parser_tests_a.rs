@@ -515,7 +515,10 @@ fn nargs_to_num_args_maps_every_variant() {
     assert_eq!(nargs_to_num_args(&Nargs::OneOrZero), (0..=1).into());
     assert_eq!(nargs_to_num_args(&Nargs::OneOrMore), (1..).into());
     assert_eq!(nargs_to_num_args(&Nargs::ZeroOrMore), (0..).into());
-    assert_eq!(nargs_to_num_args(&Nargs::Range(1, 5)), (2..=5).into());
+    assert_eq!(nargs_to_num_args(&Nargs::Range(2, 5)), (2..=5).into());
+    // A bare `nargs: "3"` is `Range(3, 3)`: exactly three, which is what the
+    // count means to clap and to argparse.
+    assert_eq!(nargs_to_num_args(&Nargs::Range(3, 3)), (3..=3).into());
 }
 
 #[test]
@@ -1032,17 +1035,12 @@ tasks:
 
 #[test]
 fn test_help_renders_dynamic_for_a_command_sourced_foreach() {
-    let mut task_spec = TaskSpec::new(
-        "up".to_string(),
-        Some("Bring up each service".to_string()),
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        crate::cfg::param::ParamSpecs::new(),
-        "echo ${svc}".to_string(),
-    );
+    let mut task_spec = TaskSpec {
+        name: "up".to_string(),
+        help: Some("Bring up each service".to_string()),
+        action: "echo ${svc}".to_string(),
+        ..Default::default()
+    };
     task_spec.foreach = Some(ForeachSpec {
         // If help ever resolved this, the sentinel file would appear.
         command: Some("printf 'alpha\n'".to_string()),
@@ -1061,17 +1059,12 @@ fn test_help_renders_dynamic_for_a_command_sourced_foreach() {
 
 #[test]
 fn test_help_still_renders_item_counts_for_static_foreach() {
-    let mut task_spec = TaskSpec::new(
-        "up".to_string(),
-        Some("Bring up each service".to_string()),
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        crate::cfg::param::ParamSpecs::new(),
-        "echo ${svc}".to_string(),
-    );
+    let mut task_spec = TaskSpec {
+        name: "up".to_string(),
+        help: Some("Bring up each service".to_string()),
+        action: "echo ${svc}".to_string(),
+        ..Default::default()
+    };
     task_spec.foreach = Some(ForeachSpec {
         items: vec!["alpha".to_string(), "beta".to_string()],
         var_name: "svc".to_string(),

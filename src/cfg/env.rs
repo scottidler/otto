@@ -9,7 +9,7 @@ use std::process::Command;
 /// inherited process environment before anything is evaluated, and it is the
 /// floor of the returned map. That is what makes `otto.envs-command` output
 /// visible to task bodies while a literal `envs:` entry for the same key still
-/// wins the final value - and, because [`evaluation_context`] seeds a key's
+/// wins the final value - and, because `evaluation_context` seeds a key's
 /// *inherited* value when evaluating that key, a shadowing literal that
 /// self-references (`FOO: '$(echo "${FOO:-x}")'`) sees the computed value
 /// rather than the OS one. Merging the overrides into the declared map instead

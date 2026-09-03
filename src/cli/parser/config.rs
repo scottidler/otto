@@ -61,10 +61,11 @@ impl Parser {
             // Validate that no tasks use reserved builtin param names
             Self::validate_no_builtin_params(&config_spec)?;
 
-            // Validate foreach sources (a `command:` source is exclusive with
-            // glob/items/range). Shape-only, executes nothing, so every
+            // Validate every `foreach:` block: exactly one source, an `as:`
+            // that is a shell identifier, and a `range:` that parses and fits
+            // inside `max_items`. Shape-only, executes nothing, so every
             // surface including `--help` reports the misconfiguration.
-            Self::validate_foreach_sources(&config_spec)?;
+            Self::validate_foreach_specs(&config_spec)?;
 
             // Validate `required: true` combinations (FLG, default:,
             // zero-capable nargs) and required-positional ordering.
@@ -89,10 +90,10 @@ impl Parser {
         }
     }
 
-    fn validate_foreach_sources(config: &ConfigSpec) -> Result<()> {
+    fn validate_foreach_specs(config: &ConfigSpec) -> Result<()> {
         for (task_name, task_spec) in &config.tasks {
             if let Some(foreach) = &task_spec.foreach {
-                foreach.validate_sources(task_name)?;
+                foreach.validate(task_name)?;
             }
         }
         Ok(())

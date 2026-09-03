@@ -338,15 +338,29 @@ fn test_foreach_command_is_exclusive_with_static_sources() {
     );
 }
 
+/// Inverted from `test_foreach_static_sources_still_validate_clean`, which
+/// pinned the old behavior: two static sources used to load, and
+/// `resolve_items`'s `else if` chain then silently dropped the items and
+/// expanded only the glob. Exactly one source, and the error names both.
 #[test]
-fn test_foreach_static_sources_still_validate_clean() {
+fn two_static_foreach_sources_are_rejected_naming_both() {
     let foreach = ForeachSpec {
         items: vec!["x".to_string()],
         glob: Some("*.sh".to_string()),
         ..Default::default()
     };
-    // Only a `command:` source is exclusive; the pre-existing glob/items
-    // precedence is untouched by this phase.
+    let err = foreach.validate_sources("up").unwrap_err().to_string();
+    assert!(err.contains("glob"), "must name glob: {err}");
+    assert!(err.contains("items"), "must name items: {err}");
+    assert!(err.contains("exactly one source"), "{err}");
+}
+
+#[test]
+fn exactly_one_static_foreach_source_validates_clean() {
+    let foreach = ForeachSpec {
+        items: vec!["x".to_string()],
+        ..Default::default()
+    };
     assert!(foreach.validate_sources("up").is_ok());
 }
 
@@ -363,17 +377,11 @@ fn test_resolve_items_refuses_a_command_source() {
 
 #[test]
 fn test_expand_foreach_with_items_names_subtasks_and_injects_vars() {
-    let mut task = TaskSpec::new(
-        "up".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo ${svc}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "up".to_string(),
+        action: "echo ${svc}".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("unused: items are supplied"));
 
     let items = vec![
@@ -398,17 +406,13 @@ fn test_expand_foreach_with_items_names_subtasks_and_injects_vars() {
 
 #[test]
 fn test_expand_foreach_with_items_interpolates_input_and_output_per_item() {
-    let mut task = TaskSpec::new(
-        "build".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec!["src/${item}.txt".to_string()],
-        vec!["out/${item}.o".to_string()],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo ${item}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "build".to_string(),
+        input: vec!["src/${item}.txt".to_string()],
+        output: vec!["out/${item}.o".to_string()],
+        action: "echo ${item}".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("unused: items are supplied"));
     task.foreach.as_mut().unwrap().var_name = "item".to_string();
 
@@ -443,17 +447,12 @@ fn test_expand_foreach_with_items_interpolates_input_and_output_per_item() {
 /// variable becomes an error. Found by the batched audit, batch 7 of 14.
 #[test]
 fn test_expand_foreach_with_items_preserves_a_non_loop_path_variable() {
-    let mut task = TaskSpec::new(
-        "build".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec!["${SRCDIR}/${svc}.txt".to_string()],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo hi".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "build".to_string(),
+        input: vec!["${SRCDIR}/${svc}.txt".to_string()],
+        action: "echo hi".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("unused: items are supplied"));
 
     let items = vec![ForeachItem {
@@ -472,17 +471,11 @@ fn test_expand_foreach_with_items_preserves_a_non_loop_path_variable() {
 
 #[test]
 fn test_expand_foreach_with_items_rejects_duplicates() {
-    let mut task = TaskSpec::new(
-        "up".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo ${svc}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "up".to_string(),
+        action: "echo ${svc}".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("printf 'a\na\n'"));
 
     let dup = ForeachItem {
@@ -515,17 +508,11 @@ fn sanitize_identifier_keeps_an_item_to_one_path_component() {
 
 #[test]
 fn expand_foreach_cannot_name_a_subtask_outside_its_tasks_dir() {
-    let mut task = TaskSpec::new(
-        "build".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo ${pkg}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "build".to_string(),
+        action: "echo ${pkg}".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("printf '../../../ESCAPED\n'"));
 
     let items = vec![ForeachItem {
@@ -549,17 +536,11 @@ fn expand_foreach_cannot_name_a_subtask_outside_its_tasks_dir() {
 
 #[test]
 fn foreach_item_values_are_escaped_against_the_env_evaluator() {
-    let mut task = TaskSpec::new(
-        "build".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo ${pkg}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "build".to_string(),
+        action: "echo ${pkg}".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("printf 'a\n'"));
 
     let items = vec![ForeachItem {
@@ -587,17 +568,12 @@ fn foreach_item_values_are_escaped_against_the_env_evaluator() {
 
 #[test]
 fn test_taskspec_expand_foreach_with_list() {
-    let mut task = TaskSpec::new(
-        "deploy".to_string(),
-        Some("Deploy to environment".to_string()),
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "#!/bin/bash\necho deploy".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "deploy".to_string(),
+        help: Some("Deploy to environment".to_string()),
+        action: "#!/bin/bash\necho deploy".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(ForeachSpec {
         items: vec!["dev".to_string(), "staging".to_string(), "prod".to_string()],
         var_name: "env".to_string(),
@@ -625,17 +601,11 @@ fn test_taskspec_expand_foreach_with_list() {
 
 #[test]
 fn test_taskspec_expand_foreach_none() {
-    let task = TaskSpec::new(
-        "build".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "#!/bin/bash\necho build".to_string(),
-    );
+    let task = TaskSpec {
+        name: "build".to_string(),
+        action: "#!/bin/bash\necho build".to_string(),
+        ..Default::default()
+    };
 
     let cwd = PathBuf::from("/tmp");
     let subtasks = task.expand_foreach(&cwd).unwrap();
@@ -646,17 +616,17 @@ fn test_taskspec_expand_foreach_none() {
 
 #[test]
 fn test_taskspec_as_virtual_parent() {
-    let mut task = TaskSpec::new(
-        "examples".to_string(),
-        Some("Run examples".to_string()),
-        vec![EdgeSpec::sugar("cleanup")],
-        vec![EdgeSpec::sugar("build")],
-        vec!["input.txt".to_string()],
-        vec!["output.txt".to_string()],
-        HashMap::from([("KEY".to_string(), "value".to_string())]),
-        ParamSpecs::new(),
-        "#!/bin/bash\necho hello".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "examples".to_string(),
+        help: Some("Run examples".to_string()),
+        after: vec![EdgeSpec::sugar("cleanup")],
+        before: vec![EdgeSpec::sugar("build")],
+        input: vec!["input.txt".to_string()],
+        output: vec!["output.txt".to_string()],
+        envs: HashMap::from([("KEY".to_string(), "value".to_string())]),
+        action: "#!/bin/bash\necho hello".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(ForeachSpec::default());
 
     let parent = task.as_virtual_parent();
@@ -774,17 +744,11 @@ fn test_tty_parses_both_values() {
 
 #[test]
 fn test_tty_serializes_only_when_set() {
-    let mut spec = TaskSpec::new(
-        "login".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "#!/bin/bash\naws sso login".to_string(),
-    );
+    let mut spec = TaskSpec {
+        name: "login".to_string(),
+        action: "#!/bin/bash\naws sso login".to_string(),
+        ..Default::default()
+    };
     assert!(!serde_yaml::to_string(&spec).unwrap().contains("tty"));
     spec.tty = Some(true);
     assert!(serde_yaml::to_string(&spec).unwrap().contains("tty: true"));
@@ -852,17 +816,11 @@ fn deserialize_script_string_dedents_every_multibyte_whitespace_width() {
 /// even under `parallel: true`; that is documented behavior, not an error.
 #[test]
 fn test_foreach_subtasks_inherit_tty() {
-    let mut task = TaskSpec::new(
-        "login".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "#!/bin/bash\necho ${item}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "login".to_string(),
+        action: "#!/bin/bash\necho ${item}".to_string(),
+        ..Default::default()
+    };
     task.tty = Some(true);
     task.foreach = Some(ForeachSpec {
         items: vec!["a".to_string(), "b".to_string()],
@@ -881,17 +839,11 @@ fn test_foreach_subtasks_inherit_tty() {
 /// would take the exclusive permit to do nothing.
 #[test]
 fn test_virtual_parent_drops_tty() {
-    let mut task = TaskSpec::new(
-        "login".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "#!/bin/bash\necho hi".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "login".to_string(),
+        action: "#!/bin/bash\necho hi".to_string(),
+        ..Default::default()
+    };
     task.tty = Some(true);
 
     assert_eq!(task.as_virtual_parent().tty, None);
@@ -1177,4 +1129,68 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
             "docs/commands/ottofile-reference.md's per-struct sum must read `{struct_name}` {expected_count}"
         );
     }
+}
+
+#[test]
+fn a_sourceless_foreach_is_rejected() {
+    let err = ForeachSpec::default().validate_sources("up").unwrap_err().to_string();
+    assert!(err.contains("no source"), "{err}");
+    assert!(err.contains("Task 'up'"), "{err}");
+}
+
+/// `foreach.as` becomes a shell variable in every subtask, so it has to be an
+/// identifier. It used to reach `executor::action`, which names "environment
+/// variable name" and not the field, at run time rather than at load.
+#[test]
+fn a_non_identifier_foreach_as_is_rejected_naming_the_field() {
+    let foreach = ForeachSpec {
+        items: vec!["a".to_string()],
+        var_name: "my item".to_string(),
+        ..Default::default()
+    };
+    let err = foreach.validate("up").unwrap_err().to_string();
+    assert!(err.contains("foreach.as"), "must name the field: {err}");
+    assert!(err.contains("my item"), "must quote the value: {err}");
+}
+
+#[test]
+fn the_default_foreach_as_validates_clean() {
+    let foreach = ForeachSpec {
+        items: vec!["a".to_string()],
+        ..Default::default()
+    };
+    assert!(foreach.validate("up").is_ok());
+}
+
+/// The count is computed with checked arithmetic before anything is built:
+/// `max_items` used to be checked against an already-materialized `Vec`.
+#[test]
+fn a_range_wider_than_max_items_is_rejected_at_validation() {
+    let foreach = ForeachSpec {
+        range: Some("1-5000".to_string()),
+        ..Default::default()
+    };
+    let err = foreach.validate("huge").unwrap_err().to_string();
+    assert!(err.contains("5000 items"), "must state the count: {err}");
+    assert!(err.contains("max_items"), "must name the limit: {err}");
+}
+
+#[test]
+fn a_range_spanning_the_whole_usize_space_is_rejected_without_counting() {
+    let foreach = ForeachSpec {
+        range: Some(format!("0-{}", usize::MAX)),
+        ..Default::default()
+    };
+    let err = foreach.validate("huge").unwrap_err().to_string();
+    assert!(err.contains("more items than this platform can count"), "{err}");
+}
+
+#[test]
+fn a_range_that_exactly_fills_max_items_is_accepted() {
+    let foreach = ForeachSpec {
+        range: Some("1-1000".to_string()),
+        ..Default::default()
+    };
+    assert!(foreach.validate("count").is_ok());
+    assert_eq!(foreach.resolve_items(&PathBuf::from(".")).unwrap().len(), 1000);
 }

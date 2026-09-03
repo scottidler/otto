@@ -356,10 +356,6 @@ fn test_value_display() {
         Value::List(vec!["a".to_string(), "b".to_string()]).to_string(),
         "Value::List([a, b])"
     );
-
-    let mut dict = HashMap::new();
-    dict.insert("key".to_string(), "value".to_string());
-    assert_eq!(Value::Dict(dict).to_string(), "Value::Dict({key: value})");
 }
 
 /// `nargs: "0:5"` used to panic (`attempt to subtract with overflow` at
@@ -407,10 +403,13 @@ fn nargs_empty_string_is_rejected() {
     assert!(err.contains("invalid count"), "{err}");
 }
 
+/// `Range` stores the counts the ottofile wrote, unshifted: `"2:5"` is
+/// `Range(2, 5)`. It used to store `min - 1`, so every reader (the serializer,
+/// `Display`, `nargs_to_num_args`) had to add one back.
 #[test]
 fn nargs_valid_range_still_parses() {
     let nargs: Nargs = serde_yaml::from_str("\"2:5\"").unwrap();
-    assert_eq!(nargs, Nargs::Range(1, 5));
+    assert_eq!(nargs, Nargs::Range(2, 5));
 }
 
 #[test]
@@ -421,7 +420,7 @@ fn test_nargs_roundtrip_all_variants() {
         Nargs::OneOrZero,
         Nargs::OneOrMore,
         Nargs::ZeroOrMore,
-        Nargs::Range(0, 3),
+        Nargs::Range(3, 3),
         Nargs::Range(2, 5),
     ];
     for nargs in cases {
@@ -565,4 +564,23 @@ fn resolve_choices_command_zero_lines_is_an_error_unlike_foreach() {
     assert!(err.contains("switch"), "{err}");
     assert!(err.contains("svc"), "{err}");
     assert!(err.contains("no values"), "{err}");
+}
+
+/// A bare integer means exactly N, which is what it means to clap
+/// (`num_args(N)`) and to argparse (`nargs=N`). It used to deserialize to
+/// `Range(0, N)`, which every reader then interpreted as 1..=N.
+#[test]
+fn a_bare_nargs_count_means_exactly_that_many() {
+    let nargs: Nargs = serde_yaml::from_str("\"3\"").unwrap();
+    assert_eq!(nargs, Nargs::Range(3, 3));
+    assert_eq!(serde_yaml::to_string(&nargs).unwrap().trim(), "'3'");
+    assert_eq!(nargs.to_string(), "Nargs::Range[3, 3]");
+}
+
+/// A bounded zero-to-N is not expressible and says so: `"0:N"` stays rejected,
+/// and `?`/`*` are the spellings for the zero-capable cases.
+#[test]
+fn a_zero_bounded_span_is_still_rejected() {
+    let err = serde_yaml::from_str::<Nargs>("\"0:5\"").unwrap_err().to_string();
+    assert!(err.contains("min must be at least 1"), "{err}");
 }

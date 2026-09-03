@@ -232,15 +232,18 @@ mod jobs_range_tests {
         for n in [1usize, 2, 64] {
             let yaml = format!("otto:\n  jobs: {n}\ntasks:\n  build:\n    bash: true\n");
             let spec: ConfigSpec = serde_yaml::from_str(&yaml).expect("positive jobs must load");
-            assert_eq!(spec.otto.jobs, n);
+            assert_eq!(spec.otto.jobs, Some(n));
         }
     }
 
-    /// Omitting the key must not trip the guard.
+    /// Omitting the key must not trip the guard, and must stay `None` rather
+    /// than being pre-filled with the host's CPU count: the CLI owns that
+    /// default, and `None` is what makes "the ottofile never wrote `jobs`"
+    /// representable on the way back out.
     #[test]
-    fn an_absent_jobs_key_defaults_without_error() {
+    fn an_absent_jobs_key_stays_none_without_error() {
         let spec: ConfigSpec =
             serde_yaml::from_str("tasks:\n  build:\n    bash: true\n").expect("absent jobs must load");
-        assert!(spec.otto.jobs >= 1, "default job count must be at least 1");
+        assert_eq!(spec.otto.jobs, None, "an absent jobs key must not invent a count");
     }
 }

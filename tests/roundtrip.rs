@@ -29,6 +29,94 @@ otto:
     );
 }
 
+/// `otto.jobs` used to be a `usize` pre-filled with the host's CPU count and
+/// skipped on serialize while it still equalled that count, so this config
+/// round-tripped on a 4-core host only because `jobs: 4` was dropped on the way
+/// out and re-defaulted to 4 on the way back in. As an `Option`, a written key
+/// is a written key on every host.
+#[test]
+fn jobs_equal_to_the_host_cpu_count_survives_the_round_trip() {
+    let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let yaml = format!("otto:\n  jobs: {cpus}\n");
+    assert_roundtrips(&yaml);
+
+    let config: ConfigSpec = serde_yaml::from_str(&yaml).expect("parse");
+    let emitted = serde_yaml::to_string(&config).expect("serialize");
+
+    assert!(
+        emitted.contains(&format!("jobs: {cpus}")),
+        "the host's own CPU count must not be dropped;\ngot:\n{emitted}"
+    );
+}
+
+/// A config that never wrote `jobs:` must not gain one: the CPU-count default
+/// belongs to the CLI, not to the on-disk representation.
+#[test]
+fn an_absent_jobs_key_stays_absent_on_re_emit() {
+    let yaml = "tasks:\n  build:\n    bash: echo hi\n";
+
+    let config: ConfigSpec = serde_yaml::from_str(yaml).expect("parse");
+    let emitted = serde_yaml::to_string(&config).expect("serialize");
+
+    assert_eq!(emitted, yaml, "an absent jobs key must not be invented");
+}
+
+/// A bare `nargs: "N"` means exactly N and re-emits as the bare form it was
+/// written as. It used to deserialize to `Range(0, N)` and re-emit as `"1:N"`,
+/// so the spelling changed under the author on every re-emit.
+#[test]
+fn a_bare_nargs_count_round_trips_byte_identical() {
+    let yaml = "tasks:\n  build:\n    params:\n      --files:\n        nargs: '3'\n    bash: echo hi\n";
+
+    let config: ConfigSpec = serde_yaml::from_str(yaml).expect("parse");
+    let emitted = serde_yaml::to_string(&config).expect("serialize");
+
+    assert_eq!(emitted, yaml, "round-trip must be byte-identical");
+}
+
+/// A `min:max` span keeps the counts the author wrote rather than an
+/// internally offset `min`: `"2:5"` used to deserialize to `Range(1, 5)` and
+/// re-emit as `"2:5"` only because the serializer added the one back.
+#[test]
+fn an_nargs_span_re_emits_the_counts_that_were_written() {
+    let yaml = "tasks:\n  build:\n    params:\n      --files:\n        nargs: '2:5'\n    bash: echo hi\n";
+    assert_roundtrips(yaml);
+
+    let config: ConfigSpec = serde_yaml::from_str(yaml).expect("parse");
+    let emitted = serde_yaml::to_string(&config).expect("serialize");
+
+    assert!(emitted.contains("nargs: 2:5"), "got:\n{emitted}");
+    assert!(!emitted.contains("1:5"), "got:\n{emitted}");
+}
+
+/// A minimal `foreach:` used to emit seven keys its ottofile never wrote
+/// (`glob: null`, `range: null`, `command: null`, `as: item`, `parallel:
+/// true`, `max_items: 1000`, `buffer: false`). `ForeachSpec` now skips its
+/// defaults the way `ParamSpec` does.
+#[test]
+fn a_minimal_foreach_round_trips_without_gaining_keys() {
+    let yaml = "tasks:\n  up:\n    foreach:\n      items:\n      - a\n    bash: echo hi\n";
+
+    let config: ConfigSpec = serde_yaml::from_str(yaml).expect("parse");
+    let emitted = serde_yaml::to_string(&config).expect("serialize");
+
+    assert_eq!(emitted, yaml, "round-trip must be byte-identical");
+    for noise in [
+        "glob:",
+        "range:",
+        "command:",
+        "as:",
+        "parallel:",
+        "max_items:",
+        "buffer:",
+    ] {
+        assert!(
+            !emitted.contains(noise),
+            "serialized form must not contain {noise:?};\ngot:\n{emitted}"
+        );
+    }
+}
+
 #[test]
 fn config_with_tasks_no_params_roundtrips() {
     assert_roundtrips(
