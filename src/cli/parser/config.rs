@@ -20,10 +20,10 @@ impl Parser {
 
     fn divine_ottofile(source: crate::cli::parser::OttofileSource) -> Result<Option<PathBuf>> {
         let value = source.as_start_path();
-        // Both failures name the path. `otto -o /nope/nothere.yml` used to fail
-        // with a bare "No such file or directory (os error 2)", which says
-        // nothing about which file otto was looking for.
-        let expanded = expanduser(value).wrap_err_with(|| format!("could not expand ottofile path '{source}'"))?;
+        // `otto -o /nope/nothere.yml` used to fail with a bare "No such file or
+        // directory (os error 2)", which says nothing about which file otto
+        // was looking for.
+        let expanded = crate::executor::layout::expand_tilde(value);
         let path = fs::canonicalize(&expanded)
             .wrap_err_with(|| format!("ottofile path '{}' does not exist", expanded.display()))?;
         if path.is_dir() {
@@ -34,9 +34,8 @@ impl Parser {
 
     fn load_config_from_path(ottofile_path: Option<PathBuf>) -> Result<(ConfigSpec, String, Option<PathBuf>)> {
         if let Some(ottofile) = ottofile_path {
-            // Named, for the same reason `divine_ottofile` names its two
-            // failures: the not-exists branch already said which file it was
-            // looking for, while an unreadable one failed with a bare
+            // Named, for the same reason `divine_ottofile` names its
+            // not-exists failure: an unreadable file used to fail with a bare
             // "Permission denied (os error 13)" and no path at all.
             let content = fs::read_to_string(&ottofile)
                 .wrap_err_with(|| format!("could not read ottofile '{}'", ottofile.display()))?;

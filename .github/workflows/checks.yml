@@ -131,8 +131,10 @@ jobs:
   # (see the note on `otto quick` above). Running `cov` directly gets the gate
   # without the unusable dependency: `cov` instruments and runs the suite, its
   # own `after: [cov-report]` chains the threshold check, and `cov-report`
-  # exits 1 when line coverage is under `--fail-under`'s committed default
-  # (`.otto.yml`, currently 85). This job is what makes the floor real: before
+  # exits 1 when line coverage is under `cov-report`'s `--fail-under` default
+  # (`.otto.yml`; see that task's own comment for the current number, rather
+  # than duplicating a value here that will drift again). This job is what
+  # makes the floor real: before
   # it existed, the committed floor only ever ran on a developer's machine.
   #
   # Its own job rather than a step in `checks` so a coverage failure and a

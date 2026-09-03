@@ -57,7 +57,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["--ottofile", "examples/ex1/"],
+            "args": ["--ottofile", "examples/hello-world/"],
             "cwd": "${workspaceFolder}"
         },
         {
@@ -75,7 +75,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["--ottofile", "examples/ex1/", "hello", "-g", "howdy"],
+            "args": ["--ottofile", "examples/hello-world/", "hello", "-g", "howdy"],
             "cwd": "${workspaceFolder}"
         },
         {
@@ -93,7 +93,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["--ottofile", "examples/ex1/", "hello", "-g", "howdy", "world", "-n", "earth"],
+            "args": ["--ottofile", "examples/hello-world/", "hello", "-g", "howdy", "world", "-n", "earth"],
             "cwd": "${workspaceFolder}"
         },
         {

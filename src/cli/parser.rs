@@ -14,7 +14,6 @@ use crate::executor::task::TaskEdge;
 
 use clap::{Arg, ArgMatches, Command, value_parser};
 use daggy::Dag;
-use expanduser::expanduser;
 use eyre::{Context, Result, eyre};
 use glob;
 use hex;
@@ -115,7 +114,14 @@ pub fn is_valid_ottofile_name(filename: &str) -> bool {
     OTTOFILES.contains(&filename)
 }
 
-static DEFAULT_JOBS: LazyLock<String> = LazyLock::new(|| num_cpus::get().to_string());
+/// Number of CPUs to default `--jobs` to. `available_parallelism()` returns an
+/// `io::Result` because the count is genuinely unknowable on some platforms;
+/// 1 is the same conservative fallback the crate this replaced used.
+fn default_jobs() -> usize {
+    std::thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1)
+}
+
+static DEFAULT_JOBS: LazyLock<String> = LazyLock::new(|| default_jobs().to_string());
 
 /// Largest edit distance at which an unknown task name is worth suggesting a
 /// replacement for. Beyond this the "did you mean" is noise, not help.
@@ -726,7 +732,7 @@ impl Parser {
             args,
             pargs: Vec::new(),
             ottofile: None,
-            jobs: num_cpus::get(), // Default to number of CPUs
+            jobs: default_jobs(),
             resolver: DynamicResolver::new(),
         })
     }
@@ -889,7 +895,7 @@ impl Parser {
                                                 // and rendered `[0 items]` from
                                                 // a subdirectory.
                                                 ottofile: Some(path.clone()),
-                                                jobs: num_cpus::get(),
+                                                jobs: default_jobs(),
                                                 resolver: DynamicResolver::new(),
                                             };
                                             temp_parser.inject_builtin_commands();

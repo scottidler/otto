@@ -28,8 +28,5 @@ jobs:
           echo "Cache hit: ${{ steps.otto.outputs.cache-hit }}"
           otto --version
 
-      - name: Run otto dev task
-        run: otto dev
-
       - name: Show available tasks
         run: otto --help

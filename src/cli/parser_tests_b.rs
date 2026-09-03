@@ -881,7 +881,7 @@ tasks:
 /// of silently dropping flags from `--help` again.
 ///
 /// `{JOBS}` stands in for `-j/--jobs`'s default, which is `DEFAULT_JOBS`
-/// (`num_cpus::get()` on the machine that renders the help text, not a
+/// (`default_jobs()` on the machine that renders the help text, not a
 /// fixed number). A literal `32` here pinned this test to the developing
 /// machine's core count: green locally, red on any runner with a
 /// different core count (`docs/design/2026-06-10-code-review-remediation.md`
@@ -986,8 +986,8 @@ fn test_help_global_flags_no_drift() {
 fn test_expected_global_options_help_substitutes_actual_jobs_default() {
     let expected = expected_global_options_help();
     assert!(
-        expected.contains(&format!("[default: {}]", num_cpus::get())),
-        "expected help must reflect this machine's num_cpus::get(), got: {expected}"
+        expected.contains(&format!("[default: {}]", default_jobs())),
+        "expected help must reflect this machine's default_jobs(), got: {expected}"
     );
     assert!(
         !expected.contains("{JOBS}"),
@@ -1057,24 +1057,16 @@ fn test_load_config_reports_the_api_error_before_the_parse_error() {
 // divine_ottofile rejection table (design doc 2026-06-10, Phase 11)
 // =========================================================================
 
-/// `divine_ottofile`'s two distinct ways to fail, table-driven so both stay
-/// named and neither regresses to a bare OS error. Both wrap the underlying
-/// cause (`fs::canonicalize`'s io::Error, `expanduser`'s io::Error) rather
-/// than let it surface unexplained, per `divine_ottofile`'s own doc comment
-/// ("`otto -o /nope/nothere.yml` used to fail with a bare 'No such file or
-/// directory'").
+/// `divine_ottofile`'s not-exists failure, which wraps the underlying
+/// `fs::canonicalize` `io::Error` rather than let it surface unexplained, per
+/// `divine_ottofile`'s own doc comment ("`otto -o /nope/nothere.yml` used to
+/// fail with a bare 'No such file or directory'").
 #[test]
 fn divine_ottofile_rejection_table() {
-    let cases: &[(&str, &str)] = &[
-        (
-            "/nope/nothere-08e3e0.yml",
-            "ottofile path '/nope/nothere-08e3e0.yml' does not exist",
-        ),
-        (
-            "~otto-phase11-nonexistent-user/otto.yml",
-            "could not expand ottofile path",
-        ),
-    ];
+    let cases: &[(&str, &str)] = &[(
+        "/nope/nothere-08e3e0.yml",
+        "ottofile path '/nope/nothere-08e3e0.yml' does not exist",
+    )];
 
     for (input, expected_substring) in cases {
         let err = Parser::divine_ottofile(OttofileSource::Explicit(input.to_string()))
@@ -1087,10 +1079,33 @@ fn divine_ottofile_rejection_table() {
     }
 }
 
+/// `~user` (someone else's home) is no longer specially expanded: Phase 14
+/// dropped `expanduser` (and the `pwd`/`redox_users` it pulled in for exactly
+/// this lookup) for `expand_tilde()`, which only understands a bare `~` or
+/// `~/...` on `std::env::home_dir()`. A `~user` path now passes through
+/// unexpanded and fails the same "does not exist" way any other nonexistent
+/// relative path does, rather than the old "could not expand" branch.
+#[test]
+fn a_tilde_user_path_is_no_longer_expanded_it_just_fails_to_exist() {
+    let err = Parser::divine_ottofile(OttofileSource::Explicit(
+        "~otto-phase14-nonexistent-user/otto.yml".to_string(),
+    ))
+    .expect_err("a path under an unresolvable ~user must still be rejected")
+    .to_string();
+    assert!(
+        err.contains("does not exist"),
+        "expected the not-exists branch now that ~user is unexpanded, got: {err}"
+    );
+    assert!(
+        !err.contains("could not expand"),
+        "expand_tilde no longer fails for ~user; it passes it through unexpanded, got: {err}"
+    );
+}
+
 /// An ottofile that exists but cannot be read names itself too.
 ///
-/// `divine_ottofile` covers the not-exists and cannot-expand paths; this is
-/// the third, and it used to be the one that got nothing. `fs::canonicalize`
+/// `divine_ottofile` covers the not-exists path; this is the second, and it
+/// used to be the one that got nothing. `fs::canonicalize`
 /// succeeds on an unreadable file, so the failure landed on the later
 /// `fs::read_to_string`, which had no context: the user saw a bare
 /// "Permission denied (os error 13)" with no path.

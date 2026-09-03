@@ -679,8 +679,8 @@ fn test_task_to_command_boolean_flags_only() {
 
 #[test]
 fn test_default_jobs_value() {
-    // Test that DEFAULT_JOBS equals num_cpus::get()
-    let expected = num_cpus::get().to_string();
+    // Test that DEFAULT_JOBS equals default_jobs()
+    let expected = default_jobs().to_string();
     assert_eq!(DEFAULT_JOBS.as_str(), expected);
 }
 
@@ -719,7 +719,7 @@ fn test_jobs_parameter_default() {
     let ottofile_path = temp_dir.path().join("otto.yml");
     fs::write(&ottofile_path, "tasks:\n  test:\n    action: echo test\n").unwrap();
 
-    // Test without explicit jobs value (should default to num_cpus::get())
+    // Test without explicit jobs value (should default to default_jobs())
     let args = vec![
         "otto".to_string(),
         "--ottofile".to_string(),
@@ -731,11 +731,11 @@ fn test_jobs_parameter_default() {
     let result = parser.parse();
     assert!(result.is_ok());
     let (_, _, _, jobs, _, _) = result.unwrap().into_run().unwrap().into_parts();
-    assert_eq!(jobs, num_cpus::get());
+    assert_eq!(jobs, default_jobs());
 }
 
 /// Inverted deliberately: this test used to assert that `-j invalid`
-/// silently fell back to `num_cpus::get()`. A concurrency limit the operator
+/// silently fell back to `default_jobs()`. A concurrency limit the operator
 /// typed and otto ignored is exactly the class of silent success this phase
 /// closes, so the value parser now rejects it.
 #[test]

@@ -1,6 +1,5 @@
-use crate::executor::layout::{resolve_otto_home, run_dir_name, run_root};
+use crate::executor::layout::{expand_tilde, resolve_otto_home, run_dir_name, run_root};
 use crate::ports::{FileSystem, RealFs, StateStore, record_blocking};
-use expanduser::expanduser;
 use eyre::{Result, eyre};
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -112,7 +111,7 @@ impl Workspace {
 impl<F: FileSystem> Workspace<F> {
     /// Create a new Workspace with a custom filesystem implementation
     pub async fn new_with_fs(root: PathBuf, fs: Arc<F>) -> Result<Self> {
-        let root = expanduser(root.to_string_lossy())?;
+        let root = expand_tilde(&root);
 
         // Get canonical project root, creating parent dirs if needed
         let root = if !root.exists() {

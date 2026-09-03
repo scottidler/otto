@@ -29,9 +29,9 @@ pub fn resolve_otto_home() -> Result<PathBuf> {
 
 /// XDG data dir, honoring `$XDG_DATA_HOME` and falling back to `$HOME/.local/share`.
 ///
-/// Not `dirs::data_local_dir()`: that honors `$XDG_DATA_HOME` on Linux only and
-/// returns `~/Library/Application Support` on macOS, so otto's logs landed
-/// somewhere its own `--help` never mentions.
+/// Not a cross-platform data-dir crate: that would honor `$XDG_DATA_HOME` on
+/// Linux only and return `~/Library/Application Support` on macOS, so otto's
+/// logs landed somewhere its own `--help` never mentions.
 pub fn xdg_data_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
         let path = PathBuf::from(dir);
@@ -39,7 +39,25 @@ pub fn xdg_data_dir() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    dirs::home_dir().map(|h| h.join(".local").join("share"))
+    std::env::home_dir().map(|h| h.join(".local").join("share"))
+}
+
+/// Expands a leading `~` (bare, or followed by `/...`) to the current user's
+/// home directory. Any other path, including `~user` (someone else's home),
+/// passes through unchanged: otto never resolves another user's home, so
+/// supporting it would mean carrying a `/etc/passwd` lookup crate for a case
+/// that never fires. A path that can't be expanded (no home directory found)
+/// also passes through unchanged, deferring the failure to whatever tries to
+/// use the path next.
+pub fn expand_tilde(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    match path.strip_prefix("~") {
+        Ok(rest) => match std::env::home_dir() {
+            Some(home) => home.join(rest),
+            None => path.to_path_buf(),
+        },
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 /// Where otto writes `otto.log`: `<xdg-data>/otto/logs`.

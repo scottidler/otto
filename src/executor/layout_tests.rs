@@ -83,3 +83,32 @@ fn xdg_data_dir_honors_the_env_and_falls_back() {
         None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
     }
 }
+
+#[test]
+#[serial]
+fn expand_tilde_expands_bare_and_prefixed_forms() {
+    // SAFETY: serialized against every other env-mutating test in the crate.
+    let prior = std::env::var("HOME").ok();
+    unsafe { std::env::set_var("HOME", "/home/probe") };
+
+    assert_eq!(expand_tilde("~"), PathBuf::from("/home/probe"));
+    assert_eq!(expand_tilde("~/otto.yml"), PathBuf::from("/home/probe/otto.yml"));
+
+    match prior {
+        Some(v) => unsafe { std::env::set_var("HOME", v) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+}
+
+#[test]
+fn expand_tilde_leaves_non_tilde_and_other_user_paths_alone() {
+    // No leading `~` at all: passed straight through.
+    assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
+    assert_eq!(expand_tilde("relative/path"), PathBuf::from("relative/path"));
+    // `~user` is someone else's home, which otto never resolves; it is not a
+    // bare `~` component so `strip_prefix` rejects it and it passes through.
+    assert_eq!(
+        expand_tilde("~otheruser/otto.yml"),
+        PathBuf::from("~otheruser/otto.yml")
+    );
+}

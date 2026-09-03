@@ -59,11 +59,6 @@ jobs:
       - name: Mark workspace as safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Set GIT_DESCRIBE environment variable
-        run: |
-          GIT_DESCRIBE=$(git describe --tags --dirty --always)
-          echo "GIT_DESCRIBE=$GIT_DESCRIBE" >> $GITHUB_ENV
-
       - name: Set up Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ env.RUST_VERSION }}
@@ -116,11 +111,6 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-
-      - name: Set GIT_DESCRIBE environment variable
-        run: |
-          GIT_DESCRIBE=$(git describe --tags --dirty --always)
-          echo "GIT_DESCRIBE=$GIT_DESCRIBE" >> $GITHUB_ENV
 
       - name: Set up Rust
         run: |

@@ -1110,7 +1110,7 @@ impl UpgradeCommand {
 
     fn get_backup_dir(&self) -> Result<PathBuf> {
         if let Some(ref dir) = self.backup_dir {
-            return Ok(expanduser::expanduser(dir.to_string_lossy().as_ref())?);
+            return Ok(crate::executor::layout::expand_tilde(dir));
         }
 
         // `$OTTO_HOME` moves every other piece of otto's state - run
