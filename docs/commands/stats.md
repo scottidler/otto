@@ -1,248 +1,169 @@
 # `otto Stats` - Execution Statistics
 
-The `Stats` command provides aggregate metrics and analytics about Otto executions, helping you understand performance trends, success rates, and resource utilization.
+The `Stats` command reports aggregate metrics across all runs, or (with a task name) per-task metrics.
 
 > **Note**: Built-in commands are capitalized (e.g., `Stats`, `Clean`) to avoid namespace conflicts with user-defined tasks.
+
+Regenerated from `otto Stats --help` and a scratch run's `otto Stats --json`; every example below is observed output.
 
 ## Usage
 
 ```bash
-otto Stats [OPTIONS]
+otto Stats [OPTIONS] [TASK]
 ```
 
 ## Options
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--task <NAME>` | Show statistics for specific task | overall stats |
-| `--json` | Output in JSON format | false |
+```
+$ otto Stats --help
+Show execution statistics
+
+Usage: Stats [OPTIONS] [TASK]
+
+Arguments:
+  [TASK]  Show stats for a specific task
+
+Options:
+  -n, --limit <LIMIT>  Limit number of tasks shown (when showing all tasks) [default: 10]
+      --json           Output as JSON
+  -h, --help           Print help
+```
+
+There is no dedicated task-selection flag: the task name is a bare positional argument. `-n/--limit` only affects the "Top N Tasks" table below overall stats — it does not limit the run count `otto History` uses `-n` for.
 
 ## Examples
 
-### Overall Statistics
-
 ```bash
-# System-wide statistics
 otto Stats
-```
-
-**Output:**
-```
-Overall Statistics
-──────────────────────────────────────
-Total Runs:              247
-Successful:              234 (94.7%)
-Failed:                  13 (5.3%)
-Running:                 0 (0.0%)
-Total Tasks:             1,482
-Total Disk Usage:        12.3 GB
-Total Duration:          3h 42m 15s
-Average Run Duration:    54.2s
-```
-
-### Task-Specific Statistics
-
-```bash
-# Statistics for a specific task
-otto Stats --task build
-```
-
-**Output:**
-```
-Task Statistics: build
-──────────────────────────────────────
-Total Executions:        247
-Successful:              240 (97.2%)
-Failed:                  7 (2.8%)
-Skipped:                 0 (0.0%)
-Average Duration:        8.5s
-Min Duration:            3.2s
-Max Duration:            45.7s
-Total Time:              35m 4s
-```
-
-### JSON Output
-
-```bash
-# Export statistics as JSON
 otto Stats --json
-
-# Task-specific JSON
-otto Stats --task test --json
+otto Stats hello
+otto Stats hello --json
+otto Stats -n 20
 ```
 
 ## Output Format
 
-### Overall Statistics
+### Overall statistics (no `[TASK]`)
 
-Provides system-wide metrics across all projects and tasks:
+```
+Overall Statistics
+╭──────────────────────┬───────────╮
+│ Metric               ┆     Value │
+╞══════════════════════╪═══════════╡
+│ Total Runs           ┆         2 │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ Successful           ┆ 1 (50.0%) │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ Failed               ┆         1 │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ Running              ┆         0 │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ Total Tasks Executed ┆         2 │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ Total Disk Usage     ┆   20.7 KB │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ Total Execution Time ┆       0ms │
+╰──────────────────────┴───────────╯
 
-| Metric | Description |
-|--------|-------------|
-| **Total Runs** | Number of Otto executions recorded |
-| **Successful** | Runs that completed successfully (percentage) |
-| **Failed** | Runs that failed (percentage) |
-| **Running** | Currently executing runs (percentage) |
-| **Total Tasks** | Aggregate number of task executions |
-| **Total Disk Usage** | Combined size of all run artifacts |
-| **Total Duration** | Cumulative execution time |
-| **Average Run Duration** | Mean time per run |
+Top 10 Tasks by Execution Count
+╭─────────┬───────┬───────┬─────────┬────────┬──────────────┬──────────────╮
+│ Project ┆ Task  ┆ Total ┆ Success ┆ Failed ┆ Success Rate ┆ Avg Duration │
+╞═════════╪═══════╪═══════╪═════════╪════════╪══════════════╪══════════════╡
+│ proj    ┆ fail  ┆     1 ┆       0 ┆      1 ┆         0.0% ┆          0ms │
+├╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ proj    ┆ hello ┆     1 ┆       1 ┆      0 ┆       100.0% ┆          0ms │
+╰─────────┴───────┴───────┴─────────┴────────┴──────────────┴──────────────╯
+```
 
-### Task Statistics
+There is no "Average Run Duration" row — "Total Execution Time" is the last row of the first table, and it is a sum, not a mean. The Top-N table is only printed when there is at least one task stats row; `-n`/`--limit` caps how many rows it shows (10 by default), heading text included ("Top 10 Tasks by Execution Count").
 
-Detailed metrics for a specific task:
+### Task-specific statistics
 
-| Metric | Description |
-|--------|-------------|
-| **Total Executions** | Times this task has run |
-| **Successful** | Successful completions (percentage) |
-| **Failed** | Failed executions (percentage) |
-| **Skipped** | Times task was skipped (percentage) |
-| **Average Duration** | Mean execution time |
-| **Min Duration** | Fastest execution |
-| **Max Duration** | Slowest execution |
-| **Total Time** | Cumulative time spent on this task |
+`otto Stats hello`, single project:
+
+```
+Statistics for task 'hello'
+╭──────────────────┬─────────────────────╮
+│ Metric           ┆               Value │
+╞══════════════════╪═════════════════════╡
+│ Project          ┆                proj │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ Total Executions ┆                   1 │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ Successful       ┆          1 (100.0%) │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ Failed           ┆                   0 │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ Skipped          ┆                   0 │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ Average Duration ┆                 0ms │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ Min Duration     ┆                 0ms │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ Max Duration     ┆                 0ms │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ Last Executed    ┆ 2026-09-03 05:23:53 │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ Last Status      ┆         ✓ Completed │
+╰──────────────────┴─────────────────────╯
+```
+
+A task that has run under more than one project instead gets a per-project table: columns `Project, Total, Success, Failed, Success Rate, Avg Duration` — no `--limit` applies here.
 
 ## JSON Output Schema
 
-### Overall Stats
+### Overall stats (`otto Stats --json`)
 
 ```json
 {
-  "total_runs": 247,
-  "successful_runs": 234,
-  "failed_runs": 13,
+  "total_runs": 2,
+  "successful_runs": 1,
+  "failed_runs": 1,
   "running_runs": 0,
-  "total_tasks": 1482,
-  "total_disk_usage": 13194142720,
-  "total_duration_seconds": 13335.6,
-  "successful_executions": 1469,
-  "failed_executions": 13,
-  "skipped_executions": 0
+  "total_tasks": 2,
+  "total_disk_usage": 21162,
+  "total_duration_seconds": 0.0
 }
 ```
 
-### Task Stats
+There are no `successful_executions`/`failed_executions`/`skipped_executions` keys here — those only exist in the per-task array below.
+
+### Task stats (`otto Stats <task> --json`)
+
+This is always a JSON **array**, one entry per project the task has run under, even when there is exactly one:
 
 ```json
-{
-  "task_name": "build",
-  "total_executions": 247,
-  "successful_executions": 240,
-  "failed_executions": 7,
-  "skipped_executions": 0,
-  "avg_duration_seconds": 8.5,
-  "min_duration_seconds": 3.2,
-  "max_duration_seconds": 45.7,
-  "total_duration_seconds": 2104.3
-}
+[
+  {
+    "project_id": 1,
+    "project_hash": "94a760b8",
+    "project_name": "proj",
+    "task_name": "hello",
+    "total_executions": 1,
+    "successful_executions": 1,
+    "failed_executions": 0,
+    "skipped_executions": 0,
+    "avg_duration_seconds": 0.0,
+    "min_duration_seconds": 0.0,
+    "max_duration_seconds": 0.0,
+    "last_executed": 1788438233,
+    "last_status": "Completed"
+  }
+]
 ```
 
-## Use Cases
-
-### Performance Monitoring
-
-Track system performance over time:
-
-```bash
-# Get baseline metrics
-otto Stats --json > baseline.json
-
-# Later, compare
-otto Stats --json > current.json
-diff <(jq . baseline.json) <(jq . current.json)
-```
-
-### Reliability Tracking
-
-Monitor success rates:
-
-```bash
-# Overall reliability
-otto Stats | grep "Successful"
-
-# Per-task reliability
-otto Stats --task ci | grep "Successful"
-```
-
-### Resource Planning
-
-Understand resource requirements:
-
-```bash
-# Check disk usage trends
-otto Stats --json | jq '.total_disk_usage / 1024 / 1024 / 1024 | floor'
-
-# Average execution time
-otto Stats --json | jq '.total_duration_seconds / .total_runs'
-```
-
-### Identifying Slow Tasks
-
-Find tasks that need optimization:
-
-```bash
-# Get all task stats and sort by duration
-for task in $(otto --help | grep -A100 "Commands:" | tail -n+2 | awk '{print $1}'); do
-  echo "$task: $(otto Stats --task $task --json 2>/dev/null | jq -r '.avg_duration_seconds // 0')"
-done | sort -t: -k2 -rn | head -10
-```
-
-### Capacity Planning
-
-Estimate future resource needs:
-
-```bash
-# Disk usage per run
-otto Stats --json | jq '.total_disk_usage / .total_runs / 1024 / 1024 | floor'
-
-# Runs per day
-otto History --json | jq 'group_by(.timestamp / 86400 | floor) | map(length) | add / length'
-```
-
-## Metrics Explained
-
-### Success Rate
-
-Percentage of runs/tasks that completed without errors:
-- **90-100%**: Excellent reliability
-- **75-89%**: Good, but investigate failures
-- **Below 75%**: Requires attention
-
-### Average Duration
-
-Mean execution time helps identify:
-- Performance regressions (increasing over time)
-- Optimization opportunities (outliers)
-- Capacity planning needs
-
-### Disk Usage
-
-Total space consumed by Otto artifacts:
-- Run directories (`~/.otto/otto-*/`)
-- Task outputs, logs, and caches
-- Use `otto Clean` to manage
+`last_status` uses the task-status vocabulary (`Pending`/`Running`/`Completed`/`Failed`/`Skipped`), not the run-status one.
 
 ## Notes
 
-- **Database Requirement**: Requires SQLite integration (Phase 2+)
-- **Historical Data**: Statistics include all recorded runs since database initialization
-- **Real-time**: Reflects current state; running tasks counted separately
-- **Accuracy**: Based on recorded metadata; ensure runs complete properly for accurate stats
+- **Database requirement**: same as `History` — needs `$OTTO_HOME/otto.db`. Missing database prints `No statistics database found. Run otto to create it.` to stderr and exits 0.
+- **`-n`/`--limit` scope**: it caps the Top-N table under the overall-stats view only; it has no effect on `otto Stats <task>`.
 
 ## Related Commands
 
-- [`otto History`](history.md) - View detailed execution history
+- [`otto History`](history.md) - Detailed execution history
 - [`otto Clean`](clean.md) - Manage disk usage
-- [`otto Graph`](graph.md) - Visualize dependencies
-
-## Performance Considerations
-
-- Statistics queries are optimized with database indexes
-- Typical query time: <50ms for 10,000+ runs
-- Large datasets (100k+ runs): May take a few seconds
 
 ## See Also
 
 - [Architecture: SQLite Integration](../architecture/sqlite-integration.md)
-- [Migration Guide](../migration-guide.md)
