@@ -279,100 +279,6 @@ async fn test_read_ottofile_path_malformed_yaml() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_format_timestamp() -> Result<()> {
-    let cmd = CleanCommand {
-        keep_days: 30,
-        keep_last: None,
-        keep_failed: None,
-        dry_run: true,
-        project_filter: None,
-        no_db: true,
-        quiet: false,
-    };
-
-    // Test a known timestamp
-    let timestamp = 1609459200; // 2021-01-01 00:00:00 UTC
-    let formatted = cmd.format_timestamp(timestamp);
-
-    assert_eq!(formatted, "2021-01-01 00:00:00");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_format_size_bytes() -> Result<()> {
-    let cmd = CleanCommand {
-        keep_days: 30,
-        keep_last: None,
-        keep_failed: None,
-        dry_run: true,
-        project_filter: None,
-        no_db: true,
-        quiet: false,
-    };
-
-    assert_eq!(cmd.format_size(0), "0 B");
-    assert_eq!(cmd.format_size(512), "512 B");
-    assert_eq!(cmd.format_size(1023), "1023 B");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_format_size_kilobytes() -> Result<()> {
-    let cmd = CleanCommand {
-        keep_days: 30,
-        keep_last: None,
-        keep_failed: None,
-        dry_run: true,
-        project_filter: None,
-        no_db: true,
-        quiet: false,
-    };
-
-    assert_eq!(cmd.format_size(1024), "1.0 KB");
-    assert_eq!(cmd.format_size(2048), "2.0 KB");
-    assert_eq!(cmd.format_size(1536), "1.5 KB");
-    assert_eq!(cmd.format_size(100 * 1024), "100.0 KB");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_format_size_megabytes() -> Result<()> {
-    let cmd = CleanCommand {
-        keep_days: 30,
-        keep_last: None,
-        keep_failed: None,
-        dry_run: true,
-        project_filter: None,
-        no_db: true,
-        quiet: false,
-    };
-
-    assert_eq!(cmd.format_size(1024 * 1024), "1.0 MB");
-    assert_eq!(cmd.format_size(5 * 1024 * 1024), "5.0 MB");
-    assert_eq!(cmd.format_size(1536 * 1024), "1.5 MB");
-    assert_eq!(cmd.format_size(100 * 1024 * 1024), "100.0 MB");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_format_size_gigabytes() -> Result<()> {
-    let cmd = CleanCommand {
-        keep_days: 30,
-        keep_last: None,
-        keep_failed: None,
-        dry_run: true,
-        project_filter: None,
-        no_db: true,
-        quiet: false,
-    };
-
-    assert_eq!(cmd.format_size(1024 * 1024 * 1024), "1.0 GB");
-    assert_eq!(cmd.format_size(5 * 1024 * 1024 * 1024), "5.0 GB");
-    assert_eq!(cmd.format_size(1536 * 1024 * 1024), "1.5 GB");
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_runs_sorted_by_timestamp() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
@@ -962,5 +868,71 @@ async fn test_get_otto_home_honors_otto_home_env() -> Result<()> {
     }
 
     assert_eq!(resolved?, temp_dir.path());
+    Ok(())
+}
+
+/// Phase 7 success criterion: a DB-path `Clean` with one refused directory
+/// exits non-zero. `MemoryStateStore` never refuses a delete (it has no
+/// filesystem to protect), so this drives the real `StateManager`, whose
+/// `delete_run` calls `ensure_deletable_under_root` and returns `Err` for a
+/// run directory that has been replaced by a symlink - the same defect
+/// `delete_run_never_deletes_through_a_symlinked_run_directory`
+/// (`manager_tests.rs`) covers one layer down. Before this phase,
+/// `execute_with_database` printed that `Err` to stderr and returned `Ok(())`
+/// anyway, so a script driving `Clean` could not see the refusal.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_db_path_clean_with_one_refused_directory_exits_non_zero() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let db_path = temp_dir.path().join("test.db");
+    let manager = StateManager::with_db_path(db_path)?;
+
+    let otto_home = temp_dir.path().join("otto-home");
+    let project = otto_home.join("widget-abc12345");
+    fs::create_dir_all(&project)?;
+
+    let victim = temp_dir.path().join("victim");
+    fs::create_dir_all(&victim)?;
+    fs::write(victim.join("precious.txt"), "keep me")?;
+    let run_dir = project.join("1000000000");
+    std::os::unix::fs::symlink(&victim, &run_dir)?;
+
+    let metadata = RunMetadata::minimal(
+        Some(PathBuf::from("/test/otto.yml")),
+        "abc12345".to_string(),
+        1_000_000_000,
+    )
+    .with_run_dir(run_dir);
+    manager.record_run_start(&metadata)?;
+
+    let store: Arc<dyn StateStore> = Arc::new(manager);
+    let cmd = CleanCommand {
+        keep_days: 0,
+        keep_last: None,
+        keep_failed: None,
+        dry_run: false,
+        project_filter: None,
+        no_db: false,
+        quiet: true,
+    };
+
+    let previous = std::env::var("OTTO_HOME").ok();
+    unsafe {
+        std::env::set_var("OTTO_HOME", &otto_home);
+    }
+    let result = cmd.execute_with_store(Some(store)).await;
+    unsafe {
+        match &previous {
+            Some(home) => std::env::set_var("OTTO_HOME", home),
+            None => std::env::remove_var("OTTO_HOME"),
+        }
+    }
+
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("failed"), "{err}");
+    assert!(
+        victim.join("precious.txt").exists(),
+        "the symlink target must survive the refused delete"
+    );
     Ok(())
 }

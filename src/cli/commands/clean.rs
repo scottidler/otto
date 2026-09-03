@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use crate::cli::commands::format::{format_size, format_timestamp};
 use eyre::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,6 +53,24 @@ struct RunInfo {
 }
 
 impl CleanCommand {
+    /// Which retention rule actually decided the selection, in words.
+    ///
+    /// The messages used to say "older than N days" unconditionally, including
+    /// when `--keep-last` or `--keep-failed` was the rule that ran, and the
+    /// empty-result message said "no runs older than N days" when the scan had
+    /// returned every run regardless of age.
+    fn retention_description(&self) -> String {
+        let mut rules = Vec::new();
+        if let Some(keep_last) = self.keep_last {
+            rules.push(format!("keeping the {keep_last} newest"));
+        }
+        if let Some(keep_failed) = self.keep_failed {
+            rules.push(format!("keeping failed runs for {keep_failed} days"));
+        }
+        rules.push(format!("keeping everything for {} days", self.keep_days));
+        rules.join(", ")
+    }
+
     /// Print a message unless quiet mode is enabled.
     fn print(&self, msg: &str) {
         if !self.quiet {
@@ -114,13 +132,13 @@ impl CleanCommand {
         self.print(&format!(
             "\nFound {} runs to delete ({} total)",
             runs_to_delete.len(),
-            self.format_size(total_size)
+            format_size(total_size)
         ));
 
         if self.dry_run {
             self.print("\nDry run - showing what would be deleted:\n");
             for run in &runs_to_delete {
-                let date_time = self.format_timestamp(run.timestamp);
+                let date_time = format_timestamp(run.timestamp);
                 let ottofile_display = run
                     .ottofile_path
                     .as_ref()
@@ -136,7 +154,7 @@ impl CleanCommand {
                     date_time,
                     ottofile_display,
                     age_days,
-                    self.format_size(run.size_bytes.unwrap_or(0)),
+                    format_size(run.size_bytes.unwrap_or(0)),
                     run.status.as_str()
                 ));
             }
@@ -144,6 +162,8 @@ impl CleanCommand {
         } else {
             self.print("\nDeleting runs...\n");
             let mut deleted_size = 0u64;
+            let mut missing = 0usize;
+            let mut failed = 0usize;
 
             for run in &runs_to_delete {
                 // Whether there is actually a directory to reclaim, checked before
@@ -160,7 +180,7 @@ impl CleanCommand {
 
                 match store.delete_run(run.id, true) {
                     Ok(Some(_)) => {
-                        let date_time = self.format_timestamp(run.timestamp);
+                        let date_time = format_timestamp(run.timestamp);
                         let ottofile_display = run
                             .ottofile_path
                             .as_ref()
@@ -172,7 +192,7 @@ impl CleanCommand {
                                 "  Deleted {} - {} ({})",
                                 date_time,
                                 ottofile_display,
-                                self.format_size(run.size_bytes.unwrap_or(0))
+                                format_size(run.size_bytes.unwrap_or(0))
                             ));
                         } else {
                             self.print(&format!(
@@ -183,14 +203,26 @@ impl CleanCommand {
                     }
                     Ok(None) => {
                         eprintln!("  Warning: Run {} not found in database", run.timestamp);
+                        missing += 1;
                     }
                     Err(e) => {
                         eprintln!("  Error deleting run {}: {}", run.timestamp, e);
+                        failed += 1;
                     }
                 }
             }
 
-            self.print(&format!("\nDeleted {} total", self.format_size(deleted_size)));
+            self.print(&format!("\nDeleted {} total", format_size(deleted_size)));
+
+            // Counted and surfaced in the exit code, matching the filesystem
+            // path. This path used to print each failure and still return
+            // `Ok(())`, so a script driving `Clean` could not tell a clean
+            // sweep from one that left behind a run it was told to remove.
+            if missing > 0 || failed > 0 {
+                return Err(eyre::eyre!(
+                    "clean did not remove every run it selected: {missing} not found in the database, {failed} failed"
+                ));
+            }
         }
 
         Ok(())
@@ -204,7 +236,7 @@ impl CleanCommand {
         let all_runs = self.scan_runs(otto_home, now)?;
 
         if all_runs.is_empty() {
-            self.print(&format!("No runs older than {} days found", self.keep_days));
+            self.print(&format!("No runs found under {}", otto_home.display()));
             return Ok(());
         }
 
@@ -251,16 +283,16 @@ impl CleanCommand {
         let total_size = runs_to_delete.iter().map(|r| r.size_bytes).sum::<u64>();
 
         self.print(&format!(
-            "\nFound {} runs older than {} days ({} total)",
+            "\nFound {} runs to delete by {} ({} total)",
             runs_to_delete.len(),
-            self.keep_days,
-            self.format_size(total_size)
+            self.retention_description(),
+            format_size(total_size)
         ));
 
         if self.dry_run {
             self.print("\nDry run - showing what would be deleted:\n");
             for run in &runs_to_delete {
-                let date_time = self.format_timestamp(run.timestamp);
+                let date_time = format_timestamp(run.timestamp);
                 let ottofile_display = run
                     .ottofile_path
                     .as_ref()
@@ -272,7 +304,7 @@ impl CleanCommand {
                     date_time,
                     ottofile_display,
                     run.age_days,
-                    self.format_size(run.size_bytes)
+                    format_size(run.size_bytes)
                 ));
             }
             self.print("\nRun without --dry-run to actually delete these runs");
@@ -299,7 +331,7 @@ impl CleanCommand {
                 match fs::remove_dir_all(&run.path) {
                     Ok(()) => {
                         deleted_size += run.size_bytes;
-                        let date_time = self.format_timestamp(run.timestamp);
+                        let date_time = format_timestamp(run.timestamp);
                         let ottofile_display = run
                             .ottofile_path
                             .as_ref()
@@ -310,7 +342,7 @@ impl CleanCommand {
                             run.project_hash,
                             date_time,
                             ottofile_display,
-                            self.format_size(run.size_bytes)
+                            format_size(run.size_bytes)
                         ));
                     }
                     Err(e) => {
@@ -320,7 +352,7 @@ impl CleanCommand {
                 }
             }
 
-            self.print(&format!("\nFreed {} of disk space", self.format_size(deleted_size)));
+            self.print(&format!("\nFreed {} of disk space", format_size(deleted_size)));
 
             if refused > 0 || failed > 0 {
                 return Err(eyre::eyre!(
@@ -446,33 +478,25 @@ impl CleanCommand {
         metadata.ottofile
     }
 
-    fn format_timestamp(&self, timestamp: u64) -> String {
-        let dt = DateTime::from_timestamp(timestamp as i64, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
-        dt.format("%Y-%m-%d %H:%M:%S").to_string()
-    }
-
-    fn format_size(&self, bytes: u64) -> String {
-        if bytes < 1024 {
-            format!("{bytes} B")
-        } else if bytes < 1024 * 1024 {
-            format!("{:.1} KB", bytes as f64 / 1024.0)
-        } else if bytes < 1024 * 1024 * 1024 {
-            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-        } else {
-            format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-        }
-    }
-
     fn calculate_dir_size(path: &Path) -> Result<u64> {
         let mut total_size = 0u64;
 
         if path.is_dir() {
             for entry in fs::read_dir(path)? {
                 let entry = entry?;
-                let entry_path = entry.path();
 
-                if entry_path.is_dir() {
-                    total_size += Self::calculate_dir_size(&entry_path)?;
+                // `is_dir()` and `metadata()` both follow symlinks. A link
+                // inside a run directory pointing at a large or unreadable tree
+                // would make this scan slow, or abort `Clean` through the `?`.
+                // Sizing a run means sizing what the run owns, so links are
+                // skipped - the same rule `scan_runs` applies one level up.
+                let file_type = entry.file_type()?;
+                if file_type.is_symlink() {
+                    continue;
+                }
+
+                if file_type.is_dir() {
+                    total_size += Self::calculate_dir_size(&entry.path())?;
                 } else {
                     total_size += entry.metadata()?.len();
                 }

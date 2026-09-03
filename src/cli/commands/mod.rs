@@ -1,5 +1,6 @@
 pub mod clean;
 pub mod convert;
+pub mod format;
 pub mod graph;
 pub mod history;
 pub mod stats;

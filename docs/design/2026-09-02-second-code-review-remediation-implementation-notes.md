@@ -243,3 +243,38 @@ Debug binary at `target/debug/otto`, `OTTO_HOME` pinned to a temp dir, run in a 
 
 ### Open questions
 - None from the implementation. Two carried from Phase 5 remain open for the author: whether `otto Clean Stats` (two builtins together) should also be rejected, and that `main`'s early route runs a builtin before any ottofile read, so a file declaring a task named `Clean` is not rejected on that one invocation.
+
+## Phase 7: Clean, History, and shared formatters
+
+This phase arrived partly edited by a previous session plus the orchestrator:
+`format.rs`/`format_tests.rs` created and wired into `stats.rs`, most of
+`clean.rs`'s DB-path Err contract and `calculate_dir_size`'s symlink skip
+already in place, `history.rs`'s `abbreviate_home` already correct. This
+session finished the remaining gaps: a leftover unused-import warning, a
+duplicate variable declaration, a non-existent dev-dependency in a test, and
+stale tests calling deleted methods.
+
+### Design decisions
+- **`format_tests.rs` needed `#![cfg(test)]`** — `src/cli/commands/format_tests.rs:1` — without it the module (and its `use super::*`) compiled even outside `cfg(test)`, where `#[test]`-attributed functions are stripped, leaving the import genuinely unused in a non-test build. `history_tests.rs` and `clean_tests.rs` already carry this guard; `format_tests.rs` was the one file missing it.
+- **The tilde test mutates `HOME` in place under `#[serial_test::serial]`, restoring it afterward** — `src/cli/commands/history_tests.rs:only_the_leading_home_prefix_becomes_a_tilde` — this is the pattern `clean_tests.rs` already uses for `OTTO_HOME` (`test_get_otto_home_honors_otto_home_env`, `test_execute_with_database_ignores_missing_otto_home`), and `serial_test` is already a dev-dependency; `temp_env` was not.
+- **A new end-to-end test drives the DB-path refusal through the real `StateManager`, not `MemoryStateStore`** — `src/cli/commands/clean_tests.rs:a_db_path_clean_with_one_refused_directory_exits_non_zero` — `MemoryStateStore::delete_run` never refuses (it has no filesystem to protect), so verifying the phase's second success criterion end to end needed a real `StateManager` whose `delete_run` calls `ensure_deletable_under_root` on a symlinked run directory, the same defect `manager_tests.rs`'s `delete_run_never_deletes_through_a_symlinked_run_directory` covers one layer down.
+
+### Deviations
+- None beyond what the assigning message already flagged as unfinished. Everything closed matches the bullet it was assigned to.
+
+### Tradeoffs
+- **The stale `test_format_timestamp`/`test_format_size_*` tests in `clean_tests.rs` were deleted, not converted to call `format::format_size`/`format::format_timestamp` directly** — `format_tests.rs` already asserts the same input/output pairs (bytes-to-KB/MB/GB boundaries, the known-timestamp case) at the seam that owns them now; keeping a second copy in `clean_tests.rs` would be the exact duplication this phase exists to remove, just moved one file over.
+- **The DB-path refusal test constructs its own `StateManager` inline** rather than factoring a shared `create_test_manager` helper with `manager_tests.rs` — the two files are in different modules (`cli::commands::clean` vs `executor::state::manager`) and `manager_tests.rs`'s helper is private to that file; duplicating four lines was cheaper than exporting a test-only constructor across a module boundary for one caller.
+
+### Break-the-test proofs
+- Reverted the DB-path `Err` return in `execute_with_database` back to always `Ok(())`: `a_db_path_clean_with_one_refused_directory_exits_non_zero` FAILED (`result.unwrap_err()` panicked on an `Ok`). Restored.
+- Reverted `abbreviate_home` to `s.replace(&home, "~")`: `only_the_leading_home_prefix_becomes_a_tilde` FAILED (`~/proj~/x` instead of `~/proj/home/u/x`). Restored.
+
+### Success criteria, as run
+- **`grep -rn 'fn format_size\|fn format_duration\|fn format_timestamp' src/cli/commands/` prints exactly three hits, all in `format.rs`.** Confirmed: three hits, `format.rs:13`, `:26`, `:47`. PASS.
+- **A DB-path `Clean` with one refused directory exits non-zero.** `a_db_path_clean_with_one_refused_directory_exits_non_zero`: a run recorded against a symlinked run directory, `Clean --no-db=false` (DB path) returns `Err` containing `"failed"`, and the symlink's target survives. PASS.
+- **`otto History` renders `/home/u/proj/home/u/x` as `~/proj/home/u/x`.** `only_the_leading_home_prefix_becomes_a_tilde` asserts exactly this input/output pair plus the bare-home and non-home-prefixed cases. PASS.
+- `otto ci`: `✅ All CI checks passed!` — lint, compile, clippy, fmt-check, check, test, cov, cov-report all `finished successfully`; coverage 93.2% lines (23150/24836) against the 87% threshold.
+
+### Open questions
+- None.

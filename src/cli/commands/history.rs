@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, TimeZone, Utc};
+use crate::cli::commands::format::{format_duration, format_size, format_timestamp};
 use colored::Colorize;
 use console::measure_text_width;
 use eyre::Result;
@@ -148,22 +148,14 @@ impl HistoryCommand {
                 .cwd
                 .as_ref()
                 .and_then(|p| p.to_str())
-                .map(|s| {
-                    if let Ok(home) = std::env::var("HOME")
-                        && s.starts_with(&home)
-                    {
-                        s.replace(&home, "~")
-                    } else {
-                        s.to_string()
-                    }
-                })
+                .map(abbreviate_home)
                 .unwrap_or_else(|| "-".to_string());
 
             rows.push((
                 format_timestamp(run.timestamp),
                 format_run_status(&run.status),
-                format_duration(run.duration_seconds),
-                format_size(run.size_bytes),
+                run.duration_seconds.map_or_else(|| "-".to_string(), format_duration),
+                run.size_bytes.map_or_else(|| "-".to_string(), format_size),
                 run.user.clone().unwrap_or_else(|| "-".to_string()),
                 path,
             ));
@@ -239,7 +231,7 @@ impl HistoryCommand {
             rows.push((
                 task.started_at.map(format_timestamp).unwrap_or_else(|| "-".to_string()),
                 format_task_status(&task.status),
-                format_duration(task.duration_seconds),
+                task.duration_seconds.map_or_else(|| "-".to_string(), format_duration),
                 task.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
                 task.run_id.to_string(),
             ));
@@ -303,45 +295,6 @@ impl HistoryCommand {
     }
 }
 
-fn format_timestamp(timestamp: u64) -> String {
-    // An out-of-range or ambiguous local timestamp falls back to the epoch
-    // rather than panicking, matching the pattern already established in
-    // clean.rs for the same class of "cosmetic display" timestamp.
-    let dt = Local
-        .timestamp_opt(timestamp as i64, 0)
-        .single()
-        .unwrap_or_else(|| DateTime::<Local>::from(DateTime::<Utc>::MIN_UTC));
-    dt.format("%Y-%m-%d %H:%M:%S").to_string()
-}
-
-fn format_duration(duration: Option<f64>) -> String {
-    match duration {
-        Some(d) if d < 1.0 => format!("{:.0}ms", d * 1000.0),
-        Some(d) if d < 60.0 => format!("{:.1}s", d),
-        Some(d) if d < 3600.0 => {
-            let minutes = (d / 60.0) as u64;
-            let seconds = (d % 60.0) as u64;
-            format!("{}m{}s", minutes, seconds)
-        }
-        Some(d) => {
-            let hours = (d / 3600.0) as u64;
-            let minutes = ((d % 3600.0) / 60.0) as u64;
-            format!("{}h{}m", hours, minutes)
-        }
-        None => "-".to_string(),
-    }
-}
-
-fn format_size(size: Option<u64>) -> String {
-    match size {
-        Some(s) if s < 1024 => format!("{} B", s),
-        Some(s) if s < 1024 * 1024 => format!("{:.1} KB", s as f64 / 1024.0),
-        Some(s) if s < 1024 * 1024 * 1024 => format!("{:.1} MB", s as f64 / (1024.0 * 1024.0)),
-        Some(s) => format!("{:.2} GB", s as f64 / (1024.0 * 1024.0 * 1024.0)),
-        None => "-".to_string(),
-    }
-}
-
 fn format_run_status(status: &RunStatus) -> String {
     match status {
         RunStatus::Success => "✓".green().to_string(),
@@ -358,6 +311,20 @@ fn format_task_status(status: &crate::executor::state::TaskStatus) -> String {
         TaskStatus::Running => "⋯".yellow().to_string(),
         TaskStatus::Skipped => "○".blue().to_string(),
         TaskStatus::Pending => "·".dimmed().to_string(),
+    }
+}
+
+/// Replace a leading `$HOME` with `~`, and only the leading one.
+///
+/// `str::replace` rewrote every occurrence, so a path that repeated the home
+/// prefix inside itself (`/home/u/proj/home/u/x`) came out as
+/// `~/proj~/x`. Only the prefix is a home directory.
+fn abbreviate_home(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
+            format!("~{}", &path[home.len()..])
+        }
+        _ => path.to_string(),
     }
 }
 

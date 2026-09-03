@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, TimeZone, Utc};
+use crate::cli::commands::format::{format_duration, format_size, format_timestamp};
 use colored::Colorize;
 use comfy_table::{Cell, CellAlignment, Table, presets::UTF8_FULL};
 use eyre::Result;
@@ -243,15 +243,7 @@ impl StatsCommand {
                 Cell::new("Last Executed").set_alignment(CellAlignment::Left),
                 Cell::new(
                     stat.last_executed
-                        .map(|t| {
-                            // Falls back to the epoch on an out-of-range/ambiguous
-                            // timestamp rather than panicking (see clean.rs).
-                            let dt = Local
-                                .timestamp_opt(t as i64, 0)
-                                .single()
-                                .unwrap_or_else(|| DateTime::<Local>::from(DateTime::<Utc>::MIN_UTC));
-                            dt.format("%Y-%m-%d %H:%M:%S").to_string()
-                        })
+                        .map(format_timestamp)
                         .unwrap_or_else(|| "-".to_string()),
                 )
                 .set_alignment(CellAlignment::Right),
@@ -307,34 +299,6 @@ impl StatsCommand {
         }
 
         Ok(())
-    }
-}
-
-fn format_duration(duration: f64) -> String {
-    if duration < 1.0 {
-        format!("{:.0}ms", duration * 1000.0)
-    } else if duration < 60.0 {
-        format!("{:.1}s", duration)
-    } else if duration < 3600.0 {
-        let minutes = (duration / 60.0) as u64;
-        let seconds = (duration % 60.0) as u64;
-        format!("{}m{}s", minutes, seconds)
-    } else {
-        let hours = (duration / 3600.0) as u64;
-        let minutes = ((duration % 3600.0) / 60.0) as u64;
-        format!("{}h{}m", hours, minutes)
-    }
-}
-
-fn format_size(size: u64) -> String {
-    if size < 1024 {
-        format!("{} B", size)
-    } else if size < 1024 * 1024 {
-        format!("{:.1} KB", size as f64 / 1024.0)
-    } else if size < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", size as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
 
