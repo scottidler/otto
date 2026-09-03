@@ -6,7 +6,23 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     /// the action processor - lands in the same place, and that place is the
     /// only sender. Before this, a `?` on any of those abandoned the task with
     /// nothing sent, and the scheduler waited on it forever.
-    async fn execute_task(&self, task: Task, tx: mpsc::Sender<TaskReport>, active: &mut ActiveTasks) -> Result<()> {
+    ///
+    /// `suppress_terminal` says the task's bytes reach only its two logs. A
+    /// buffered foreach subtask's sole path to the terminal is ordered replay
+    /// (2026-08-31 design doc, Phase 4), so it is suppressed here - but whether
+    /// that path exists is the replay *cursor's* answer, not the parser flag's,
+    /// which is why the caller computes it. `otto say:alpha` on a
+    /// `buffer: true` foreach runs a task still carrying `buffered: true` while
+    /// the cursor has no group that owns it: nothing ever replayed its logs and
+    /// the run printed only `[say:alpha] finished successfully`. The flag stays
+    /// as the cursor's input; it is no longer the suppression decision.
+    async fn execute_task(
+        &self,
+        task: Task,
+        tx: mpsc::Sender<TaskReport>,
+        active: &mut ActiveTasks,
+        suppress_terminal: bool,
+    ) -> Result<()> {
         let class = admission_for(&task);
         debug!(
             "execute_task: task={} tty={} admission={class:?}",
@@ -21,9 +37,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let envs = task.envs.clone();
         let tasks_dir = self.workspace.run().join("tasks");
         let execution_context = self.execution_context.clone();
-        // A buffered foreach subtask's bytes reach only its two logs; ordered
-        // replay is the sole path to the terminal for them (design doc Phase 4).
-        let suppress_terminal = self.tui_mode || task.buffered;
         let no_prefix = self.no_prefix;
         let task_streams = self.task_streams.clone();
         let is_virtual_parent = task.is_virtual_parent;

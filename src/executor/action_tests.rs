@@ -459,19 +459,33 @@ async fn builtins_contain_no_bash_4_only_constructs() -> Result<()> {
 }
 
 /// The reader's fold must land on the byte-identical prefix the writer wrote.
-/// `json_to_env` (executor/scheduler.rs) does
-/// `to_uppercase().replace(['-', '.'], "_")`; the builtins do it in shell.
-/// The two spellings are no longer the same characters, so this pins them
-/// together by result rather than by looking alike.
-#[test]
-fn builtins_input_fold_matches_the_writer_fold() {
-    let shell_fold = r#"
-        task_name="$1"
-        task_upper=$(printf '%s' "$task_name" | LC_ALL=C tr '[:lower:]' '[:upper:]')
-        task_upper="${task_upper//-/_}"
-        task_upper="${task_upper//./_}"
-        printf '%s' "OTTO_INPUT_${task_upper}_"
-    "#;
+/// `json_to_env` (executor/scheduler.rs) folds through `fold_to_var_name`; the
+/// builtins do it in shell. The two spellings are not the same characters, so
+/// this pins them together by result rather than by looking alike - and pins
+/// the shell copy below to the shell that actually ships, so it cannot drift
+/// into agreeing with a fold nobody runs.
+#[tokio::test]
+#[serial]
+async fn builtins_input_fold_matches_the_writer_fold() -> Result<()> {
+    // Verbatim from the generated builtins.sh, asserted to still be there.
+    const SHELL_FOLD: &str = r#"        task_upper=$(printf '%s' "$task_name" \
+            | LC_ALL=C tr '[:lower:]' '[:upper:]' \
+            | LC_ALL=C tr -c '[:alnum:]_' '_')"#;
+
+    let temp_dir = TempDir::new()?;
+    setup_test_db(temp_dir.path());
+    let workspace = Arc::new(Workspace::new(temp_dir.path().to_path_buf()).await?);
+    workspace.init().await?;
+    let processor = BashProcessor::new(workspace.clone(), "test_task");
+    processor.create_builtins()?;
+    let builtins = std::fs::read_to_string(workspace.task_dir("test_task").join("builtins.sh"))?;
+    assert!(
+        builtins.contains(SHELL_FOLD),
+        "the shell fold this test runs is no longer the one builtins.sh ships; \
+         update SHELL_FOLD to the shipped text (and check it still matches the writer)"
+    );
+
+    let script = format!("task_name=\"$1\"\n{SHELL_FOLD}\nprintf '%s' \"OTTO_INPUT_${{task_upper}}_\"");
 
     for name in [
         "build",
@@ -482,12 +496,24 @@ fn builtins_input_fold_matches_the_writer_fold() {
         "my-task.v2",
         "a-b.c-d",
         "task_9",
+        // A foreach subtask name. The `-`/`.`-only fold left the `:` in place
+        // and wrote `OTTO_INPUT_UP:ALPHA_K=v-alpha`, which bash read as a
+        // command; the consumer of `up:alpha` died on `command not found`.
+        "up:alpha",
+        "up:alpha.beta",
+        // A digit is fine anywhere in a fold: this is per byte, not the
+        // whole-name identifier rule, which would fold the year to `____`.
+        "up_2024",
+        "2024",
+        // Everything else outside the class, on both sides.
+        "a b",
+        "a+b/c",
     ] {
-        let writer = format!("OTTO_INPUT_{}_", name.to_uppercase().replace(['-', '.'], "_"));
+        let writer = format!("OTTO_INPUT_{}_", crate::executor::scheduler::fold_to_var_name(name));
 
         let out = std::process::Command::new("bash")
             .arg("-c")
-            .arg(shell_fold)
+            .arg(&script)
             .arg("bash")
             .arg(name)
             .output()
@@ -500,4 +526,6 @@ fn builtins_input_fold_matches_the_writer_fold() {
             "reader and writer folds disagree for task name {name:?}"
         );
     }
+
+    Ok(())
 }

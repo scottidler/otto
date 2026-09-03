@@ -83,3 +83,39 @@ fn is_subtask_of_matches_only_the_named_parent() {
     // A top-level task is nobody's subtask, including its own.
     assert!(!is_subtask_of("build", "build"));
 }
+
+#[test]
+fn is_identifier_accepts_a_shell_name() {
+    for name in ["X", "_", "_x", "x9", "MY_VAR", "OTTO_INPUT_UP_2024", "a_B_9"] {
+        assert!(is_identifier(name), "{name:?} should be an identifier");
+    }
+}
+
+#[test]
+fn is_identifier_rejects_everything_a_shell_assignment_cannot_hold() {
+    for name in [
+        "",                // no first character at all
+        "9x",              // leading digit
+        "9",               //
+        "my-var",          // the two folds `json_to_env` used to be the whole rule
+        "my.var",          //
+        "up:alpha",        // a foreach subtask name
+        "X; touch /pwned", // the injection this predicate exists to stop
+        "a b",
+        "café",
+        "ünicode",
+    ] {
+        assert!(!is_identifier(name), "{name:?} should not be an identifier");
+    }
+}
+
+/// The whole-name rule and the per-byte fold are different rules on purpose.
+/// Reading a leading-digit rejection byte by byte would fold every digit in a
+/// name to `_`, so `OTTO_INPUT_UP_2024` would become `OTTO_INPUT_UP____` and
+/// the reader would look for a variable the writer never wrote.
+#[test]
+fn is_identifier_is_a_whole_name_rule_not_a_per_byte_class() {
+    assert!(is_identifier("UP_2024"));
+    assert!(!is_identifier("2024"));
+    assert!("UP_2024".chars().any(|c| !is_identifier(&c.to_string())));
+}

@@ -79,5 +79,28 @@ pub fn is_subtask(name: &str) -> bool {
     split_subtask(name).is_some()
 }
 
+/// Whether `name` is a shell/environment identifier: `[A-Za-z_][A-Za-z0-9_]*`.
+///
+/// The whole-name rule, spelled out rather than pulled through a regex
+/// dependency for one predicate. It was written twice before this - once in
+/// `cfg::env` to reject a bad key in a parsed `.env` file, once in
+/// `executor::action` to reject a name that cannot appear on the left of an
+/// assignment in a generated script - and the two copies were the same
+/// function, so a change to one would have been a divergence.
+///
+/// Deliberately *not* the rule used to fold a name into a variable name. That
+/// fold is per byte (`[A-Za-z0-9_]` kept, everything else `_`), and applying
+/// this leading-digit rule byte by byte would turn `OTTO_INPUT_UP_2024` into
+/// `OTTO_INPUT_UP____`.
+#[must_use]
+pub(crate) fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[path = "naming_tests.rs"]
 mod tests;

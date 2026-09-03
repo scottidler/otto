@@ -721,6 +721,38 @@ async fn write_tty_log_markers(tasks_dir: &Path, task_name: &str) -> Result<()> 
     Ok(())
 }
 
+/// Uppercase `name` and fold every byte outside `[A-Za-z0-9_]` to `_`, giving
+/// the `<TASK>`/`<KEY>` segment of an `OTTO_INPUT_<TASK>_<KEY>` variable name.
+///
+/// The class is complemented, not enumerated. This folded `-` and `.` and
+/// nothing else, and a foreach subtask is named `parent:item`, so a consumer
+/// with `before: ["up:alpha"]` got an input file whose line read
+/// `OTTO_INPUT_UP:ALPHA_K=v-alpha` and a task that died on
+/// `command not found`.
+///
+/// Not [`crate::naming::is_identifier`]: that is a whole-name rule and rejects
+/// a leading digit, so applying it byte by byte would fold
+/// `OTTO_INPUT_UP_2024` to `OTTO_INPUT_UP____`. A fold is per byte and a
+/// digit is fine anywhere in it.
+///
+/// Per byte, and uppercase by the ASCII table only, because the reader is
+/// `LC_ALL=C tr` in `builtins.sh` and that is what `tr` does: a multibyte
+/// character is N bytes in and N underscores out on both sides. Folding per
+/// `char` would emit one underscore for `é` where the reader emits two, and
+/// the reader would then match nothing - the same silent-empty failure the
+/// `-`-only fold used to have.
+pub(crate) fn fold_to_var_name(name: &str) -> String {
+    name.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || byte == b'_' {
+                byte.to_ascii_uppercase() as char
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Convert JSON object to shell-sourceable .env format
 /// Handles proper escaping for bash safety
 fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
@@ -730,7 +762,7 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
     lines.push(String::new());
 
     if let Some(obj) = json.as_object() {
-        // Shell identifiers cannot hold `-` or `.`, so distinct JSON keys can
+        // Shell identifiers hold only `[A-Za-z0-9_]`, so distinct JSON keys can
         // fold onto one variable name: `a-b`, `a.b` and `A_B` all become
         // `..._A_B`. Every one of them used to be emitted under that single
         // name, so the last assignment won and the other values disappeared
@@ -745,8 +777,8 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
 
         for (key, value) in obj {
             // Create variable name: OTTO_INPUT_<TASK>_<KEY> (uppercase, safe chars only)
-            let safe_task = task_name.to_uppercase().replace(['-', '.'], "_");
-            let safe_key = key.to_uppercase().replace(['-', '.'], "_");
+            let safe_task = fold_to_var_name(task_name);
+            let safe_key = fold_to_var_name(key);
             let base = format!("OTTO_INPUT_{safe_task}_{safe_key}");
             let mut var_name = base.clone();
             let mut disambiguator = 1;
@@ -756,7 +788,7 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
             }
             if var_name != base {
                 log::warn!(
-                    "task '{task_name}' output keys collide as shell variables: '{key}' folds onto                      {base}, which is taken; it is carried as {var_name} instead"
+                    "task '{task_name}' output keys collide as shell variables: '{key}' folds onto {base}, which is taken; it is carried as {var_name} instead"
                 );
             }
 

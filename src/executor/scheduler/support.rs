@@ -53,6 +53,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         skipped_set: &mut SkippedSet,
         cursor: &mut ReplayCursor,
     ) -> Result<()> {
+        // Ordered replay is the only path to the terminal for a task the cursor
+        // owns, so those tasks write to their logs alone. Asking the cursor, not
+        // `task.buffered`, is what keeps the two in step: `otto say:alpha` on a
+        // `buffer: true` foreach carries the flag but has no group to replay it.
+        let suppress_terminal = self.tui_mode || cursor.parent_of(&task.name).is_some();
+
         match self.needs_rebuild(&task).await {
             Ok(true) => {
                 // Task needs to run
@@ -64,7 +70,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     timestamp: std::time::SystemTime::now(),
                 });
 
-                self.execute_task(task.clone(), tx.clone(), active_tasks).await?;
+                self.execute_task(task.clone(), tx.clone(), active_tasks, suppress_terminal)
+                    .await?;
             }
             Ok(false) => {
                 // Task can be skipped - outputs are up to date
@@ -140,7 +147,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     timestamp: std::time::SystemTime::now(),
                 });
 
-                self.execute_task(task.clone(), tx.clone(), active_tasks).await?;
+                self.execute_task(task.clone(), tx.clone(), active_tasks, suppress_terminal)
+                    .await?;
             }
         }
         Ok(())

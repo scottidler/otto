@@ -43,10 +43,7 @@ fn python_quote(value: &str) -> String {
 /// loud config-time error beats a script that runs something the author did not
 /// write.
 fn validate_identifier(kind: &str, task_name: &str, name: &str) -> Result<()> {
-    let valid = !name.is_empty()
-        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if valid {
+    if crate::naming::is_identifier(name) {
         Ok(())
     } else {
         Err(eyre!(
@@ -438,22 +435,31 @@ otto_deserialize_input() {
         # Build the expected variable prefix: OTTO_INPUT_<TASK>_
         #
         # This MUST fold exactly what the writer folds. `json_to_env`
-        # (executor/scheduler.rs) does `to_uppercase().replace(['-', '.'], "_")`,
-        # and this side used to fold only `-`. A task named `pro.ducer` therefore
-        # had its values written under OTTO_INPUT_PRO_DUCER_ while the reader
-        # looked for OTTO_INPUT_PRO.DUCER_, matched nothing, and left OTTO_INPUT
-        # empty: every output of that task vanished, silently, at exit 0.
+        # (executor/scheduler.rs, `fold_to_var_name`) folds every byte outside
+        # [A-Za-z0-9_] to `_`, and this side folded only `-` and `.`. A task
+        # named `pro.ducer` therefore had its values written under
+        # OTTO_INPUT_PRO_DUCER_ while the reader looked for OTTO_INPUT_PRO.DUCER_,
+        # matched nothing, and left OTTO_INPUT empty: every output of that task
+        # vanished, silently, at exit 0. Enumerating the characters was the bug -
+        # a foreach subtask is named `parent:item`, and `:` was not on the list,
+        # so `before: ["up:alpha"]` produced the line
+        # `OTTO_INPUT_UP:ALPHA_K=v-alpha: command not found`. So the class is
+        # complemented, not enumerated: `tr -c` keeps [:alnum:] and `_` and folds
+        # everything else.
+        #
+        # The fold is per BYTE, which is what `tr` does and what the writer
+        # mirrors: a multibyte character is N bytes in and N underscores out on
+        # both sides.
         #
         # The case fold is `tr`, NOT the case-fold parameter expansion, which
         # is bash 4.0+. macOS ships /bin/bash 3.2.57 and always will (Apple
         # froze it at the last GPLv2 release), so that spelling aborted every
         # bash task with a dependency on "bad substitution" before its body ran.
-        # LC_ALL=C keeps `tr` on the ASCII fold; task names are ASCII.
-        # The `-`/`.` folds stay as parameter expansion, valid in 3.2.
+        # LC_ALL=C keeps both `tr` passes on the ASCII classes.
         local task_upper
-        task_upper=$(printf '%s' "$task_name" | LC_ALL=C tr '[:lower:]' '[:upper:]')
-        task_upper="${task_upper//-/_}"
-        task_upper="${task_upper//./_}"
+        task_upper=$(printf '%s' "$task_name" \
+            | LC_ALL=C tr '[:lower:]' '[:upper:]' \
+            | LC_ALL=C tr -c '[:alnum:]_' '_')
         local prefix="OTTO_INPUT_${task_upper}_"
         local prefix_len=${#prefix}
 

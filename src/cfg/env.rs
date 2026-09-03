@@ -164,23 +164,12 @@ pub fn parse_env_assignments(stdout: &str) -> Result<HashMap<String, String>> {
         let Some((key, value)) = trimmed.split_once('=') else {
             return Err(eyre!("line {number} is not KEY=VALUE: '{line}'"));
         };
-        if !is_valid_env_key(key) {
+        if !crate::naming::is_identifier(key) {
             return Err(eyre!("line {number} has an invalid key '{key}': '{line}'"));
         }
         parsed.insert(key.to_string(), value.to_string());
     }
     Ok(parsed)
-}
-
-/// `[A-Za-z_][A-Za-z0-9_]*`, spelled out rather than pulled through a regex
-/// dependency for one predicate.
-fn is_valid_env_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Build the evaluation context for one expression.

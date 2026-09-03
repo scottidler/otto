@@ -49,3 +49,40 @@ Per the doc's Testing Strategy. Each fix reverted alone, the suite run, the fix 
 ### Open questions
 - **`otto-dev` is a cross-repo consequence of this phase and was NOT touched.** The doc's blast-radius bullet says its `has_terminal() { [ -t 0 ] && ... }` gate at `otto-dev/scripts/lib.sh:142` now evaluates false under otto, so `bootstrap.sh` and `init_dev.sh` take their noninteractive paths and the docker-start `sudo` fails loudly rather than hanging when its timestamp has expired. The doc calls marking those tasks `tty: true` "their call, not this doc's". Nothing here verified that repo; someone should confirm before this ships.
 - **`tests/sigint_cancel_test.rs` now covers four signals and two paths under a name that says SIGINT.** Renaming it to something like `stop_signal_test.rs` is a rename this phase did not take. Worth doing in a later phase or not at all.
+
+## Phase 2: Executor data passing and buffered replay
+
+### Design decisions
+- **`is_identifier` lives in `naming.rs` as `pub(crate)`, exactly as the doc specifies** — `src/naming.rs:is_identifier` — Phase 4 reuses it for `foreach.as`, so the signature is fixed now. The two copies it replaces are gone: `cfg/env.rs`'s `is_valid_env_key` was deleted and its one call site rewritten, `executor/action.rs`'s `validate_identifier` kept its error message (which is the caller's context: kind, task name, name) and now asks `naming::is_identifier` for the verdict.
+- **The per-byte fold is a separate function with its own name, `fold_to_var_name`** — `src/executor/scheduler.rs:fold_to_var_name` — panel round 1 finding S1. Its doc comment says in so many words why it is not `is_identifier`: the whole-name rule rejects a leading digit, and applying it byte by byte would fold `OTTO_INPUT_UP_2024` to `OTTO_INPUT_UP____`. `naming_tests.rs:is_identifier_is_a_whole_name_rule_not_a_per_byte_class` asserts the distinction rather than leaving it to the comment.
+- **The fold is per BYTE, not per `char`** — `src/executor/scheduler.rs:fold_to_var_name` — the reader is `LC_ALL=C tr` in `builtins.sh`, which folds bytes. `é` is two bytes, so `tr` emits two underscores; a `chars()` fold would emit one, the prefixes would differ, and the reader would match nothing at exit 0 — the same silent-empty failure the `-`-only fold had. Uppercasing is `to_ascii_uppercase` for the same reason (`ß` uppercases to `SS` in Rust and to itself under `LC_ALL=C tr`).
+- **The bash side complements the class instead of enumerating it** — `src/executor/action.rs`, `otto_deserialize_input` — `LC_ALL=C tr -c '[:alnum:]_' '_'` replaces the two `${task_upper//x/_}` expansions. Enumerating was the bug: `:` was simply not on the list. `tr -c` is POSIX and bash-3.2-safe, so the macOS constraint the surrounding comment guards is unaffected.
+- **`suppress_terminal` is computed in `try_start_ready_task`** — `src/executor/scheduler/support.rs` — see Deviations; it is the frame that already holds `&mut ReplayCursor` and is the sole caller of `execute_task` (both arms).
+- **The parity test now pins itself to the shell that ships** — `src/executor/action_tests.rs:builtins_input_fold_matches_the_writer_fold` — it holds the fold pipeline as a `SHELL_FOLD` const, asserts the generated `builtins.sh` still contains that exact text, and only then runs it against `fold_to_var_name`. Before, the test held a private copy of the shell fold with nothing tying it to the real one, so reverting `builtins.sh` alone could have left the test green.
+
+### Deviations
+- **The doc says compute `suppress_terminal` "in `execute_all` where the cursor is built"; it is computed in `try_start_ready_task`.** Same effect, correct seam: `execute_all` builds the cursor (`scheduler.rs:1445`) and hands it down, but it never calls `execute_task` — `try_start_ready_task` is the only caller, in both its `Ok(true)` and its `Err(_)` arm, and it already takes `cursor: &mut ReplayCursor`. Computing it in `execute_all` would mean computing it for a task that has not been selected to start yet.
+- **The doc's Rust spelling is `c.is_ascii_alphanumeric() || c == '_'` over chars; the implementation is the same predicate over bytes.** Reason under Design decisions: a char-wise fold does not agree with `LC_ALL=C tr` for multibyte input, and byte-exact agreement with the reader is the whole requirement.
+- **The doc lists the parity fix as two call sites; a third file changed.** `src/executor/action_tests.rs` held a hand-copied duplicate of both folds and pinned the old rule, so it would have gone red on the correct behavior. Inverted by name rather than deleted: it still tests fold parity, now against the real code on both sides, with `up:alpha` and `up_2024` added as cases.
+- **Two tests were added to `tests/foreach_buffer_test.rs`, not one.** The doc asks for "requesting one item of a buffered foreach prints its output". `test_asking_for_the_parent_still_buffers_the_whole_group` is its complement: without it, deleting suppression outright would also pass.
+
+### Tradeoffs
+- **`fold_to_var_name` lives in `scheduler.rs` beside its only caller, not in `naming.rs` beside `is_identifier`** vs putting both name rules in one module — the doc is explicit that the two must not be merged, and `naming.rs` is about *subtask* names, while this is the writer's half of a wire format shared with `builtins.sh`. Keeping it next to `json_to_env` keeps the two halves of that format one screen apart. It is `pub(crate)` only so the parity test can call the real function instead of a copy.
+- **The parity test asserts `builtins.sh` contains `SHELL_FOLD` verbatim, indentation and all** vs extracting the pipeline by parsing the file — a literal-text assertion is brittle to reindentation, but it fails loudly with a message that says exactly what to do, whereas a parser would silently test a fragment it no longer found. The `#[tokio::test] #[serial]` cost of generating a real `builtins.sh` is the price of not testing a copy.
+- **`tests/subtask_output_test.rs` is a new file rather than a case in `tests/foreach_aggregation_test.rs`** (the doc allows either) — the bug is a foreach subtask *feeding a consumer*, which is the input/output surface, not the aggregation surface. It carries a second test on the generated `.env` file itself, so the fold is pinned at the file as well as at the consumer.
+
+### Break-the-test proofs
+Per the doc's Testing Strategy. Each fix reverted alone, the test run, the fix restored.
+
+- **Revert `fold_to_var_name` in `json_to_env` to `to_uppercase().replace(['-', '.'], "_")`.** Both tests in `tests/subtask_output_test.rs` FAILED, with the doc's `Observed:` line verbatim: `input.up:alpha.env: line 4: OTTO_INPUT_UP:ALPHA_K=v-alpha: command not found`, task `use` exiting 127.
+- **Revert `suppress_terminal` to `self.tui_mode || task.buffered`.** `test_requesting_one_item_of_a_buffered_foreach_prints_its_output` FAILED with the captured stdout being exactly `[say:alpha] finished successfully` and nothing else — again the doc's `Observed:` line. The other 13 tests in the binary passed.
+- **Revert the `builtins.sh` fold to the two `${task_upper//x/_}` expansions.** `builtins_input_fold_matches_the_writer_fold` FAILED on the drift guard: `the shell fold this test runs is no longer the one builtins.sh ships`. Reverting the test's `SHELL_FOLD` copy to match (i.e. reverting both shell copies together) then FAILED on the comparison itself: `reader and writer folds disagree for task name "up:alpha"`, left `OTTO_INPUT_UP:ALPHA_`, right `OTTO_INPUT_UP_ALPHA_`.
+
+### Success criteria, as run
+- `otto use` on the `up:alpha` fixture exits 0 and prints `got=[v-alpha]`: observed `[up:alpha] finished successfully` / `[use] got=[v-alpha]` / `[use] finished successfully`, `EXIT=0`. PASS.
+- `otto say:alpha` on the buffered-foreach fixture prints `HELLO alpha`: observed `[say:alpha] HELLO alpha` / `[say:alpha] finished successfully`, `EXIT=0`. PASS.
+- `grep -c '                      {base}' src/executor/scheduler.rs` -> `0`. PASS.
+- `otto ci`: `✅ All CI checks passed!`, coverage 93.1% lines against an 87% threshold.
+
+### Open questions
+- None.
