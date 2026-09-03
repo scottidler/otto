@@ -357,6 +357,46 @@ fn test_command_prefix_handling() {
     assert!(task.action.contains("echo Visible"));
 }
 
+/// Make allows `@`, `-`, and `+` combined, in either order, and repeated. The
+/// old code peeled at most one leading character, so `@-rm -rf dist` kept a
+/// literal `-` in the command (no `|| true`), and `-@echo hi` left a literal
+/// `@` for bash to choke on instead of suppressing it.
+#[test]
+fn test_combined_prefixes_are_all_stripped_in_any_order() {
+    let mut ast = MakefileAst::new();
+    ast.targets
+        .push(target("build", &["@-rm -rf dist", "-@echo hi", "+make -C sub"]));
+
+    let (config, _) = convert(ast);
+
+    let task = config.tasks.get("build").unwrap();
+    assert!(task.action.contains("rm -rf dist || true"), "{}", task.action);
+    assert!(task.action.contains("echo hi || true"), "{}", task.action);
+    assert!(!task.action.contains("@echo hi"), "{}", task.action);
+    // `+` has no otto equivalent (there is no `-n` dry run to override) and
+    // is just stripped, with no `|| true` since `-` never appeared.
+    assert!(task.action.contains("make -C sub"), "{}", task.action);
+    assert!(!task.action.contains("+make"), "{}", task.action);
+}
+
+/// A repeated prefix character (`--rm`, legal but pointless make) must not
+/// double the `|| true`.
+#[test]
+fn test_a_repeated_dash_prefix_still_adds_or_true_once() {
+    let mut ast = MakefileAst::new();
+    ast.targets.push(target("clean", &["--rm -rf dist"]));
+
+    let (config, _) = convert(ast);
+
+    let task = config.tasks.get("clean").unwrap();
+    assert_eq!(task.action.matches("|| true").count(), 1, "{}", task.action);
+    assert!(
+        task.action.contains("\nrm -rf dist || true"),
+        "a leftover literal `-` would make bash read this as an option: {}",
+        task.action
+    );
+}
+
 #[test]
 fn test_empty_makefile() {
     let (config, _) = convert(MakefileAst::new());

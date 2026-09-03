@@ -323,6 +323,23 @@ impl MakefileParser {
 
         let names: Vec<String> = target_part.split_whitespace().map(|s| s.to_string()).collect();
 
+        // `$(TARGETS): dep` - the target name is itself a make variable
+        // reference this parser does not expand. It used to become a task
+        // literally named `$(TARGETS)`, silently (converter.rs only warns for
+        // `$` in a dependency, never in the target itself), and that name then
+        // became the default task. Treated like a pattern rule: the name is
+        // unknowable here, so warn and skip the recipe rather than emit a
+        // task nothing can ever invoke by that name.
+        if names.iter().any(|n| n.contains("$(") || n.contains("${")) {
+            self.warn(
+                number,
+                format!("target `{target_part}` is a make expansion; otto task names cannot be computed; the rule is skipped"),
+            );
+            *index += 1;
+            self.skip_recipe(lines, index);
+            return Ok(None);
+        }
+
         // `%.o: %.c` - a pattern rule is a template, not a task. It used to
         // become a task literally named `%.o`, which then also became the
         // default task and failed the load with "unknown dependency '%.c'".
@@ -512,13 +529,19 @@ fn unsupported_directive(trimmed: &str) -> Option<&'static str> {
 }
 
 fn is_phony_declaration(line: &str) -> Option<Vec<String>> {
-    line.strip_prefix(".PHONY:").map(|targets_part| {
+    // `.PHONY : clean` (whitespace before the colon) is legal make; the old
+    // exact-prefix match on `.PHONY:` missed it, so the line fell through to
+    // "special target `.PHONY` is not converted" and every target it named
+    // then got a false "not `.PHONY`" warning of its own.
+    let after_name = line.strip_prefix(".PHONY")?;
+    let targets_part = after_name.trim_start().strip_prefix(':')?;
+    Some(
         split_inline_comment(targets_part)
             .0
             .split_whitespace()
             .map(|s| s.to_string())
-            .collect()
-    })
+            .collect(),
+    )
 }
 
 fn extract_default_goal(line: &str) -> Option<String> {

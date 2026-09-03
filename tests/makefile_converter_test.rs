@@ -64,6 +64,14 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
             "Makefile:13: warning: special target `.SUFFIXES` is not converted",
         ],
     ),
+    ("command-prefixes", &[]),
+    ("phony-space", &[]),
+    (
+        "dollar-paren-target",
+        &[
+            "Makefile:9: warning: target `$(TARGETS)` is a make expansion; otto task names cannot be computed; the rule is skipped",
+        ],
+    ),
     (
         "unsupported-constructs",
         &[

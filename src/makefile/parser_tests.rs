@@ -89,6 +89,23 @@ fn test_parse_phony_declaration() {
     assert!(ast.phony_targets.contains("test"));
 }
 
+/// `.PHONY : clean` (whitespace before the colon) is legal make. The old
+/// exact-prefix match on `.PHONY:` missed it, so the line fell through to
+/// "special target `.PHONY` is not converted" instead of being collected -
+/// and downstream, a target it named then looked non-phony to the converter's
+/// file-rule heuristic (covered end to end by the `makefiles/phony-space`
+/// golden fixture).
+#[test]
+fn test_phony_declaration_tolerates_whitespace_before_the_colon() {
+    let (ast, diagnostics) = parse(".PHONY : clean\n\nclean:\n\trm -rf dist\n");
+
+    assert!(ast.phony_targets.contains("clean"), "{:?}", ast.phony_targets);
+    assert!(diagnostics.is_empty(), "{}", messages(&diagnostics));
+
+    let clean = ast.targets.iter().find(|t| t.name == "clean").unwrap();
+    assert!(clean.is_phony, "the whitespace form must still mark the target phony");
+}
+
 #[test]
 fn test_phony_targets_mark_their_rules() {
     let (ast, _) = parse(".PHONY: build\n\nbuild:\n\techo hi\n\napp.bin:\n\techo bin");
@@ -309,6 +326,37 @@ fn test_double_colon_rule_keeps_its_dependencies() {
     );
     assert!(
         messages(&diagnostics).contains("double-colon"),
+        "{}",
+        messages(&diagnostics)
+    );
+}
+
+/// `$(TARGETS): dep` - the target name is a make variable reference this
+/// parser does not expand. It used to become a literal task named
+/// `$(TARGETS)` with no warning at all (`converter.rs` only warns for `$` in
+/// a *dependency*), and that unpronounceable name then became the default
+/// task.
+#[test]
+fn test_dollar_paren_target_is_skipped_with_a_warning() {
+    let (ast, diagnostics) = parse("$(TARGETS): dep\n\techo hi\n\ndep:\n\techo dep\n");
+
+    assert_eq!(ast.targets.len(), 1, "the make-expansion target must not become a task");
+    assert_eq!(ast.targets[0].name, "dep");
+    assert!(
+        messages(&diagnostics).contains("$(TARGETS)"),
+        "{}",
+        messages(&diagnostics)
+    );
+}
+
+/// `${TARGETS}` uses the brace form of the same expansion syntax.
+#[test]
+fn test_dollar_brace_target_is_skipped_with_a_warning() {
+    let (ast, diagnostics) = parse("${TARGETS}: dep\n\techo hi\n\ndep:\n\techo dep\n");
+
+    assert_eq!(ast.targets.len(), 1, "the make-expansion target must not become a task");
+    assert!(
+        messages(&diagnostics).contains("${TARGETS}"),
         "{}",
         messages(&diagnostics)
     );

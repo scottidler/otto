@@ -1,0 +1,14 @@
+# Expected conversion of this directory's Makefile: `@`, `-`, and `+` are
+# each stripped regardless of order or repetition, and `-` (however many
+# times it appears) becomes exactly one `|| true`.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - task
+tasks:
+  task:
+    bash: |-
+      rm -rf dist || true
+      echo hi || true
+      make -C sub

@@ -278,29 +278,38 @@ impl OttoConverter {
         let mut script = String::from("#!/bin/bash\n");
 
         for cmd in commands {
-            let trimmed = cmd.trim();
-
-            // Remove Make-specific prefixes
-            let cleaned_cmd = if let Some(cmd_without_at) = trimmed.strip_prefix('@') {
-                // @ suppresses echo in Make, not needed in Otto
-                cmd_without_at.trim_start()
-            } else if let Some(cmd_without_dash) = trimmed.strip_prefix('-') {
-                // - ignores errors in Make
-                // In Otto/bash, we can use `|| true` for this
-                let cmd_without_prefix = cmd_without_dash.trim_start().to_string();
-                let rewritten = self.rewrite_expansions(&cmd_without_prefix, line, known);
-                script.push_str(&rewritten);
-                script.push_str(" || true\n");
-                continue;
-            } else {
-                trimmed
-            };
+            let mut rest = cmd.trim();
+            // Make allows `@`, `-`, and `+` in any order, repeated
+            // (`@-cmd`, `-@cmd`, `+cmd`, ...): `@` suppresses echo, `-`
+            // ignores the command's exit status, `+` always runs the
+            // recipe line even under `-n`. Otto's script always echoes and
+            // `+` has no otto equivalent (there is no "dry run" to override),
+            // so both are just stripped; `-` becomes `|| true`. The old code
+            // peeled at most one prefix character, so `@-rm -rf dist` kept
+            // the literal `-` in the command instead of enabling ignore-errors,
+            // and `-@echo hi` left a literal `@` for bash to choke on.
+            let mut ignore_errors = false;
+            loop {
+                if let Some(r) = rest.strip_prefix('@') {
+                    rest = r.trim_start();
+                } else if let Some(r) = rest.strip_prefix('-') {
+                    ignore_errors = true;
+                    rest = r.trim_start();
+                } else if let Some(r) = rest.strip_prefix('+') {
+                    rest = r.trim_start();
+                } else {
+                    break;
+                }
+            }
 
             // `$(VAR)` used to go into bash verbatim, where it is command
             // substitution: it printed "VAR: command not found", expanded to
             // nothing, and the task still succeeded.
-            let rewritten = self.rewrite_expansions(cleaned_cmd, line, known);
+            let rewritten = self.rewrite_expansions(rest, line, known);
             script.push_str(&rewritten);
+            if ignore_errors {
+                script.push_str(" || true");
+            }
             script.push('\n');
         }
 
