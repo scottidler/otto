@@ -347,23 +347,78 @@ fn an_ottofile_after_a_double_dash_is_not_ours() {
 
 #[test]
 fn take_tui_flag_strips_the_flag_and_reports_it() {
-    let (kept, found) = take_tui_flag(names(&["build", "--tui", "--msg=x"]));
+    let (kept, found) = take_tui_flag(names(&["build", "--tui", "--msg=x"]), true);
     assert_eq!(kept, names(&["build", "--msg=x"]));
     assert!(found);
 }
 
 #[test]
+fn take_tui_flag_strips_the_declared_short_too() {
+    // `-t` is `--tui`'s declared short and global, so `otto build -t` has to
+    // mean the same thing as `otto build --tui`; unstripped, it reached the
+    // task's clap command as "unexpected argument '-t'".
+    let (kept, found) = take_tui_flag(names(&["build", "-t"]), true);
+    assert_eq!(kept, names(&["build"]));
+    assert!(found);
+}
+
+#[test]
+fn take_tui_flag_leaves_a_short_the_task_declares() {
+    let (kept, found) = take_tui_flag(names(&["build", "-t", "unit"]), false);
+    assert_eq!(kept, names(&["build", "-t", "unit"]));
+    assert!(!found, "a task that declares -t owns it");
+}
+
+#[test]
 fn take_tui_flag_leaves_other_args_alone() {
-    let (kept, found) = take_tui_flag(names(&["build", "--msg=x"]));
+    let (kept, found) = take_tui_flag(names(&["build", "--msg=x"]), true);
     assert_eq!(kept, names(&["build", "--msg=x"]));
     assert!(!found);
 }
 
 #[test]
 fn take_tui_flag_respects_a_double_dash() {
-    let (kept, found) = take_tui_flag(names(&["build", "--", "--tui"]));
-    assert_eq!(kept, names(&["build", "--", "--tui"]));
+    let (kept, found) = take_tui_flag(names(&["build", "--", "--tui", "-t"]), true);
+    assert_eq!(kept, names(&["build", "--", "--tui", "-t"]));
     assert!(!found, "after -- the flag belongs to the task");
+}
+
+// =========================================================================
+// builtin/user task lists (Phase 5)
+// =========================================================================
+
+#[test]
+fn a_mixed_task_list_is_rejected_naming_both_sides() {
+    let err = reject_mixed_task_list(&names(&["build", "Clean"]))
+        .expect_err("a builtin cannot be combined with an ordinary task")
+        .to_string();
+    assert!(err.contains("'build'"), "the error must name the task, got: {err}");
+    assert!(err.contains("'Clean'"), "the error must name the builtin, got: {err}");
+}
+
+#[test]
+fn a_mixed_task_list_names_every_offender() {
+    let err = reject_mixed_task_list(&names(&["build", "Clean", "test", "Stats"]))
+        .expect_err("a builtin cannot be combined with an ordinary task")
+        .to_string();
+    for name in ["build", "test", "Clean", "Stats"] {
+        assert!(err.contains(&format!("'{name}'")), "missing '{name}' in: {err}");
+    }
+}
+
+#[test]
+fn an_all_user_task_list_is_accepted() {
+    assert!(reject_mixed_task_list(&names(&["build", "test"])).is_ok());
+}
+
+#[test]
+fn a_lone_builtin_is_accepted() {
+    assert!(reject_mixed_task_list(&names(&["Clean"])).is_ok());
+}
+
+#[test]
+fn an_empty_task_list_is_accepted() {
+    assert!(reject_mixed_task_list(&[]).is_ok());
 }
 
 #[test]

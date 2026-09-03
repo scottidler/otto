@@ -244,13 +244,20 @@ fn canonical_choice<'a>(value: &str, choices: &'a [String]) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// Strip a `--tui` that landed in a task's arguments, reporting whether it was there.
+/// Strip a `--tui`/`-t` that landed in a task's arguments, reporting whether it
+/// was there.
 ///
 /// `--tui` is `.global(true)`, which clap does not propagate into external
 /// subcommands - and every otto task is an external subcommand - so
-/// `otto build --tui` failed with `unexpected argument '--tui'`. Anything after
-/// a `--` belongs to the task verbatim and is left alone.
-fn take_tui_flag(args: Vec<String>) -> (Vec<String>, bool) {
+/// `otto build --tui` failed with `unexpected argument '--tui'`. The declared
+/// short (`-t`) was not stripped alongside it, so `otto build -t` failed the
+/// same way against a flag `--help` says is global.
+///
+/// `take_short` is false when some task named in the same arg list declares its
+/// own `-t`: then the token is that task's, not otto's, and eating it here
+/// would make a declared param unreachable. Anything after a `--` belongs to
+/// the task verbatim and is left alone.
+fn take_tui_flag(args: Vec<String>, take_short: bool) -> (Vec<String>, bool) {
     let mut found = false;
     let mut kept = Vec::with_capacity(args.len());
     let mut iter = args.into_iter();
@@ -259,7 +266,7 @@ fn take_tui_flag(args: Vec<String>) -> (Vec<String>, bool) {
             kept.push(arg);
             break;
         }
-        if arg == "--tui" {
+        if arg == "--tui" || (take_short && arg == "-t") {
             found = true;
             continue;
         }
@@ -267,6 +274,38 @@ fn take_tui_flag(args: Vec<String>) -> (Vec<String>, bool) {
     }
     kept.extend(iter);
     (kept, found)
+}
+
+/// Reject a task list that names both a builtin and an ordinary task.
+///
+/// A builtin is dispatched by `app::find_builtin`, which returns on the first
+/// one it finds, so `otto build Clean` ran `Clean` and dropped `build` on the
+/// floor with exit 0 - the user asked for two things, otto did one and said
+/// nothing. The two cannot be combined (a builtin is not scheduled in the DAG),
+/// so the honest answer is an error naming both sides.
+fn reject_mixed_task_list(tasks_to_run: &[String]) -> Result<()> {
+    let (builtins, others): (Vec<&str>, Vec<&str>) = tasks_to_run
+        .iter()
+        .map(String::as_str)
+        .partition(|name| is_builtin(name));
+    if builtins.is_empty() || others.is_empty() {
+        return Ok(());
+    }
+    Err(eyre!(
+        "cannot run builtin command(s) {} together with task(s) {}: \
+         a builtin command runs on its own",
+        quoted_list(&builtins),
+        quoted_list(&others)
+    ))
+}
+
+/// `a`, `b` -> `'a', 'b'`, for an error that has to name every offender.
+fn quoted_list(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// True when `flag` appears in `args` as a flag, not as some option's value.
@@ -854,7 +893,14 @@ impl Parser {
                                                 hash: String::new(),
                                                 args: self.args.clone(),
                                                 pargs: Vec::new(),
-                                                ottofile: None,
+                                                // The real path, not `None`:
+                                                // `base_dir()` reads this, so
+                                                // help used to resolve foreach
+                                                // globs against the cwd instead
+                                                // of the ottofile's directory
+                                                // and rendered `[0 items]` from
+                                                // a subdirectory.
+                                                ottofile: Some(path.clone()),
                                                 jobs: num_cpus::get(),
                                                 resolver: DynamicResolver::new(),
                                             };
@@ -992,7 +1038,8 @@ impl Parser {
 
         // `--tui` is global but clap does not push global flags into external
         // subcommands, so `otto build --tui` arrives here as a task argument.
-        let (remaining_args, tui_in_task_args) = take_tui_flag(remaining_args);
+        let take_short_t = !self.args_claim_short(&remaining_args, 't');
+        let (remaining_args, tui_in_task_args) = take_tui_flag(remaining_args, take_short_t);
         tui_mode = tui_mode || tui_in_task_args;
 
         // Handle help commands
@@ -1025,6 +1072,10 @@ impl Parser {
             // Extract task names from partitions
             self.extract_task_names_from_partitions()
         };
+
+        // A builtin runs alone; naming one alongside an ordinary task used to
+        // run the builtin and silently drop the rest.
+        reject_mixed_task_list(&tasks_to_run)?;
 
         // Process tasks and build DAG
         let tasks = self.process_tasks_with_filter(&tasks_to_run)?;

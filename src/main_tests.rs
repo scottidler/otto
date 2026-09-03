@@ -254,3 +254,38 @@ fn test_apply_cwd_flag_stops_at_double_dash() {
     // -C after -- should not be consumed
     assert_eq!(result, args);
 }
+
+// =========================================================================
+// Early builtin routing (Phase 5)
+// =========================================================================
+
+#[test]
+fn every_builtin_but_graph_is_early_routed() {
+    // The two lists are deliberately different by exactly one entry. `Graph`
+    // needs the parsed ottofile's task specs, so it has no early route; every
+    // other builtin must have one, or `otto NAME --flag` falls through to the
+    // task parser and dies on a flag the builtin's own clap parser declares.
+    for builtin in otto::app::Builtin::all() {
+        let route = EarlyCommand::from_name(builtin.task_name());
+        if builtin == otto::app::Builtin::Graph {
+            assert!(
+                route.is_none(),
+                "Graph must stay on the task route: it needs the ottofile's task specs"
+            );
+        } else {
+            assert!(
+                route.is_some(),
+                "builtin '{}' has no early route in handle_subcommand",
+                builtin.task_name()
+            );
+        }
+    }
+}
+
+#[test]
+fn an_ordinary_task_name_has_no_early_route() {
+    assert_eq!(EarlyCommand::from_name("build"), None);
+    // Case matters: the builtins are capitalized precisely so a lowercase task
+    // name of the same word is the user's.
+    assert_eq!(EarlyCommand::from_name("clean"), None);
+}

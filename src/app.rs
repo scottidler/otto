@@ -285,16 +285,6 @@ pub async fn dispatch_builtin(builtin: Builtin, task: &Task) -> Result<(), Repor
 // Pure Functions - Task Filtering
 // ============================================================================
 
-/// Filter out built-in commands from a list of tasks.
-/// Returns only tasks that should be executed by the scheduler.
-/// This is a pure function - no I/O, easily testable.
-pub fn filter_execution_tasks(tasks: Vec<Task>) -> Vec<Task> {
-    tasks
-        .into_iter()
-        .filter(|task| !crate::cli::is_builtin(&task.name))
-        .collect()
-}
-
 /// Convert parser tasks into executor tasks.
 ///
 /// One conversion for both output modes: the terminal path and the TUI path
@@ -434,14 +424,6 @@ pub async fn execute_with_terminal_output(
         return dispatch_builtin(builtin, task).await;
     }
 
-    // Filter out built-in commands for normal execution using pure function
-    let execution_tasks = filter_execution_tasks(tasks);
-
-    if execution_tasks.is_empty() {
-        println!("No tasks to execute");
-        return Ok(());
-    }
-
     let cwd = crate::executor::workspace::current_dir()?;
     let root = ottofile_base_dir(ottofile_path.as_deref(), &cwd).to_path_buf();
     let workspace = Workspace::new(root).await?;
@@ -455,7 +437,7 @@ pub async fn execute_with_terminal_output(
     workspace.save_execution_context(execution_context.clone()).await?;
 
     // Convert parser tasks to executor tasks
-    let executor_tasks = build_executor_tasks(execution_tasks);
+    let executor_tasks = build_executor_tasks(tasks);
 
     // The scheduler takes ownership; teardown still needs the workspace to close
     // out the run in the database.
@@ -598,14 +580,6 @@ pub async fn execute_with_tui(
         return dispatch_builtin(builtin, task).await;
     }
 
-    // Filter out built-in commands for normal execution using pure function
-    let execution_tasks = filter_execution_tasks(tasks);
-
-    if execution_tasks.is_empty() {
-        eprintln!("No tasks to execute");
-        return Ok(());
-    }
-
     let cwd = crate::executor::workspace::current_dir()?;
     let root = ottofile_base_dir(ottofile_path.as_deref(), &cwd).to_path_buf();
     let workspace = Workspace::new(root).await?;
@@ -618,7 +592,7 @@ pub async fn execute_with_tui(
     // Save execution context to run directory
     workspace.save_execution_context(execution_context.clone()).await?;
 
-    let executor_tasks = build_executor_tasks(execution_tasks);
+    let executor_tasks = build_executor_tasks(tasks);
 
     let mut task_streams_map = std::collections::HashMap::new();
     let output_dir = workspace.run().join("tasks");

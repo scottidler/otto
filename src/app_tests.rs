@@ -298,9 +298,11 @@ fn a_plain_task_list_dispatches_no_builtin() {
 }
 
 #[test]
-fn a_builtin_is_found_alongside_ordinary_tasks() {
-    // This is the TUI/terminal parity case: both paths ask this one
-    // question, so `otto --tui Graph` and `otto Graph` resolve alike.
+fn a_builtin_is_found_by_position_not_by_being_alone() {
+    // The lookup is positional, which is why a mixed list is rejected one
+    // layer up in `Parser::parse` (Phase 5): here, `build` is simply dropped.
+    // Pinned so the rejection is not quietly removed and this silent-drop
+    // becomes reachable again.
     let tasks = vec![create_test_task("build"), create_test_task("Graph")];
     let (builtin, task) = find_builtin(&tasks).expect("Graph is a builtin");
     assert_eq!(builtin, Builtin::Graph);
@@ -372,52 +374,6 @@ fn a_flag_value_that_is_not_true_reads_as_false() {
     let mut values = HashMap::new();
     values.insert("force".to_string(), Value::Item("false".to_string()));
     assert!(!extract_upgrade_params(&values).force);
-}
-
-#[test]
-fn test_filter_execution_tasks_empty() {
-    let tasks: Vec<Task> = vec![];
-    let filtered = filter_execution_tasks(tasks);
-    assert!(filtered.is_empty());
-}
-
-#[test]
-fn test_filter_execution_tasks_removes_builtins() {
-    let tasks = vec![
-        create_test_task("build"),
-        create_test_task("Clean"),
-        create_test_task("test"),
-        create_test_task("History"),
-        create_test_task("deploy"),
-    ];
-    let filtered = filter_execution_tasks(tasks);
-    assert_eq!(filtered.len(), 3);
-    assert_eq!(filtered[0].name, "build");
-    assert_eq!(filtered[1].name, "test");
-    assert_eq!(filtered[2].name, "deploy");
-}
-
-#[test]
-fn test_filter_execution_tasks_no_builtins() {
-    let tasks = vec![
-        create_test_task("build"),
-        create_test_task("test"),
-        create_test_task("lint"),
-    ];
-    let filtered = filter_execution_tasks(tasks);
-    assert_eq!(filtered.len(), 3);
-}
-
-#[test]
-fn test_filter_execution_tasks_all_builtins() {
-    let tasks = vec![
-        create_test_task("Clean"),
-        create_test_task("History"),
-        create_test_task("Stats"),
-        create_test_task("Graph"),
-    ];
-    let filtered = filter_execution_tasks(tasks);
-    assert!(filtered.is_empty());
 }
 
 #[test]

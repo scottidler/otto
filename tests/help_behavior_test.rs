@@ -534,3 +534,45 @@ tasks:
         .failure()
         .stderr(predicate::str::contains("reserved builtin param"));
 }
+
+/// `otto --help` from a subdirectory resolves foreach globs against the
+/// ottofile's directory, not the cwd.
+///
+/// The `--help` path builds a throwaway parser to render the task list, and it
+/// built it with `ottofile: None`, which makes `base_dir()` the cwd. So the
+/// item count in a foreach task's help was whatever the glob happened to match
+/// in the directory the user was standing in: a real count at the project root,
+/// `[foreach]` one level down.
+/// (`docs/design/2026-09-02-second-code-review-remediation.md`, Phase 5)
+#[test]
+fn help_from_a_subdirectory_counts_foreach_items_from_the_ottofile_dir() {
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("otto.yml"),
+        r#"
+otto:
+  api: 1
+tasks:
+  each:
+    help: Per item
+    foreach:
+      glob: "items/*.txt"
+      as: item
+    action: echo "$item"
+"#,
+    )
+    .unwrap();
+    fs::create_dir(temp.path().join("items")).unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(temp.path().join("items").join(name), "x").unwrap();
+    }
+    let subdir = temp.path().join("deep");
+    fs::create_dir(&subdir).unwrap();
+
+    common::otto_cmd(&temp.path().join(".otto"))
+        .current_dir(&subdir)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[3 items]"));
+}

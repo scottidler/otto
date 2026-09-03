@@ -19,11 +19,18 @@ impl Parser {
                 // capitalized.
                 resolved_tasks.extend(self.config_spec.tasks.keys().filter(|name| !is_builtin(name)).cloned());
             } else {
-                // Specific task name
+                // Specific task name. A default task that does not exist is the
+                // same mistake as `otto <unknown-task>` typed by hand, so it
+                // fails the same way, with the same near-match suggestion: the
+                // warning it replaces was followed by "No tasks to execute" and
+                // exit 0, which reads as success for a run that did nothing.
                 if self.config_spec.tasks.contains_key(task_pattern) {
                     resolved_tasks.push(task_pattern.clone());
                 } else {
-                    eprintln!("Warning: Default task '{task_pattern}' not found");
+                    return Err(unknown_task_error(
+                        std::slice::from_ref(task_pattern),
+                        &self.known_task_names(),
+                    ));
                 }
             }
         }

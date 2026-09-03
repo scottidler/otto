@@ -58,7 +58,11 @@ impl Parser {
             let config_spec: ConfigSpec =
                 serde_yaml::from_str(&content).map_err(crate::cfg::otto::wrap_unknown_field_error)?;
 
-            // Validate that no tasks use reserved builtin param names
+            // Validate that no tasks use reserved builtin task or param names.
+            // Task names first: a task named `Clean` is shadowed by the builtin
+            // on every surface, so the file is unrunnable as written and saying
+            // so here beats silently running the builtin.
+            Self::validate_no_builtin_tasks(&config_spec)?;
             Self::validate_no_builtin_params(&config_spec)?;
 
             // Validate every `foreach:` block: exactly one source, an `as:`
@@ -195,6 +199,29 @@ impl Parser {
                     "Task '{task_name}': foreach.jobs cannot be combined with tty; \
                      a tty task owns the terminal exclusively, so it runs exclusively \
                      and a per-group concurrency override cannot be honored"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject a task whose name is a builtin command name.
+    ///
+    /// `inject_builtin_commands` does `tasks.insert("Clean", ...)` on an
+    /// `IndexMap`, which replaces a user task of that name in place, and
+    /// `main`'s early route reaches the builtin's own clap parser before the
+    /// ottofile is even read. So a task named `Clean` could never run: the
+    /// builtin ran instead, exit 0, with nothing said about the task the user
+    /// wrote. Same shape as `validate_no_builtin_params` below, at load time,
+    /// so every surface including `--help` reports it.
+    fn validate_no_builtin_tasks(config: &ConfigSpec) -> Result<()> {
+        for task_name in config.tasks.keys() {
+            if is_builtin(task_name) {
+                return Err(eyre!(
+                    "Task '{}' defines reserved builtin command name '{}'. \
+                     Capitalized names are reserved for otto builtins.",
+                    task_name,
+                    task_name
                 ));
             }
         }
