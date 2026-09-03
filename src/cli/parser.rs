@@ -368,7 +368,10 @@ fn unconsumed_args<'a>(args: &'a [String], task_names: &[String]) -> Option<&'a 
 fn nearest_task_name<'a>(unknown: &str, task_names: &'a [String]) -> Option<&'a str> {
     task_names
         .iter()
-        .filter(|name| name.as_str() != "graph" && name.as_str() != "help")
+        // `help` is a partition-only entry, not a task to suggest. The
+        // lowercase `"graph"` that used to be filtered here never appeared in
+        // a production name list: the builtin is `Graph`.
+        .filter(|name| name.as_str() != "help")
         .map(|name| (levenshtein::levenshtein(unknown, name), name.as_str()))
         .filter(|(distance, name)| *distance <= MAX_SUGGESTION_DISTANCE && *distance < name.len())
         .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)))
@@ -416,9 +419,13 @@ fn nargs_to_num_args(nargs: &Nargs) -> clap::builder::ValueRange {
     }
 }
 
-fn calculate_hash(action: &str) -> String {
+/// The first 8 hex digits of `content`'s sha256.
+///
+/// One function for both callers: a task's action hash and the ottofile's
+/// project hash were the same four lines written twice, in two files.
+fn short_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(action);
+    hasher.update(content);
     let result = hasher.finalize();
     hex::encode(result)[..8].to_string()
 }
@@ -455,17 +462,6 @@ fn ottofile_parse_error_message(ottofile: &std::path::Path, err: &eyre::Report) 
         err
     )
 }
-
-#[derive(Debug)]
-pub struct OttofileNotFound;
-
-impl std::fmt::Display for OttofileNotFound {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", ottofile_not_found_message())
-    }
-}
-
-impl std::error::Error for OttofileNotFound {}
 
 /// Serial foreach group membership: subtask name -> (group name, order index).
 type SerialMembership = HashMap<String, (String, usize)>;
@@ -560,7 +556,7 @@ impl Task {
         values: HashMap<String, Value>,
         action: String,
     ) -> Self {
-        let hash = calculate_hash(&action);
+        let hash = short_hash(&action);
         Self {
             name,
             task_deps,
@@ -705,9 +701,7 @@ enum BuildMode {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Parser {
-    prog: String,
     cwd: PathBuf,
-    user: String,
     config_spec: ConfigSpec,
     hash: String,
     args: Vec<String>,
@@ -723,14 +717,10 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(args: Vec<String>) -> Result<Self> {
-        let prog = args.first().cloned().unwrap_or_else(|| "otto".to_string());
         let cwd = crate::executor::workspace::current_dir()?;
-        let user = env::var("USER").unwrap_or_else(|_| "unknown".to_string());
 
         Ok(Self {
-            prog,
             cwd,
-            user,
             config_spec: ConfigSpec::default(),
             hash: String::new(),
             args,
@@ -886,9 +876,7 @@ impl Parser {
                                     match Self::load_config_from_path(Some(path.clone())) {
                                         Ok((config_spec, _, _)) => {
                                             let mut temp_parser = Self {
-                                                prog: self.prog.clone(),
                                                 cwd: self.cwd.clone(),
-                                                user: self.user.clone(),
                                                 config_spec,
                                                 hash: String::new(),
                                                 args: self.args.clone(),
@@ -1097,43 +1085,21 @@ impl Parser {
             // Parse command line arguments to extract ottofile path (similar to main parse method)
             let otto_cmd = Self::otto_command();
 
-            // Try to parse with allow_external_subcommands to capture ottofile flag
-            let matches = match otto_cmd.try_get_matches_from(&self.args) {
-                Ok(m) => m,
-                Err(_) => {
-                    // Parsing failed, so read the flag and env directly rather
-                    // than divining from the cwd and ignoring what was asked for.
-                    let ottofile_value = ottofile_value_from_args(&self.args, env::var("OTTOFILE").ok());
-                    let ottofile_path = Self::divine_ottofile(ottofile_value)?;
-                    let (config_spec, hash, ottofile) = Self::load_config_from_path(ottofile_path)?;
-
-                    self.config_spec = config_spec;
-                    self.hash = hash;
-                    self.ottofile = ottofile;
-
-                    let all_task_names: Vec<String> = self
-                        .config_spec
-                        .tasks
-                        .keys()
-                        .filter(|name| !is_builtin(name))
-                        .cloned()
-                        .collect();
-
-                    // Process all tasks
-                    let tasks = self.process_tasks_with_filter(&all_task_names)?;
-
-                    return Ok((tasks, self.hash.clone(), self.ottofile.clone()));
-                }
+            // Both branches want one thing - where to look for the ottofile -
+            // and then load it identically, so only that differs here. They
+            // used to be two copies of the whole load-and-process tail.
+            let ottofile_value = match otto_cmd.try_get_matches_from(&self.args) {
+                // Clap handles the env var. No clap default: absent means
+                // Divine, which is a state and not a path. `expect`ing a value
+                // here is what the `"."` sentinel existed to satisfy.
+                Ok(matches) => matches
+                    .get_one::<String>("ottofile")
+                    .cloned()
+                    .map_or(OttofileSource::Divine, OttofileSource::Explicit),
+                // Parsing failed, so read the flag and env directly rather
+                // than divining from the cwd and ignoring what was asked for.
+                Err(_) => ottofile_value_from_args(&self.args, env::var("OTTOFILE").ok()),
             };
-
-            // Extract ottofile path from parsed arguments (Clap handles env var automatically)
-            // No clap default: absent means Divine, which is a state and not a
-            // path. `expect`ing a value here is what the `"."` sentinel existed
-            // to satisfy.
-            let ottofile_value = matches
-                .get_one::<String>("ottofile")
-                .cloned()
-                .map_or(OttofileSource::Divine, OttofileSource::Explicit);
 
             let ottofile_path = Self::divine_ottofile(ottofile_value)?;
             let (config_spec, hash, ottofile) = Self::load_config_from_path(ottofile_path)?;

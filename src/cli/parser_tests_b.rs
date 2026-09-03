@@ -1129,3 +1129,176 @@ fn divine_ottofile_walks_to_the_root_and_returns_none_rather_than_erroring() {
     let result = Parser::divine_ottofile(OttofileSource::Explicit(temp_dir.path().to_string_lossy().to_string()));
     assert!(matches!(result, Ok(None)), "{result:?}");
 }
+
+// =========================================================================
+// Builtin meta tasks are derived from clap
+// =========================================================================
+
+/// A clap `Arg`, rendered for comparison. Written independently of
+/// `builtin_param` on purpose: two mappings from the same declaration, so a
+/// change to either side of the derivation shows up as a diff instead of
+/// passing tautologically.
+fn describe_arg(arg: &Arg) -> String {
+    let kind = if arg.is_positional() {
+        "positional"
+    } else if matches!(arg.get_action(), clap::ArgAction::SetTrue | clap::ArgAction::SetFalse) {
+        "flag"
+    } else {
+        "option"
+    };
+    let name = match arg.get_long() {
+        Some(long) => long.to_string(),
+        None => arg.get_id().as_str().replace('_', "-"),
+    };
+    // Same rule as the derivation: a flag has no value set, and the
+    // `true`/`false` clap reports for one is an artifact of introspecting an
+    // unbuilt `Command`.
+    let mut choices: Vec<String> = if kind == "flag" {
+        vec![]
+    } else {
+        arg.get_possible_values()
+            .iter()
+            .filter(|value| !value.is_hide_set())
+            .map(|value| value.get_name().to_string())
+            .collect()
+    };
+    choices.sort();
+    format!(
+        "{name} kind={kind} short={:?} long={:?} default={:?} choices={:?} required={}",
+        arg.get_short(),
+        arg.get_long(),
+        arg.get_default_values()
+            .first()
+            .map(|value| value.to_string_lossy().to_string()),
+        choices,
+        arg.is_required_set(),
+    )
+}
+
+/// The same rendering, from the meta task's side.
+fn describe_param(param: &ParamSpec) -> String {
+    let kind = match param.param_type {
+        ParamType::POS => "positional",
+        ParamType::FLG => "flag",
+        ParamType::OPT => "option",
+    };
+    let mut choices = param.choices.clone();
+    choices.sort();
+    format!(
+        "{} kind={kind} short={:?} long={:?} default={:?} choices={:?} required={}",
+        param.name, param.short, param.long, param.default, choices, param.required,
+    )
+}
+
+/// The whole point of deriving the meta tasks: `otto help <BUILTIN>` and
+/// `otto <BUILTIN> --help` are one surface. If they can disagree they will -
+/// before the derivation, meta declared `--keep DAYS` where clap declared
+/// `--keep-days`, and `History`/`Stats` meta declared `-t|--task` for a
+/// positional `TASK`.
+#[test]
+fn every_builtin_meta_task_matches_its_clap_command() {
+    let mut parser = Parser::new(vec!["otto".to_string()]).expect("a parser with no ottofile");
+    parser.inject_builtin_commands();
+
+    for (command, _help) in builtin_clap_commands() {
+        let name = command.get_name();
+        let spec = parser
+            .config_spec
+            .tasks
+            .get(name)
+            .unwrap_or_else(|| panic!("builtin '{name}' has no meta task"));
+
+        let mut expected: Vec<String> = command
+            .get_arguments()
+            .filter(|arg| !arg.is_hide_set())
+            .map(describe_arg)
+            .collect();
+        let mut actual: Vec<String> = spec.params.values().map(describe_param).collect();
+        expected.sort();
+        actual.sort();
+
+        assert_eq!(actual, expected, "meta task '{name}' disagrees with its clap Command");
+        assert!(!expected.is_empty(), "builtin '{name}' declares no args at all");
+    }
+}
+
+/// Every reserved name has a meta task, and nothing else does.
+#[test]
+fn the_derived_meta_tasks_are_exactly_the_reserved_builtins() {
+    let mut parser = Parser::new(vec!["otto".to_string()]).expect("a parser with no ottofile");
+    parser.inject_builtin_commands();
+
+    let mut derived: Vec<&str> = parser.config_spec.tasks.keys().map(String::as_str).collect();
+    derived.sort();
+    let mut reserved: Vec<&str> = BUILTIN_COMMANDS.to_vec();
+    reserved.sort();
+    assert_eq!(derived, reserved);
+}
+
+/// A field clap is told to skip is not an arg, so it must not become a param:
+/// `Clean`'s `quiet` is set only by auto-prune, and `Upgrade`'s `releases_url`
+/// and `install_target` are private precisely so no command line can redirect
+/// where otto downloads a binary from.
+#[test]
+fn a_skipped_field_never_becomes_a_meta_param() {
+    let mut parser = Parser::new(vec!["otto".to_string()]).expect("a parser with no ottofile");
+    parser.inject_builtin_commands();
+
+    for (task, param) in [
+        ("Clean", "quiet"),
+        ("Upgrade", "releases-url"),
+        ("Upgrade", "install-target"),
+    ] {
+        let spec = &parser.config_spec.tasks[task];
+        assert!(!spec.params.contains_key(param), "'{task}' must not declare '{param}'");
+    }
+}
+
+/// `Graph`'s default is `ascii`: the one format that renders in the terminal
+/// that asked for it, with no graphviz. `GraphOptions::default()` is `Svg` and
+/// has only test callers.
+#[test]
+fn the_graph_meta_task_defaults_to_ascii_with_the_five_declared_formats() {
+    let mut parser = Parser::new(vec!["otto".to_string()]).expect("a parser with no ottofile");
+    parser.inject_builtin_commands();
+
+    let format = &parser.config_spec.tasks["Graph"].params["format"];
+    assert_eq!(format.default.as_deref(), Some("ascii"));
+    assert_eq!(format.choices, vec!["ascii", "dot", "svg", "png", "pdf"]);
+    assert_eq!(format.short, Some('f'));
+}
+
+/// The action string is a comment, never executed: a builtin is dispatched by
+/// name in `app::dispatch_builtin`.
+#[test]
+fn a_builtin_meta_task_carries_no_executable_action() {
+    let mut parser = Parser::new(vec!["otto".to_string()]).expect("a parser with no ottofile");
+    parser.inject_builtin_commands();
+
+    for name in BUILTIN_COMMANDS {
+        let spec = &parser.config_spec.tasks[*name];
+        assert_eq!(spec.action, format!("# Built-in {name} command"));
+        assert!(spec.foreach.is_none());
+        assert!(!spec.virtual_parent);
+        assert_eq!(spec.tty, None);
+        assert!(spec.on_failure.is_empty());
+        assert_eq!(spec.help.as_deref().map(|h| h.starts_with("[built-in] ")), Some(true));
+    }
+}
+
+/// `nargs:` and clap's value count are inverses. `nargs_to_num_args` is
+/// pinned in `parser_tests_a.rs`; this is the other direction, which the
+/// derivation reads.
+#[test]
+fn num_args_to_nargs_inverts_every_variant() {
+    for nargs in [
+        Nargs::One,
+        Nargs::Zero,
+        Nargs::OneOrZero,
+        Nargs::OneOrMore,
+        Nargs::ZeroOrMore,
+        Nargs::Range(2, 5),
+    ] {
+        assert_eq!(num_args_to_nargs(nargs_to_num_args(&nargs)), nargs, "{nargs:?}");
+    }
+}

@@ -77,7 +77,7 @@ impl StatusFilter {
 
 /// Show execution history
 #[derive(Debug, clap::Parser)]
-#[command(name = "history")]
+#[command(name = "History")]
 pub struct HistoryCommand {
     /// Show history for a specific task
     #[arg(value_name = "TASK")]

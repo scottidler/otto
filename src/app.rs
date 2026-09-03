@@ -1,10 +1,12 @@
 use crate::cfg::otto::RetentionSpec;
 use crate::cfg::param::Value;
+use crate::cli::commands::graph::{GraphCommand, GraphFormatArg};
 use crate::cli::commands::history::HistoryCommand;
 use crate::cli::commands::stats::StatsCommand;
 use crate::cli::parser::{Task, ottofile_base_dir};
 use crate::cli::{CleanCommand, ConvertCommand, ParseOutcome, Parser};
-use crate::executor::{DagVisualizer, TaskScheduler, Workspace};
+use crate::executor::{TaskScheduler, Workspace};
+use clap::ValueEnum as _;
 use eyre::{Report, Result, eyre};
 use log::{error, info};
 use std::collections::HashMap;
@@ -23,45 +25,40 @@ const TUI_MESSAGE_CHANNEL_CAPACITY: usize = 1_000;
 // ============================================================================
 
 /// Parameters for the Clean command, extracted from task values.
+///
+/// No `Default`: every field comes from `CleanCommand`'s clap args, so the
+/// only honest source for `keep_days`' 30 is that declaration. A `Default`
+/// here was a second copy of it that nothing outside its own test read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CleanParams {
     pub keep_days: u64,
+    pub keep_last: Option<usize>,
+    pub keep_failed: Option<u64>,
     pub dry_run: bool,
     pub project_filter: Option<String>,
-}
-
-impl Default for CleanParams {
-    fn default() -> Self {
-        CleanParams {
-            keep_days: 30,
-            dry_run: false,
-            project_filter: None,
-        }
-    }
+    pub no_db: bool,
 }
 
 /// Extract Clean command parameters from task values.
 /// This is a pure function - no I/O, easily testable.
 pub fn extract_clean_params(values: &HashMap<String, Value>) -> CleanParams {
-    let keep_days = if let Some(Value::Item(s)) = values.get("keep") {
-        s.parse::<u64>().unwrap_or(30)
-    } else {
-        30
-    };
-
-    let dry_run = values
-        .get("dry-run")
-        .and_then(|v| if let Value::Item(s) = v { Some(s == "true") } else { None })
-        .unwrap_or(false);
-
-    let project_filter = values
-        .get("project")
-        .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None });
-
     CleanParams {
-        keep_days,
-        dry_run,
-        project_filter,
+        keep_days: derived_item(values, "Clean", "keep-days")
+            .parse::<u64>()
+            .expect("Clean's --keep-days is derived from CleanCommand's u64 arg, which clap parses before binding"),
+        keep_last: optional_item(values, "keep-last").map(|s| {
+            s.parse::<usize>().expect(
+                "Clean's --keep-last is derived from CleanCommand's usize arg, which clap parses before binding",
+            )
+        }),
+        keep_failed: optional_item(values, "keep-failed").map(|s| {
+            s.parse::<u64>().expect(
+                "Clean's --keep-failed is derived from CleanCommand's u64 arg, which clap parses before binding",
+            )
+        }),
+        dry_run: flag_value(values, "dry-run"),
+        project_filter: optional_item(values, "project-filter").map(str::to_string),
+        no_db: flag_value(values, "no-db"),
     }
 }
 
@@ -75,50 +72,17 @@ pub struct HistoryParams {
     pub json: bool,
 }
 
-impl Default for HistoryParams {
-    fn default() -> Self {
-        HistoryParams {
-            task_name: None,
-            limit: 20,
-            status: None,
-            project: None,
-            json: false,
-        }
-    }
-}
-
 /// Extract History command parameters from task values.
 /// This is a pure function - no I/O, easily testable.
 pub fn extract_history_params(values: &HashMap<String, Value>) -> HistoryParams {
-    let task_name = values
-        .get("task")
-        .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None });
-
-    let limit = if let Some(Value::Item(s)) = values.get("limit") {
-        s.parse::<usize>().unwrap_or(20)
-    } else {
-        20
-    };
-
-    let status = values
-        .get("status")
-        .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None });
-
-    let project = values
-        .get("project")
-        .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None });
-
-    let json = values
-        .get("json")
-        .and_then(|v| if let Value::Item(s) = v { Some(s == "true") } else { None })
-        .unwrap_or(false);
-
     HistoryParams {
-        task_name,
-        limit,
-        status,
-        project,
-        json,
+        task_name: optional_item(values, "task-name").map(str::to_string),
+        limit: derived_item(values, "History", "limit")
+            .parse::<usize>()
+            .expect("History's --limit is derived from HistoryCommand's usize arg, which clap parses before binding"),
+        status: optional_item(values, "status").map(str::to_string),
+        project: optional_item(values, "project").map(str::to_string),
+        json: flag_value(values, "json"),
     }
 }
 
@@ -130,35 +94,38 @@ pub struct StatsParams {
     pub json: bool,
 }
 
-impl Default for StatsParams {
-    fn default() -> Self {
-        StatsParams {
-            task_name: None,
-            limit: 10,
-            json: false,
-        }
-    }
-}
-
 /// Extract Stats command parameters from task values.
 /// This is a pure function - no I/O, easily testable.
 pub fn extract_stats_params(values: &HashMap<String, Value>) -> StatsParams {
-    let task_name = values
-        .get("task")
-        .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None });
+    StatsParams {
+        task_name: optional_item(values, "task-name").map(str::to_string),
+        limit: derived_item(values, "Stats", "limit")
+            .parse::<usize>()
+            .expect("Stats' --limit is derived from StatsCommand's usize arg, which clap parses before binding"),
+        json: flag_value(values, "json"),
+    }
+}
 
-    let limit = if let Some(Value::Item(s)) = values.get("limit") {
-        s.parse::<usize>().unwrap_or(10)
-    } else {
-        10
-    };
+/// Parameters for the Graph command, extracted from task values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphParams {
+    pub format: GraphFormatArg,
+    pub output: Option<PathBuf>,
+}
 
-    let json = values
-        .get("json")
-        .and_then(|v| if let Value::Item(s) = v { Some(s == "true") } else { None })
-        .unwrap_or(false);
-
-    StatsParams { task_name, limit, json }
+/// Extract Graph command parameters from task values.
+/// This is a pure function - no I/O, easily testable.
+pub fn extract_graph_params(values: &HashMap<String, Value>) -> GraphParams {
+    let format = derived_item(values, "Graph", "format");
+    GraphParams {
+        // Typed here, not deep inside the visualizer: the format's value set
+        // is `GraphCommand`'s, otto binds the param against those same
+        // choices, and an unknown one is therefore impossible rather than
+        // quietly rendered as ascii.
+        format: GraphFormatArg::from_str(format, true)
+            .expect("Graph's --format is bound against GraphCommand's choices, which reject an unknown format"),
+        output: optional_item(values, "output").map(PathBuf::from),
+    }
 }
 
 /// Parameters for the Convert command, extracted from task values.
@@ -173,9 +140,7 @@ pub struct ConvertParams {
 pub fn extract_convert_params(values: &HashMap<String, Value>) -> ConvertParams {
     ConvertParams {
         strict: flag_value(values, "strict"),
-        output: values
-            .get("output")
-            .and_then(|v| if let Value::Item(s) = v { Some(PathBuf::from(s)) } else { None }),
+        output: optional_item(values, "output").map(PathBuf::from),
     }
 }
 
@@ -188,6 +153,8 @@ pub struct UpgradeParams {
     pub rollback: bool,
     pub force: bool,
     pub no_backup: bool,
+    pub backup_dir: Option<PathBuf>,
+    pub github_token: Option<String>,
 }
 
 /// Extract Upgrade command parameters from task values.
@@ -195,13 +162,13 @@ pub struct UpgradeParams {
 pub fn extract_upgrade_params(values: &HashMap<String, Value>) -> UpgradeParams {
     UpgradeParams {
         dry_run: flag_value(values, "dry-run"),
-        version: values
-            .get("version")
-            .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None }),
+        version: optional_item(values, "version").map(str::to_string),
         list_versions: flag_value(values, "list-versions"),
         rollback: flag_value(values, "rollback"),
         force: flag_value(values, "force"),
         no_backup: flag_value(values, "no-backup"),
+        backup_dir: optional_item(values, "backup-dir").map(PathBuf::from),
+        github_token: optional_item(values, "github-token").map(str::to_string),
     }
 }
 
@@ -211,6 +178,29 @@ fn flag_value(values: &HashMap<String, Value>, name: &str) -> bool {
         .get(name)
         .and_then(|v| if let Value::Item(s) = v { Some(s == "true") } else { None })
         .unwrap_or(false)
+}
+
+/// A param the user may or may not have given: no `default:`, so an absent
+/// value is a real answer and stays `None`.
+fn optional_item<'a>(values: &'a HashMap<String, Value>, name: &str) -> Option<&'a str> {
+    match values.get(name) {
+        Some(Value::Item(value)) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+/// A param the derivation guarantees is bound.
+///
+/// Every builtin param comes from its clap `Command`
+/// (`cli/parser/meta_tasks.rs`), and one carrying a `default_value` is written
+/// onto the task whether or not the user typed it (`process_tasks_with_filter`
+/// Phase 3). Missing here means the derivation or the bind broke, which is a
+/// bug in otto and not something a user typed - so it says so instead of
+/// silently substituting a second copy of the default.
+fn derived_item<'a>(values: &'a HashMap<String, Value>, builtin: &str, name: &str) -> &'a str {
+    optional_item(values, name).unwrap_or_else(|| {
+        panic!("{builtin}'s --{name} is derived from its clap Command, which gives it a default; a bound {builtin} task always carries a value")
+    })
 }
 
 // ============================================================================
@@ -274,7 +264,7 @@ pub async fn dispatch_builtin(builtin: Builtin, task: &Task) -> Result<(), Repor
     match builtin {
         Builtin::Clean => execute_clean_from_task(task).await,
         Builtin::Convert => execute_convert_from_task(task),
-        Builtin::Graph => DagVisualizer::execute_command(task).await,
+        Builtin::Graph => execute_graph_from_task(task),
         Builtin::History => execute_history_from_task(task),
         Builtin::Stats => execute_stats_from_task(task),
         Builtin::Upgrade => execute_upgrade_from_task(task).await,
@@ -734,11 +724,13 @@ pub async fn execute_clean_from_task(task: &Task) -> Result<(), Report> {
 
     let clean_cmd = CleanCommand {
         keep_days: params.keep_days,
-        keep_last: None,
-        keep_failed: None,
+        keep_last: params.keep_last,
+        keep_failed: params.keep_failed,
         dry_run: params.dry_run,
         project_filter: params.project_filter,
-        no_db: false,
+        no_db: params.no_db,
+        // Not a CLI flag: `#[arg(skip)]` on the field, so it has no meta param
+        // either. Only auto-prune sets it.
         quiet: false,
     };
     clean_cmd.execute().await?;
@@ -785,6 +777,19 @@ pub fn execute_stats_from_task(task: &Task) -> Result<(), Report> {
     Ok(())
 }
 
+/// Execute Graph command from a parsed task.
+pub fn execute_graph_from_task(task: &Task) -> Result<(), Report> {
+    let params = extract_graph_params(&task.values);
+
+    let graph_cmd = GraphCommand {
+        format: params.format,
+        output: params.output,
+    };
+    graph_cmd.execute()?;
+
+    Ok(())
+}
+
 /// Execute Convert command from a parsed task.
 pub fn execute_convert_from_task(task: &Task) -> Result<(), Report> {
     let params = extract_convert_params(&task.values);
@@ -815,10 +820,12 @@ pub async fn execute_upgrade_from_task(task: &Task) -> Result<(), Report> {
     upgrade_cmd.rollback = params.rollback;
     upgrade_cmd.force = params.force;
     upgrade_cmd.no_backup = params.no_backup;
+    upgrade_cmd.backup_dir = params.backup_dir;
     // `#[arg(env = "GITHUB_TOKEN")]` only fires when clap parses the args;
     // constructing the command directly has to read the env itself, or the
-    // task route silently loses the token and rate-limits.
-    upgrade_cmd.github_token = env::var("GITHUB_TOKEN").ok();
+    // task route silently loses the token and rate-limits. The flag wins over
+    // the environment, same as clap's own precedence.
+    upgrade_cmd.github_token = params.github_token.or_else(|| env::var("GITHUB_TOKEN").ok());
 
     upgrade_cmd.execute().await?;
 

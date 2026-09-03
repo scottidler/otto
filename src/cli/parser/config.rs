@@ -40,10 +40,7 @@ impl Parser {
             // "Permission denied (os error 13)" and no path at all.
             let content = fs::read_to_string(&ottofile)
                 .wrap_err_with(|| format!("could not read ottofile '{}'", ottofile.display()))?;
-            let mut hasher = Sha256::new();
-            hasher.update(&content);
-            let result = hasher.finalize();
-            let hash = hex::encode(result)[..8].to_string();
+            let hash = short_hash(&content);
 
             // Version gate BEFORE the typed parse, against the same string:
             // reversed, a file from a newer otto reports whichever key it

@@ -1,5 +1,3 @@
-#[macro_use]
-pub mod macros;
 pub mod builtins;
 pub mod commands;
 pub mod parser;

@@ -46,9 +46,11 @@ fn test_nearest_task_name_gives_up_on_a_distant_name() {
 }
 
 #[test]
-fn test_nearest_task_name_ignores_the_internal_names() {
-    // "graph" and "help" are partition-only entries, not things to suggest.
-    assert_eq!(nearest_task_name("grap", &names(&["graph", "help"])), None);
+fn test_nearest_task_name_ignores_help() {
+    // `help` is a partition-only entry, not a task to suggest. The lowercase
+    // `"graph"` this test used to pair it with was never in a production name
+    // list: the builtin is `Graph`.
+    assert_eq!(nearest_task_name("hel", &names(&["help"])), None);
 }
 
 #[test]

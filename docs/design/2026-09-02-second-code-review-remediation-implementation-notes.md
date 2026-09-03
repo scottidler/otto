@@ -222,3 +222,24 @@ Debug binary at `target/debug/otto`, `OTTO_HOME` pinned to a temp dir, run in a 
 ### Open questions
 - **Two builtins named together still silently drops all but the first.** `otto Clean Stats` runs `Clean` at rc 0 and says nothing about `Stats`, because `find_builtin` returns on the first match and this phase's guard only covers "a builtin plus a user task", which is what the doc specifies. The same one-line partition in `reject_mixed_task_list` could reject it; not done, because it is beyond the bullet.
 - **`otto Clean` on an ottofile that declares a task named `Clean` still runs the builtin without complaint.** `main`'s early route reaches `CleanCommand`'s own clap parser before any ottofile is read, so the new load-time rejection is not consulted on that one invocation. Every other surface (`otto`, `otto --help`, `otto --tasks`, `otto <any-task>`) rejects the file. Closing it would mean loading the ottofile before early routing, which would give `otto Clean` an ottofile requirement it deliberately does not have.
+
+## Phase 6: CLI meta tasks from clap, and dead CLI code
+
+### Design decisions
+- `GraphFormatArg` is a new CLI-side `clap::ValueEnum` in `src/cli/commands/graph.rs` rather than a `ValueEnum` derive on the executor's `GraphFormat` — `GraphFormat` also carries `Auto`, which is not a format a user can ask for, so deriving there would advertise a sixth choice that means nothing on the command line. Mirrors the existing `StatusFilter` -> `RunStatus` arrangement in `history.rs`.
+- `GraphCommand` gets the derive but no early route in `main` — `Graph` needs the parsed ottofile's task specs, so it stays task-route only, as the doc specifies. The derive exists solely as the single declaration the meta task is built from.
+- The parity test lives in `src/cli/parser_tests_b.rs` as `every_builtin_meta_task_matches_its_clap_command`, alongside three companions: `the_derived_meta_tasks_are_exactly_the_reserved_builtins`, `the_graph_meta_task_defaults_to_ascii_with_the_five_declared_formats`, and `a_builtin_meta_task_carries_no_executable_action`.
+- The three task-route extractors' silent fallbacks became `expect`s naming the derivation (`src/app.rs:48,82,104`), per the doc.
+
+### Deviations
+- Phase 6's implementing agent wedged after completing the code, tests, break-the-test proofs, and a full CI run, but before appending these notes or committing. The orchestrator verified every success criterion independently, re-ran `otto ci` to green on the same tree, wrote this section, and made the commit. No code was changed after the agent's last edit.
+- `src/executor/graph.rs` shrank by 41 lines: `DagVisualizer::render_ottofile_graph` and `execute_command` were the string-parsing entry points the task-route extractor called with `unwrap_or("ascii")`. With typed values arriving from the derive, the callers construct `GraphOptions` directly.
+- Four `cli/commands/*.rs` files changed by one line each (`clean.rs`, `convert.rs`, `history.rs`, `stats.rs`) — help-text wording that the derivation now surfaces in the meta task as well, so the two help surfaces agree verbatim.
+- `src/app_tests.rs` churned heavily (295 lines) because `CleanParams`/`HistoryParams`/`StatsParams` gained the fields the meta tasks previously omitted (`keep_last`, `keep_failed`, `no_db`, `backup_dir`, `github_token`), which removed their `Default` impls' usefulness in those tests.
+
+### Tradeoffs
+- Derivation over a parity test alone: the doc's Alternative 5 rejected keeping `meta_tasks.rs` plus a parity test, because a test detects drift after the fact. `meta_tasks.rs` dropped from 715 lines of changes to a mapper. The parity test is kept anyway as verification that the mapper is faithful, not as the drift guard.
+- `GraphFormatArg` duplicates five variant names that `GraphFormat` already has. The alternative (deriving on `GraphFormat`) leaks `Auto` into the CLI surface. Five names is the cheaper cost.
+
+### Open questions
+- None from the implementation. Two carried from Phase 5 remain open for the author: whether `otto Clean Stats` (two builtins together) should also be rejected, and that `main`'s early route runs a builtin before any ottofile read, so a file declaring a task named `Clean` is not rejected on that one invocation.

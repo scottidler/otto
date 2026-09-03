@@ -24,74 +24,118 @@ fn test_runtime_config_fields() {
 }
 
 // =========================================================================
+// Builtin param extraction
+// =========================================================================
+//
+// Every builtin's params are derived from its clap `Command`
+// (`cli/parser/meta_tasks.rs`), and a bound builtin task carries every
+// derived param that has a default - `process_tasks_with_filter` Phase 3
+// writes it whether or not the user typed the flag. So these build the values
+// map the same way, and the extractors `expect` rather than substituting a
+// second copy of the default.
+
+/// The `values` map a bound task carries, from `(param, value)` pairs.
+fn values(pairs: &[(&str, &str)]) -> HashMap<String, Value> {
+    pairs
+        .iter()
+        .map(|(name, value)| (name.to_string(), Value::Item(value.to_string())))
+        .collect()
+}
+
+/// What Phase 3 writes for a `Clean` invocation with no flags at all: the one
+/// defaulted param, plus `false` for each flag.
+fn bound_clean_values() -> HashMap<String, Value> {
+    values(&[("keep-days", "30"), ("dry-run", "false"), ("no-db", "false")])
+}
+
+/// Same, for `History`.
+fn bound_history_values() -> HashMap<String, Value> {
+    values(&[("limit", "20"), ("json", "false")])
+}
+
+/// Same, for `Stats`.
+fn bound_stats_values() -> HashMap<String, Value> {
+    values(&[("limit", "10"), ("json", "false")])
+}
+
+// =========================================================================
 // CleanParams Tests
 // =========================================================================
 
 #[test]
-fn test_clean_params_default() {
-    let params = CleanParams::default();
+fn test_extract_clean_params_from_a_bound_task_with_no_flags() {
+    let params = extract_clean_params(&bound_clean_values());
     assert_eq!(params.keep_days, 30);
+    assert_eq!(params.keep_last, None);
+    assert_eq!(params.keep_failed, None);
     assert!(!params.dry_run);
     assert_eq!(params.project_filter, None);
-}
-
-#[test]
-fn test_extract_clean_params_empty() {
-    let values = HashMap::new();
-    let params = extract_clean_params(&values);
-    assert_eq!(params, CleanParams::default());
+    assert!(!params.no_db);
 }
 
 #[test]
 fn test_extract_clean_params_with_keep_days() {
-    let mut values = HashMap::new();
-    values.insert("keep".to_string(), Value::Item("7".to_string()));
+    let mut values = bound_clean_values();
+    values.insert("keep-days".to_string(), Value::Item("7".to_string()));
     let params = extract_clean_params(&values);
     assert_eq!(params.keep_days, 7);
 }
 
+/// The inverse of the old "falls back to 30" test: a value clap's `u64` parser
+/// would never have bound is a bug in otto, and says so instead of silently
+/// cleaning to a different depth than asked.
 #[test]
-fn test_extract_clean_params_with_invalid_keep_days() {
-    let mut values = HashMap::new();
-    values.insert("keep".to_string(), Value::Item("invalid".to_string()));
-    let params = extract_clean_params(&values);
-    assert_eq!(params.keep_days, 30); // Falls back to default
+#[should_panic(expected = "Clean's --keep-days is derived from CleanCommand's u64 arg")]
+fn test_extract_clean_params_refuses_an_unparseable_keep_days() {
+    let mut values = bound_clean_values();
+    values.insert("keep-days".to_string(), Value::Item("invalid".to_string()));
+    let _ = extract_clean_params(&values);
+}
+
+/// The inverse of the old "empty map is the default" test: `--keep-days` is
+/// derived with a `default_value`, so an unbound task means the derivation or
+/// the bind broke.
+#[test]
+#[should_panic(expected = "Clean's --keep-days is derived from its clap Command")]
+fn test_extract_clean_params_refuses_an_unbound_task() {
+    let _ = extract_clean_params(&HashMap::new());
 }
 
 #[test]
 fn test_extract_clean_params_with_dry_run_true() {
-    let mut values = HashMap::new();
+    let mut values = bound_clean_values();
     values.insert("dry-run".to_string(), Value::Item("true".to_string()));
     let params = extract_clean_params(&values);
     assert!(params.dry_run);
 }
 
 #[test]
-fn test_extract_clean_params_with_dry_run_false() {
-    let mut values = HashMap::new();
-    values.insert("dry-run".to_string(), Value::Item("false".to_string()));
-    let params = extract_clean_params(&values);
-    assert!(!params.dry_run);
-}
-
-#[test]
-fn test_extract_clean_params_with_project() {
-    let mut values = HashMap::new();
-    values.insert("project".to_string(), Value::Item("my-project".to_string()));
+fn test_extract_clean_params_with_project_filter() {
+    let mut values = bound_clean_values();
+    values.insert("project-filter".to_string(), Value::Item("my-project".to_string()));
     let params = extract_clean_params(&values);
     assert_eq!(params.project_filter, Some("my-project".to_string()));
 }
 
+/// `--keep-last`, `--keep-failed` and `--no-db` exist on `CleanCommand` and
+/// were missing from the hand-written meta task, so the task route dropped
+/// them on the floor. Derived now, and read here.
 #[test]
 fn test_extract_clean_params_all_fields() {
-    let mut values = HashMap::new();
-    values.insert("keep".to_string(), Value::Item("14".to_string()));
-    values.insert("dry-run".to_string(), Value::Item("true".to_string()));
-    values.insert("project".to_string(), Value::Item("test-project".to_string()));
-    let params = extract_clean_params(&values);
+    let params = extract_clean_params(&values(&[
+        ("keep-days", "14"),
+        ("keep-last", "3"),
+        ("keep-failed", "90"),
+        ("dry-run", "true"),
+        ("project-filter", "test-project"),
+        ("no-db", "true"),
+    ]));
     assert_eq!(params.keep_days, 14);
+    assert_eq!(params.keep_last, Some(3));
+    assert_eq!(params.keep_failed, Some(90));
     assert!(params.dry_run);
     assert_eq!(params.project_filter, Some("test-project".to_string()));
+    assert!(params.no_db);
 }
 
 // =========================================================================
@@ -99,8 +143,8 @@ fn test_extract_clean_params_all_fields() {
 // =========================================================================
 
 #[test]
-fn test_history_params_default() {
-    let params = HistoryParams::default();
+fn test_extract_history_params_from_a_bound_task_with_no_flags() {
+    let params = extract_history_params(&bound_history_values());
     assert_eq!(params.task_name, None);
     assert_eq!(params.limit, 20);
     assert_eq!(params.status, None);
@@ -108,40 +152,42 @@ fn test_history_params_default() {
     assert!(!params.json);
 }
 
-#[test]
-fn test_extract_history_params_empty() {
-    let values = HashMap::new();
-    let params = extract_history_params(&values);
-    assert_eq!(params, HistoryParams::default());
-}
-
+/// `TASK` is positional on `HistoryCommand`, so the derived param is named
+/// after the field (`task-name`); the meta task used to declare `-t|--task`,
+/// a flag `otto History --help` never showed.
 #[test]
 fn test_extract_history_params_with_task() {
-    let mut values = HashMap::new();
-    values.insert("task".to_string(), Value::Item("build".to_string()));
+    let mut values = bound_history_values();
+    values.insert("task-name".to_string(), Value::Item("build".to_string()));
     let params = extract_history_params(&values);
     assert_eq!(params.task_name, Some("build".to_string()));
 }
 
 #[test]
 fn test_extract_history_params_with_limit() {
-    let mut values = HashMap::new();
+    let mut values = bound_history_values();
     values.insert("limit".to_string(), Value::Item("50".to_string()));
     let params = extract_history_params(&values);
     assert_eq!(params.limit, 50);
 }
 
 #[test]
-fn test_extract_history_params_with_invalid_limit() {
-    let mut values = HashMap::new();
+#[should_panic(expected = "History's --limit is derived from HistoryCommand's usize arg")]
+fn test_extract_history_params_refuses_an_unparseable_limit() {
+    let mut values = bound_history_values();
     values.insert("limit".to_string(), Value::Item("not-a-number".to_string()));
-    let params = extract_history_params(&values);
-    assert_eq!(params.limit, 20); // Falls back to default
+    let _ = extract_history_params(&values);
+}
+
+#[test]
+#[should_panic(expected = "History's --limit is derived from its clap Command")]
+fn test_extract_history_params_refuses_an_unbound_task() {
+    let _ = extract_history_params(&HashMap::new());
 }
 
 #[test]
 fn test_extract_history_params_with_status() {
-    let mut values = HashMap::new();
+    let mut values = bound_history_values();
     values.insert("status".to_string(), Value::Item("failed".to_string()));
     let params = extract_history_params(&values);
     assert_eq!(params.status, Some("failed".to_string()));
@@ -149,32 +195,24 @@ fn test_extract_history_params_with_status() {
 
 #[test]
 fn test_extract_history_params_with_project() {
-    let mut values = HashMap::new();
+    let mut values = bound_history_values();
     values.insert("project".to_string(), Value::Item("otto".to_string()));
     let params = extract_history_params(&values);
     assert_eq!(params.project, Some("otto".to_string()));
 }
 
 #[test]
-fn test_extract_history_params_with_json() {
-    let mut values = HashMap::new();
-    values.insert("json".to_string(), Value::Item("true".to_string()));
-    let params = extract_history_params(&values);
-    assert!(params.json);
-}
-
-#[test]
 fn test_extract_history_params_all_fields() {
-    let mut values = HashMap::new();
-    values.insert("task".to_string(), Value::Item("test".to_string()));
-    values.insert("limit".to_string(), Value::Item("100".to_string()));
-    values.insert("status".to_string(), Value::Item("passed".to_string()));
-    values.insert("project".to_string(), Value::Item("my-proj".to_string()));
-    values.insert("json".to_string(), Value::Item("true".to_string()));
-    let params = extract_history_params(&values);
+    let params = extract_history_params(&values(&[
+        ("task-name", "test"),
+        ("limit", "100"),
+        ("status", "failed"),
+        ("project", "my-proj"),
+        ("json", "true"),
+    ]));
     assert_eq!(params.task_name, Some("test".to_string()));
     assert_eq!(params.limit, 100);
-    assert_eq!(params.status, Some("passed".to_string()));
+    assert_eq!(params.status, Some("failed".to_string()));
     assert_eq!(params.project, Some("my-proj".to_string()));
     assert!(params.json);
 }
@@ -184,47 +222,46 @@ fn test_extract_history_params_all_fields() {
 // =========================================================================
 
 #[test]
-fn test_stats_params_default() {
-    let params = StatsParams::default();
+fn test_extract_stats_params_from_a_bound_task_with_no_flags() {
+    let params = extract_stats_params(&bound_stats_values());
     assert_eq!(params.task_name, None);
     assert_eq!(params.limit, 10);
     assert!(!params.json);
 }
 
 #[test]
-fn test_extract_stats_params_empty() {
-    let values = HashMap::new();
-    let params = extract_stats_params(&values);
-    assert_eq!(params, StatsParams::default());
-}
-
-#[test]
 fn test_extract_stats_params_with_task() {
-    let mut values = HashMap::new();
-    values.insert("task".to_string(), Value::Item("lint".to_string()));
+    let mut values = bound_stats_values();
+    values.insert("task-name".to_string(), Value::Item("lint".to_string()));
     let params = extract_stats_params(&values);
     assert_eq!(params.task_name, Some("lint".to_string()));
 }
 
 #[test]
 fn test_extract_stats_params_with_limit() {
-    let mut values = HashMap::new();
+    let mut values = bound_stats_values();
     values.insert("limit".to_string(), Value::Item("25".to_string()));
     let params = extract_stats_params(&values);
     assert_eq!(params.limit, 25);
 }
 
 #[test]
-fn test_extract_stats_params_with_invalid_limit() {
-    let mut values = HashMap::new();
+#[should_panic(expected = "Stats' --limit is derived from StatsCommand's usize arg")]
+fn test_extract_stats_params_refuses_an_unparseable_limit() {
+    let mut values = bound_stats_values();
     values.insert("limit".to_string(), Value::Item("xyz".to_string()));
-    let params = extract_stats_params(&values);
-    assert_eq!(params.limit, 10); // Falls back to default
+    let _ = extract_stats_params(&values);
+}
+
+#[test]
+#[should_panic(expected = "Stats's --limit is derived from its clap Command")]
+fn test_extract_stats_params_refuses_an_unbound_task() {
+    let _ = extract_stats_params(&HashMap::new());
 }
 
 #[test]
 fn test_extract_stats_params_with_json() {
-    let mut values = HashMap::new();
+    let mut values = bound_stats_values();
     values.insert("json".to_string(), Value::Item("true".to_string()));
     let params = extract_stats_params(&values);
     assert!(params.json);
@@ -232,14 +269,50 @@ fn test_extract_stats_params_with_json() {
 
 #[test]
 fn test_extract_stats_params_all_fields() {
-    let mut values = HashMap::new();
-    values.insert("task".to_string(), Value::Item("deploy".to_string()));
-    values.insert("limit".to_string(), Value::Item("5".to_string()));
-    values.insert("json".to_string(), Value::Item("true".to_string()));
-    let params = extract_stats_params(&values);
+    let params = extract_stats_params(&values(&[("task-name", "deploy"), ("limit", "5"), ("json", "true")]));
     assert_eq!(params.task_name, Some("deploy".to_string()));
     assert_eq!(params.limit, 5);
     assert!(params.json);
+}
+
+// =========================================================================
+// GraphParams Tests
+// =========================================================================
+
+#[test]
+fn test_extract_graph_params_defaults_to_ascii() {
+    let params = extract_graph_params(&values(&[("format", "ascii")]));
+    assert_eq!(params.format, GraphFormatArg::Ascii);
+    assert_eq!(params.output, None);
+}
+
+#[test]
+fn test_extract_graph_params_reads_format_and_output() {
+    let params = extract_graph_params(&values(&[("format", "dot"), ("output", "dag.dot")]));
+    assert_eq!(params.format, GraphFormatArg::Dot);
+    assert_eq!(params.output, Some(PathBuf::from("dag.dot")));
+}
+
+/// otto binds `--format` with `ignore_case(true)`, so the value handed back is
+/// the spelling the user typed.
+#[test]
+fn test_extract_graph_params_format_ignores_case() {
+    let params = extract_graph_params(&values(&[("format", "PDF")]));
+    assert_eq!(params.format, GraphFormatArg::Pdf);
+}
+
+/// The inverse of the old `_ => GraphFormat::Ascii` arm in the visualizer: an
+/// unknown format was silently drawn as ascii.
+#[test]
+#[should_panic(expected = "Graph's --format is bound against GraphCommand's choices")]
+fn test_extract_graph_params_refuses_an_unknown_format() {
+    let _ = extract_graph_params(&values(&[("format", "mermaid")]));
+}
+
+#[test]
+#[should_panic(expected = "Graph's --format is derived from its clap Command")]
+fn test_extract_graph_params_refuses_an_unbound_task() {
+    let _ = extract_graph_params(&HashMap::new());
 }
 
 // =========================================================================
@@ -415,56 +488,32 @@ fn test_find_tasks_by_name_case_sensitive() {
 
 #[test]
 fn test_clean_params_equality() {
-    let a = CleanParams {
-        keep_days: 30,
-        dry_run: false,
-        project_filter: None,
-    };
-    let b = CleanParams::default();
+    let a = extract_clean_params(&bound_clean_values());
+    let b = extract_clean_params(&bound_clean_values());
     assert_eq!(a, b);
 }
 
 #[test]
 fn test_history_params_equality() {
-    let a = HistoryParams {
-        task_name: Some("test".to_string()),
-        limit: 20,
-        status: None,
-        project: None,
-        json: false,
-    };
-    let b = HistoryParams {
-        task_name: Some("test".to_string()),
-        ..Default::default()
-    };
-    assert_eq!(a, b);
-}
-
-#[test]
-fn test_stats_params_equality() {
-    let a = StatsParams {
-        task_name: None,
-        limit: 10,
-        json: false,
-    };
-    let b = StatsParams::default();
-    assert_eq!(a, b);
+    let mut values = bound_history_values();
+    values.insert("task-name".to_string(), Value::Item("test".to_string()));
+    assert_eq!(extract_history_params(&values), extract_history_params(&values));
 }
 
 #[test]
 fn test_params_clone() {
-    let params = CleanParams {
-        keep_days: 7,
-        dry_run: true,
-        project_filter: Some("proj".to_string()),
-    };
+    let params = extract_clean_params(&values(&[
+        ("keep-days", "7"),
+        ("dry-run", "true"),
+        ("project-filter", "proj"),
+    ]));
     let cloned = params.clone();
     assert_eq!(params, cloned);
 }
 
 #[test]
 fn test_params_debug() {
-    let params = StatsParams::default();
+    let params = extract_stats_params(&bound_stats_values());
     let debug = format!("{:?}", params);
     assert!(debug.contains("StatsParams"));
     assert!(debug.contains("limit"));

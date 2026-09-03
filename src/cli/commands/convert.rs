@@ -7,7 +7,7 @@ use crate::makefile::{Diagnostic, MakefileParser, OttoConverter};
 
 /// Convert Makefile to Otto YAML format
 #[derive(Parser, Debug)]
-#[command(name = "convert")]
+#[command(name = "Convert")]
 #[command(about = "Convert Makefile to Otto YAML format")]
 pub struct ConvertCommand {
     /// Treat warnings as errors

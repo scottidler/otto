@@ -85,39 +85,14 @@ impl DagVisualizer {
         Self::new(GraphOptions::default())
     }
 
-    pub async fn execute_command(task: &crate::cli::parser::Task) -> Result<()> {
-        // Parse graph command arguments
-        let format = task
-            .values
-            .get("format")
-            .and_then(|v| match v {
-                crate::cfg::config::Value::Item(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .unwrap_or("ascii");
-
-        let output_path = task.values.get("output").and_then(|v| match v {
-            crate::cfg::config::Value::Item(s) => Some(std::path::PathBuf::from(s)),
-            _ => None,
-        });
-
-        let graph_format = match format {
-            "ascii" => GraphFormat::Ascii,
-            "dot" => GraphFormat::Dot,
-            "svg" => GraphFormat::Svg,
-            "png" => GraphFormat::Png,
-            "pdf" => GraphFormat::Pdf,
-            _ => GraphFormat::Ascii,
-        };
-
-        let options = GraphOptions {
-            show_details: true,
-            show_file_deps: true,
-            format: graph_format,
-            style: NodeStyle::Detailed,
-            output_path,
-        };
-
+    /// Render the current ottofile's DAG with `options` and print it.
+    ///
+    /// The options arrive already typed, from `GraphCommand`
+    /// (`cli/commands/graph.rs`). This used to read `format` and `output` out
+    /// of the task's values map itself and map an unrecognized format to
+    /// `Ascii`, which was a second, looser copy of the choice list the meta
+    /// task already declares.
+    pub fn render_ottofile_graph(options: GraphOptions) -> Result<()> {
         // We need to reload the parser to get all tasks for the graph
         let args: Vec<String> = env::args().collect();
         let mut parser = Parser::new(args)?;

@@ -12,7 +12,7 @@ use crate::ports::StateStore;
 
 /// Clean old otto run directories
 #[derive(Debug, clap::Parser)]
-#[command(name = "clean")]
+#[command(name = "Clean")]
 pub struct CleanCommand {
     /// Keep runs newer than this many days
     #[arg(long, default_value = "30")]

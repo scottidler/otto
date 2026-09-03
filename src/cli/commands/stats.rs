@@ -9,7 +9,7 @@ use crate::ports::StateStore;
 
 /// Show execution statistics
 #[derive(Debug, clap::Parser)]
-#[command(name = "stats")]
+#[command(name = "Stats")]
 pub struct StatsCommand {
     /// Show stats for a specific task
     #[arg(value_name = "TASK")]
