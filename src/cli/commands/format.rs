@@ -43,12 +43,14 @@ pub fn format_duration(seconds: f64) -> String {
 ///
 /// An out-of-range or ambiguous local timestamp falls back to the epoch rather
 /// than panicking: this is cosmetic display, and a run listing is not worth
-/// aborting over an unrepresentable date.
+/// aborting over an unrepresentable date. Note a `u64` that exceeds `i64::MAX`
+/// wraps to a negative second count, which is representable and renders as a
+/// pre-epoch date rather than reaching this fallback.
 pub fn format_timestamp(timestamp: u64) -> String {
     let dt = Local
         .timestamp_opt(timestamp as i64, 0)
         .single()
-        .unwrap_or_else(|| DateTime::<Local>::from(DateTime::<Utc>::MIN_UTC));
+        .unwrap_or_else(|| DateTime::<Local>::from(DateTime::<Utc>::UNIX_EPOCH));
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 

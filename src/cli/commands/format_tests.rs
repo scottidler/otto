@@ -53,9 +53,29 @@ fn a_timestamp_renders_as_local_wall_clock_time() {
 }
 
 #[test]
-fn an_unrepresentable_timestamp_falls_back_instead_of_panicking() {
-    // u64::MAX as i64 is negative and far out of range; the contract is that a
-    // run listing still renders.
-    let rendered = format_timestamp(u64::MAX);
-    assert!(!rendered.is_empty());
+fn an_out_of_range_timestamp_falls_back_to_the_epoch() {
+    // The fallback needs a value chrono genuinely cannot represent. `u64::MAX`
+    // is NOT one: as an i64 it is -1, one second before the epoch, which is
+    // perfectly representable -- so the earlier version of this test never
+    // reached the fallback at all and asserted only that some string came back.
+    let epoch = Local
+        .timestamp_opt(0, 0)
+        .single()
+        .expect("the epoch is representable in every zone")
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    assert_eq!(format_timestamp(i64::MAX as u64), epoch);
+}
+
+#[test]
+fn a_timestamp_that_wraps_negative_renders_as_just_before_the_epoch() {
+    // Pins the honest behavior of the wrap rather than pretending it is a
+    // fallback: `u64::MAX as i64 == -1`.
+    let one_before = Local
+        .timestamp_opt(-1, 0)
+        .single()
+        .expect("-1 is representable in every zone")
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    assert_eq!(format_timestamp(u64::MAX), one_before);
 }

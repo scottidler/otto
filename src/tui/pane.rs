@@ -1,3 +1,4 @@
+use crate::cli::commands::format::format_duration;
 use crate::executor::output::{TaskMessage, TaskOutput, TuiTaskStatus};
 use ratatui::{
     Frame,
@@ -323,11 +324,11 @@ impl Pane for TaskPane {
         let mut title = format!(" {} {} ", self.task_name, self.status.symbol());
 
         if let Some(dur) = &self.duration {
-            title.push_str(&format!(" ({:.1}s) ", dur.as_secs_f64()));
+            title.push_str(&format!(" ({}) ", format_duration(dur.as_secs_f64())));
         } else if let Some(start) = &self.start_time
             && let Ok(elapsed) = SystemTime::now().duration_since(*start)
         {
-            title.push_str(&format!(" ({:.1}s) ", elapsed.as_secs_f64()));
+            title.push_str(&format!(" ({}) ", format_duration(elapsed.as_secs_f64())));
         }
 
         // A pane the user scrolled off the bottom stops showing new output; say

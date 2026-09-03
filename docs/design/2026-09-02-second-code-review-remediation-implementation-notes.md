@@ -612,3 +612,49 @@ None.
 
 ### Open questions
 None.
+
+## Post-implementation audit fixes (review panel, 2026-09-03)
+
+The Architect (Gemini) and Staff Engineer (Codex) audited the implemented tree
+at `dd71fb8`. The Architect returned no findings; the Staff Engineer returned
+four, of which three were real and are fixed here. The seats diverged on the
+first one and the Staff Engineer was right on substance.
+
+### Design decisions
+- The TUI now renders durations through `format::format_duration`
+  (`src/tui/pane.rs:327,331`) instead of its own `{:.1}s`. Phase 7's success
+  criterion was scoped to `src/cli/commands/`, so it passed while the dashboard
+  still printed `90.0s` for a run that `History` and `Stats` printed as `1m30s`.
+  The criterion is unchanged and still holds: three definitions, all in
+  `format.rs`. `grep -rnE '\{:\.[12]\}(s|\s*(KB|MB|GB))'` over `src/` now
+  returns nothing outside `format.rs`.
+- `format_timestamp`'s fallback is `DateTime::<Utc>::UNIX_EPOCH`
+  (`src/cli/commands/format.rs:53`), which is what its doc comment always
+  claimed. It previously used `DateTime::<Utc>::MIN_UTC`, which renders as
+  `-262144-12-31 16:07:02`.
+- `docs/commands/upgrade.md:90,112` show `Current version:` as
+  `v2.2.1-<commits-since-tag>-g<short-sha>` rather than a pasted `git describe`
+  value, with a sentence saying why. Phase 16 regenerated the page from the
+  binary and pasted `v2.2.1-15-g344ef25`; three commits later that was already
+  wrong. A pasted describe string is stale one commit after it is written.
+
+### Deviations
+- None. All three fixes bring the code to what the doc and the comments already
+  claimed.
+
+### Tradeoffs
+- The TUI title is now variable-width (`1m30s` vs `90.0s`), which shifts the
+  pane title by a character or two as a task crosses a unit boundary. Accepted:
+  one run reporting two different durations depending on where you looked is
+  worse than a title that reflows.
+- The out-of-range timestamp test was rewritten rather than deleted. The old
+  `an_unrepresentable_timestamp_falls_back_instead_of_panicking` asserted only
+  `!rendered.is_empty()`, and its input could not reach the fallback at all:
+  `u64::MAX as i64` is `-1`, which is representable and renders as one second
+  before the epoch. It is now two tests -- `i64::MAX as u64` for the real
+  fallback, and `u64::MAX` pinning the negative wrap as its own documented
+  behavior. Both were proven by reverting the fix and watching the named test
+  go red (`left: "-262144-12-31 16:07:02"`, `right: "1969-12-31 16:00:00"`).
+
+### Open questions
+- None.

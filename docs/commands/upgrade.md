@@ -87,7 +87,7 @@ otto Upgrade --backup-dir /var/backups/otto
 $ otto Upgrade --dry-run
 Checking for updates...
 Platform: linux-amd64
-Current version: v2.2.1-15-g344ef25
+Current version: v2.2.1-<commits-since-tag>-g<short-sha>
 Target version:  v2.2.1
 
 Dry run - would perform the following actions:
@@ -101,6 +101,8 @@ Dry run - would perform the following actions:
 Run without --dry-run to perform upgrade.
 ```
 
+The `Current version` line is `git describe --tags --always` of the running binary (`build.rs` bakes it in as `GIT_DESCRIBE`), so it changes on every commit; it is shown here as a placeholder rather than a pasted value, which would be stale one commit later.
+
 With `--no-backup`, step 2 is omitted and the rest renumber — the plan is generated, not a fixed template, so the step count always matches what will actually run.
 
 ### Downgrading without `--force`
@@ -109,7 +111,7 @@ With `--no-backup`, step 2 is omitted and the rest renumber — the plan is gene
 $ otto Upgrade --dry-run --version 2.1.0
 Checking for updates...
 Platform: linux-amd64
-Current version: v2.2.1-15-g344ef25
+Current version: v2.2.1-<commits-since-tag>-g<short-sha>
 Target version:  v2.1.0
 
 Current version is newer than target version.
