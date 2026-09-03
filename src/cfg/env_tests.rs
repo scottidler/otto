@@ -522,8 +522,7 @@ fn test_evaluate_envs_circular_reference_errors_even_when_inherited() {
 
 /// Command output is data. It used to be spliced in before variable
 /// resolution, so a `$NAME` inside the output was resolved - out of otto's
-/// own environment, which is the leak the controlled command environment
-/// exists to prevent.
+/// own environment, which the evaluation context carries.
 #[test]
 #[serial]
 fn command_output_is_not_rescanned_for_variable_references() {
@@ -671,6 +670,192 @@ fn a_cycle_still_fails_closed_with_the_per_key_budget() {
         err.contains("Circular dependency between environment variables"),
         "a cycle must be reported as one, got: {err}"
     );
+}
+
+// ----------------------------------------------------------------------
+// Deferral is decided on the raw value, before any `$(...)` runs.
+// ----------------------------------------------------------------------
+
+/// Count the marker files a `$(...)` body dropped, one per execution.
+fn marker_count(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .expect("marker dir must be readable")
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .expect("marker entry must be readable")
+                .file_name()
+                .to_string_lossy()
+                .starts_with("mark.")
+        })
+        .count()
+}
+
+/// A `$(...)` body referencing a declared sibling waits for the sibling, in the
+/// order that used to lose. `pending` is sorted by key, so `A` referencing `B`
+/// is the case where the reference is reached first: the substitution ran with
+/// `B` stripped from the context and `A` resolved to `got:`.
+#[test]
+fn a_command_referencing_a_later_sibling_waits_for_it() {
+    let mut envs = HashMap::new();
+    envs.insert(
+        "OTTO_TEST_SIB_A".to_string(),
+        "$(echo \"got:$OTTO_TEST_SIB_B\")".to_string(),
+    );
+    envs.insert("OTTO_TEST_SIB_B".to_string(), "hello".to_string());
+
+    let result = evaluate_envs(&envs, None, &HashMap::new()).expect("a sibling reference must resolve");
+
+    assert_eq!(result.get("OTTO_TEST_SIB_A").map(String::as_str), Some("got:hello"));
+    assert_eq!(result.get("OTTO_TEST_SIB_B").map(String::as_str), Some("hello"));
+}
+
+/// The other declaration order, which resolved correctly by luck before: the
+/// referenced key sorts first, so it is already resolved when the command runs.
+/// Both orders must give the same answer.
+#[test]
+fn a_command_referencing_an_earlier_sibling_still_resolves() {
+    let mut envs = HashMap::new();
+    envs.insert("OTTO_TEST_SIB_A".to_string(), "hello".to_string());
+    envs.insert(
+        "OTTO_TEST_SIB_B".to_string(),
+        "$(echo \"got:$OTTO_TEST_SIB_A\")".to_string(),
+    );
+
+    let result = evaluate_envs(&envs, None, &HashMap::new()).expect("a sibling reference must resolve");
+
+    assert_eq!(result.get("OTTO_TEST_SIB_B").map(String::as_str), Some("got:hello"));
+}
+
+/// The deferral rule keys on DECLARED names only. A reference to an INHERITED
+/// name inside `$(...)` resolves from the inherited environment, in the command,
+/// on the first pass - this is `otto-dev`'s vault-passthrough shape
+/// (`$(echo "${OTTO_DEV_AUTH_PROFILE:-...}")`), and it must not wait for
+/// anything.
+#[test]
+#[serial]
+fn a_command_referencing_an_inherited_name_resolves_from_the_environment() {
+    let inherited = "OTTO_TEST_INHERITED_IN_CMD";
+    unsafe {
+        env::set_var(inherited, "from-shell");
+    }
+
+    let mut envs = HashMap::new();
+    envs.insert(
+        "OTTO_TEST_VAULT".to_string(),
+        format!("$(echo \"${{{inherited}:-fallback}}\")"),
+    );
+
+    let result = evaluate_envs(&envs, None, &HashMap::new());
+
+    unsafe {
+        env::remove_var(inherited);
+    }
+    let evaluated = result.expect("an inherited reference must resolve");
+    assert_eq!(evaluated.get("OTTO_TEST_VAULT").map(String::as_str), Some("from-shell"));
+}
+
+/// A key whose `$(...)` body names the key itself reads the inherited seed and
+/// terminates. It must not defer on itself: the seed is the only value it will
+/// ever get, so waiting for "itself, resolved" would spin to the no-progress
+/// branch and report a cycle. The declared sibling in the same value is there to
+/// prove the two rules coexist - self excluded, sibling deferred.
+#[test]
+#[serial]
+fn a_self_reference_inside_a_command_reads_the_inherited_value_and_terminates() {
+    let (self_key, sibling) = ("OTTO_TEST_A_SELF", "OTTO_TEST_Z_SIB");
+    unsafe {
+        env::set_var(self_key, "from-shell");
+    }
+
+    let mut envs = HashMap::new();
+    envs.insert(self_key.to_string(), format!("$(echo \"${self_key}-${sibling}\")"));
+    envs.insert(sibling.to_string(), "sib".to_string());
+
+    let result = evaluate_envs(&envs, None, &HashMap::new());
+
+    unsafe {
+        env::remove_var(self_key);
+    }
+    let evaluated = result.expect("a self-reference must terminate");
+    assert_eq!(evaluated.get(self_key).map(String::as_str), Some("from-shell-sib"));
+}
+
+/// Two keys referencing each other inside `$(...)` are a cycle and are reported
+/// as one. Before the deferral check they were not even an error: both commands
+/// ran with the other key stripped from the context, so both resolved to the
+/// empty read and the load succeeded with two wrong values.
+#[test]
+fn two_keys_referencing_each_other_inside_commands_report_a_cycle() {
+    let mut envs = HashMap::new();
+    envs.insert(
+        "OTTO_TEST_CMD_CYC_A".to_string(),
+        "$(echo \"$OTTO_TEST_CMD_CYC_B\")".to_string(),
+    );
+    envs.insert(
+        "OTTO_TEST_CMD_CYC_B".to_string(),
+        "$(echo \"$OTTO_TEST_CMD_CYC_A\")".to_string(),
+    );
+
+    let error = evaluate_envs(&envs, None, &HashMap::new())
+        .expect_err("a cycle through command bodies must not resolve")
+        .to_string();
+
+    assert!(
+        error.contains("Circular dependency between environment variables")
+            && error.contains("OTTO_TEST_CMD_CYC_A")
+            && error.contains("OTTO_TEST_CMD_CYC_B"),
+        "expected a cycle named as a cycle, got: {error}"
+    );
+}
+
+/// A command that exits non-zero is terminal, not a dependency to wait on, so it
+/// runs exactly once. `Err(_) => still_pending` re-ran it on every pass plus once
+/// more in the partial-resolution fallback: three executions for this two-key
+/// map, and one per key for a larger one. `$$` is the shell's PID, so each
+/// execution leaves its own marker.
+#[test]
+fn a_failing_command_runs_exactly_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut envs = HashMap::new();
+    envs.insert(
+        "OTTO_TEST_A_BAD".to_string(),
+        format!("$(touch {}/mark.$$; false)", dir.path().display()),
+    );
+    envs.insert("OTTO_TEST_Z_OK".to_string(), "plain".to_string());
+
+    let error = evaluate_envs(&envs, None, &HashMap::new())
+        .expect_err("a failing command must fail the load")
+        .to_string();
+
+    assert!(
+        error.contains("OTTO_TEST_A_BAD") && error.contains("failed with exit code 1"),
+        "expected the failing command named, got: {error}"
+    );
+    assert_eq!(marker_count(dir.path()), 1, "the failing command must run exactly once");
+}
+
+/// A value that is a command plus a reference to a later sibling defers whole:
+/// the command does not run until the sibling is resolved. It used to run on
+/// every pass, because the `${LATER}` in the same value failed variable
+/// resolution after the command had already executed.
+#[test]
+fn a_command_beside_a_later_reference_runs_exactly_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut envs = HashMap::new();
+    envs.insert(
+        "OTTO_TEST_A_MIXED".to_string(),
+        format!(
+            "$(touch {}/mark.$$; echo ran) ${{OTTO_TEST_Z_LATER}}",
+            dir.path().display()
+        ),
+    );
+    envs.insert("OTTO_TEST_Z_LATER".to_string(), "late".to_string());
+
+    let result = evaluate_envs(&envs, None, &HashMap::new()).expect("the value must resolve");
+
+    assert_eq!(result.get("OTTO_TEST_A_MIXED").map(String::as_str), Some("ran late"));
+    assert_eq!(marker_count(dir.path()), 1, "the command must run exactly once");
 }
 
 // ----------------------------------------------------------------------

@@ -86,3 +86,38 @@ Per the doc's Testing Strategy. Each fix reverted alone, the test run, the fix r
 
 ### Open questions
 - None.
+
+## Phase 3: cfg env evaluator
+
+### Design decisions
+- **The deferral check runs on the raw value, before `evaluate_single_env_value`** — `src/cfg/env.rs:evaluate_envs` — `referenced_vars(raw_value)` scans `$(...)` bodies under the same rules as the expander, so a declared sibling named inside a command body is visible before anything executes. The old order executed first and let the empty read stand as the answer, which is why the result depended on which key the sorted pass reached first.
+- **Only a DECLARED name defers; the key's own name never does** — same loop — the predicate is `name != var_name && envs.contains_key(name) && !evaluated.contains_key(name)`. An inherited name resolves inside the command from the inherited environment (the `$(echo "${SOME_PROFILE:-default}")` idiom), so it must not wait; a self-reference reads the inherited seed `evaluation_context` plants, which is the only value it will ever get, so deferring on it would spin to the no-progress branch and be misreported as a cycle.
+- **An evaluation error is terminal, not "wait"** — same loop, the `Err` arm — once the check above has passed, every declared reference the value makes is resolved, so the only remaining errors are a command that exited non-zero and a reference to a name that is neither declared nor inherited. Both return immediately, with the message the partial-resolution fallback already used (`Failed to resolve environment variable '<key>': <cause>`), so no pinned string changed.
+- **The comment on the command environment now describes the environment the command gets** — `src/cfg/env.rs:execute_shell_command_with_env` — `env_clear()` plus seven essentials is immediately overwritten by `cmd.envs(env_overrides)`, which is the whole inherited environment minus the declared keys plus the values resolved so far. The essential list is a floor for exactly one case: when one of those seven names is itself a declared key, and is therefore stripped from the context until it resolves.
+
+### Deviations
+- **The comment fix also touched the neighbouring claim in `evaluate_single_env_value`.** Its parenthetical called the same environment "the controlled command environment [that] exists to prevent" a parent-env leak, which is the identical false statement one screen up; the doc bullet only names `:440-452`. Rewritten to say what actually makes the leak reachable (the context this resolves against carries the inherited environment) and the same sentence in the test's doc comment (`src/cfg/env_tests.rs:command_output_is_not_rescanned_for_variable_references`) with it. Behavior unchanged.
+- **The failing-command tests count executions with `$$`, not `$RANDOM`.** `/bin/sh` here is dash, where `$RANDOM` expands to the empty string, so every touch would land on one filename and the count could not distinguish one execution from three. `$$` is the shell's PID, unique per `sh -c`, so the marker count *is* the execution count. The doc's literal `$RANDOM` shape was also run against the binary (see below); it passes, it just cannot fail.
+- **`a_command_referencing_an_earlier_sibling_still_resolves` and `a_command_referencing_an_inherited_name_resolves_from_the_environment` are green before and after by design.** The first is the declaration order that already worked by luck (the doc asks for both orders, so both are pinned); the second is the `otto-dev` blast-radius pin, whose whole point is that the new rule does *not* change it.
+
+### Tradeoffs
+- **The now-unreachable partial-resolution fallback (`env.rs`, after the cycle check) was left in place** vs replacing it with a hard error — every entry in `still_pending` now got there through the deferral rule, so each has a reference to another unresolved declared key, so `find_reference_cycle` cannot return `None` and the fallback cannot run. Deleting it is a behavior claim about a branch nothing exercises; it stays as the fail-closed backstop the comment above `max_iterations` already describes, and the phase does not widen to it.
+- **`find_reference_cycle` still follows a self-edge when a value names both itself and a pending sibling** (`A: "$A-$B"`, `B: "$A"` reports the path `A -> A` rather than `A -> B -> A`) vs skipping self-edges there — the verdict is right (it is a real deadlock and it is reported as a cycle) and only the path is imprecise. Out of this phase's bullets; a self-reference alone no longer reaches that branch at all, because it evaluates instead of deferring.
+
+### Break-the-test proofs
+Per the doc's Testing Strategy. The deferral check and the `Err` arm reverted together to the `f9882ed` shape, the tests run, the fix restored.
+
+- `a_command_referencing_a_later_sibling_waits_for_it` FAILED: `left: Some("got:")`, `right: Some("got:hello")` — the doc's `Observed:` line.
+- `a_self_reference_inside_a_command_reads_the_inherited_value_and_terminates` FAILED: `left: Some("from-shell-")`, `right: Some("from-shell-sib")`.
+- `two_keys_referencing_each_other_inside_commands_report_a_cycle` FAILED: no error at all; both commands ran with the other key stripped and the load succeeded with two empty values.
+- `a_failing_command_runs_exactly_once` FAILED: `left: 3`, `right: 1` marker files (once per pass, plus once in the partial-resolution fallback).
+- `a_command_beside_a_later_reference_runs_exactly_once` FAILED: `left: 2`, `right: 1` marker files.
+- The reverted source was also built and run as a binary: the acceptance fixture printed `[show] A=[got:] B=[hello]` and the `$(touch $MARK.$$; false)` fixture left 3 marker files, both matching the doc's `Observed on main`.
+
+### Success criteria, as run
+- **The fixture prints `A=[got:hello]` in both declaration orders.** `A: '$(echo "got:$B")'`, `B: hello` -> `[show] A=[got:hello] B=[hello]`, rc 0. Names swapped (`B: '$(echo "got:$A")'`, `A: hello`) -> `[show] A=[hello] B=[got:hello]`, rc 0. PASS.
+- **A `$(touch $MARK.$RANDOM; false)` value leaves exactly one marker file after a failed load.** Load failed with `Failed to evaluate global environment variables: Failed to resolve environment variable 'A_BAD': Command 'touch $MARK.$RANDOM; false' failed with exit code 1`, rc 1, one marker file (`mark.`). Repeated with `$$` for a per-execution-unique name: one marker file (`mark.1900199`), against 3 from the reverted build. PASS.
+- `otto ci`: `✅ All CI checks passed!` — lint, fmt-check, check, compile, clippy, test, cov, cov-report all `finished successfully`; coverage 93.1% lines against an 87% threshold.
+
+### Open questions
+- None.

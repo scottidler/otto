@@ -74,6 +74,29 @@ pub fn evaluate_envs(
         let mut still_pending = Vec::new();
 
         for (var_name, raw_value) in std::mem::take(&mut pending) {
+            // Deferral is decided on the RAW value, before anything runs. A `$(...)`
+            // body can reference a declared sibling, and `referenced_vars` scans the
+            // body under the same rules as the expander, so the reference is visible
+            // here. It was not visible before: the substitution executed first, with
+            // the sibling stripped from the context, and spliced the empty read in as
+            // the answer. `A: '$(echo "got:$B")'` with `B: hello` resolved to `got:`
+            // whenever A was reached first, and to `got:hello` when B was.
+            //
+            // Only a DECLARED key defers. A reference to an inherited name resolves
+            // from the inherited environment inside the command, which is the
+            // `$(echo "${SOME_PROFILE:-default}")` idiom, and must not wait for
+            // anything. A key referencing its own name is excluded too: that reads
+            // the inherited seed (see [`evaluation_context`]), so deferring on it
+            // would never clear.
+            if let Some(unresolved) = referenced_vars(raw_value)
+                .into_iter()
+                .find(|name| name.as_str() != var_name && envs.contains_key(name) && !evaluated.contains_key(name))
+            {
+                log::debug!("cfg::evaluate_envs: deferring '{var_name}' on unresolved '{unresolved}'");
+                still_pending.push((var_name, raw_value));
+                continue;
+            }
+
             let context = evaluation_context(&base_env, &evaluated, &inherited, var_name);
 
             match evaluate_single_env_value(raw_value, &context, working_dir) {
@@ -81,9 +104,15 @@ pub fn evaluate_envs(
                     evaluated.insert(var_name.to_string(), resolved_value);
                     made_progress = true;
                 }
-                Err(_) => {
-                    // Might depend on other variables not yet resolved
-                    still_pending.push((var_name, raw_value));
+                // Every declared reference this value makes is already resolved, or
+                // the check above would have deferred it. So an error here is not a
+                // dependency to wait on: it is a command that exited non-zero, or a
+                // reference to a name that is neither declared nor inherited. Both
+                // are terminal. Treating every error as "wait" re-ran a failing
+                // command once per pass, plus once more in the partial-resolution
+                // fallback below.
+                Err(e) => {
+                    return Err(eyre!("Failed to resolve environment variable '{}': {}", var_name, e));
                 }
             }
         }
@@ -210,8 +239,9 @@ fn evaluate_single_env_value(
     //
     // The output is data. Splicing it in before step 2 made step 2 read it as
     // syntax: `LEAK: "$(echo '$PARENTVAL')"` resolved `$PARENTVAL` out of otto's
-    // own environment (a parent-env leak the controlled command environment
-    // exists to prevent), and output containing an undefined `$word` failed the
+    // own environment (the context this resolves against carries the inherited
+    // environment, which is what made the leak reachable at all), and output
+    // containing an undefined `$word` failed the
     // whole config load. Placeholders keep the two stages from seeing each
     // other's text.
     let (templated, outputs) = resolve_shell_commands_with_env(value, working_dir, env_context)?;
@@ -426,8 +456,18 @@ fn execute_shell_command_with_env(
         cmd.current_dir(dir);
     }
 
-    // ALWAYS use controlled environment to prevent parent process pollution
-    // This is critical for preventing Otto's environment from leaking into subprocesses
+    // What the child actually gets: a cleared environment, then the seven names
+    // below out of otto's own environment, then `env_overrides` on top of that.
+    // `env_overrides` is the evaluation context, which is the whole inherited
+    // environment minus the declared keys, plus the declared values resolved so
+    // far. So this is not an isolated environment and the clear is not what keeps
+    // otto's environment out of the command - the command sees nearly all of it,
+    // by design, because that is how `$(echo "${SOME_PROFILE:-default}")` reads
+    // the value otto was invoked with.
+    //
+    // The essential list matters in exactly one case: when one of those seven
+    // names is itself a declared key. The context has it stripped until it
+    // resolves, so without this floor a command would run with, say, no PATH.
     cmd.env_clear();
 
     let essential_vars = ["PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL"];
@@ -437,7 +477,6 @@ fn execute_shell_command_with_env(
         }
     }
 
-    // Add the explicit environment context (variables we're building up during evaluation)
     cmd.envs(env_overrides);
 
     let output = cmd
