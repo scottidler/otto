@@ -21,6 +21,7 @@ impl Pane for StubPane {
     fn scroll_up(&mut self) {}
     fn scroll_down(&mut self) {}
     fn reset_scroll(&mut self) {}
+    fn scroll_to_bottom(&mut self) {}
 }
 
 fn stub(name: &str, status: PaneStatus) -> Box<dyn Pane> {

@@ -49,6 +49,7 @@ Watch 4 tasks run in parallel in a 2x2 grid layout.
 - `↑` / `k` : Scroll up
 - `↓` / `j` : Scroll down
 - `Home` : Scroll to top
+- `End` / `G` : Jump to the newest output and follow it again
 - `q` / `Esc` : Quit
 
 ### Duration Tracking
@@ -56,8 +57,8 @@ Each pane shows live elapsed time while running and final duration when complete
 
 ### Auto-Scroll
 - Automatically scrolls to show latest output
-- Disabled when you manually scroll up
-- Re-enabled when you scroll to bottom
+- Disabled when you manually scroll up (the pane title says `[scroll paused]`)
+- Re-enabled when you scroll to the bottom with `↓`/`j`, or in one jump with `End`/`G`
 
 ### Fullscreen Mode
 Press `f` or `Enter` to view focused pane in fullscreen. Press again to exit.

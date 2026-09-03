@@ -103,8 +103,16 @@ impl TuiTerminal {
 
 impl TerminalRestore for TuiTerminal {
     fn restore(&mut self) -> io::Result<()> {
-        // Whoever restores first wins the claim; the panic hook then stays quiet.
-        claim_terminal_restore();
+        // Whoever restores first wins the claim; the loser does nothing. This
+        // used to call the claim and throw the answer away, then restore
+        // regardless, which is the double `LeaveAlternateScreen` the claim
+        // exists to prevent: a panic (hook restores, then the guard's `Drop`
+        // restores again during unwind) or a second signal
+        // (`restore_terminal_best_effort` then `Drop`) dropped the user out of
+        // whatever screen they had legitimately gone back to.
+        if !claim_terminal_restore() {
+            return Ok(());
+        }
         disable_raw_mode()?;
         execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
         self.terminal.show_cursor()?;

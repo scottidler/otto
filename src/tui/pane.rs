@@ -136,6 +136,16 @@ impl ScrollState {
         self.offset = 0;
         self.follow = false;
     }
+
+    /// Jump to the newest output and resume following it.
+    ///
+    /// `down` only re-enables follow when the user walks all the way back to
+    /// the bottom one line at a time, so a pane scrolled up a screenful had no
+    /// way back to live output at all: `top` was the only jump bound.
+    pub fn bottom(&mut self) {
+        self.offset = 0;
+        self.follow = true;
+    }
 }
 
 /// Trait for renderable panes
@@ -162,6 +172,9 @@ pub trait Pane {
     fn scroll_down(&mut self);
 
     fn reset_scroll(&mut self);
+
+    /// Jump to the newest output and resume following it.
+    fn scroll_to_bottom(&mut self);
 }
 
 /// A pane that displays output from a single task
@@ -175,6 +188,9 @@ pub struct TaskPane {
     /// Viewport height from the last render, so scrolling moves by what the
     /// user can see. `Cell` because `render` takes `&self`.
     visible_height: Cell<u16>,
+    /// Viewport width from the last render. The scroll window is measured in
+    /// wrapped rows, and how many rows the buffer wraps to depends on it.
+    visible_width: Cell<u16>,
     max_buffer_lines: usize,
     start_time: Option<SystemTime>,
     duration: Option<Duration>,
@@ -190,6 +206,7 @@ impl TaskPane {
             output_buffer: VecDeque::new(),
             scroll: ScrollState::new(),
             visible_height: Cell::new(0),
+            visible_width: Cell::new(0),
             max_buffer_lines: 1000, // Ring buffer
             start_time: None,
             duration: None,
@@ -277,6 +294,28 @@ impl TaskPane {
     fn lagged_marker(dropped: u64) -> String {
         format!("… {dropped} line(s) dropped: output arrived faster than the dashboard could read it")
     }
+
+    /// Every buffered line, wrapped to `max_width`, in render order.
+    ///
+    /// The scroll window is measured in these rows rather than in buffer
+    /// lines. Taking `visible_height` *unwrapped* lines and wrapping them
+    /// afterwards produces more rows than the pane is tall whenever any line
+    /// wraps, and `Paragraph` clips the overflow at the bottom - so in follow
+    /// mode the newest output was exactly the part that got cut.
+    fn wrapped_rows(&self, max_width: usize) -> Vec<&str> {
+        self.output_buffer
+            .iter()
+            .flat_map(|line| wrap_line(line, max_width))
+            .collect()
+    }
+
+    /// How many wrapped rows the buffer occupies at the last rendered width.
+    ///
+    /// Same reasoning as `visible_height`: the width the pane last drew at is
+    /// the only one the user's scroll position can refer to.
+    fn total_rows(&self) -> usize {
+        self.wrapped_rows(self.visible_width.get() as usize).len()
+    }
 }
 
 impl Pane for TaskPane {
@@ -307,26 +346,22 @@ impl Pane for TaskPane {
         let inner_area = block.inner(area);
         frame.render_widget(block, area);
 
-        // Remember the viewport height so key handling scrolls by a real screenful.
+        // Remember the viewport so key handling scrolls by a real screenful,
+        // and so the wrapped-row count matches what was last drawn.
         self.visible_height.set(inner_area.height);
+        self.visible_width.set(inner_area.width);
 
         let visible_height = inner_area.height as usize;
-        let total_lines = self.output_buffer.len();
-        let start_line = self.scroll.start_line(total_lines, visible_height);
-        let end_line = (start_line + visible_height).min(total_lines);
+        let rows = self.wrapped_rows(inner_area.width as usize);
+        let start_row = self.scroll.start_line(rows.len(), visible_height);
+        let visible_rows: Vec<Line> = rows
+            .into_iter()
+            .skip(start_row)
+            .take(visible_height)
+            .map(Line::from)
+            .collect();
 
-        let max_width = inner_area.width as usize;
-        let mut wrapped_lines: Vec<Line> = Vec::new();
-        for line in self
-            .output_buffer
-            .iter()
-            .skip(start_line)
-            .take(end_line.saturating_sub(start_line))
-        {
-            wrapped_lines.extend(wrap_line(line, max_width).into_iter().map(Line::from));
-        }
-
-        let paragraph = Paragraph::new(wrapped_lines);
+        let paragraph = Paragraph::new(visible_rows);
         frame.render_widget(paragraph, inner_area);
     }
 
@@ -383,16 +418,20 @@ impl Pane for TaskPane {
 
     fn scroll_up(&mut self) {
         let visible = self.visible_height.get() as usize;
-        self.scroll.up(self.output_buffer.len(), visible);
+        self.scroll.up(self.total_rows(), visible);
     }
 
     fn scroll_down(&mut self) {
         let visible = self.visible_height.get() as usize;
-        self.scroll.down(self.output_buffer.len(), visible);
+        self.scroll.down(self.total_rows(), visible);
     }
 
     fn reset_scroll(&mut self) {
         self.scroll.top();
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.scroll.bottom();
     }
 }
 

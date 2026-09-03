@@ -131,17 +131,17 @@ impl TuiApp {
 
         let help_text = if self.fullscreen_mode {
             format!(
-                "{}f/Enter: Exit Fullscreen | ↑↓/jk: Scroll | Home: Top | q/Esc: Quit | ^C: Cancel run",
+                "{}f/Enter: Exit Fullscreen | ↑↓/jk: Scroll | Home: Top | End/G: Follow | q/Esc: Quit | ^C: Cancel run",
                 page_info
             )
         } else if total_pages > 1 {
             format!(
-                "{}PgUp/PgDn: Change Page | f/Enter: Fullscreen | Tab/←→: Switch | ↑↓/jk: Scroll | q/Esc: Quit | ^C: Cancel run",
+                "{}PgUp/PgDn: Change Page | f/Enter: Fullscreen | Tab/←→: Switch | ↑↓/jk: Scroll | End/G: Follow | q/Esc: Quit | ^C: Cancel run",
                 page_info
             )
         } else {
             format!(
-                "{}f/Enter: Fullscreen | Tab/←→: Switch Pane | ↑↓/jk: Scroll | Home: Top | q/Esc: Quit | ^C: Cancel run",
+                "{}f/Enter: Fullscreen | Tab/←→: Switch Pane | ↑↓/jk: Scroll | Home: Top | End/G: Follow | q/Esc: Quit | ^C: Cancel run",
                 page_info
             )
         };
@@ -201,6 +201,15 @@ impl TuiApp {
             KeyCode::Home => {
                 if let Some(pane) = self.layout.focused_pane_mut() {
                     pane.reset_scroll();
+                }
+            }
+            // The way back to live output. `Home` had no counterpart, and
+            // `Down` only resumes following once the user has walked all the
+            // way back to the bottom a line at a time, so a scrolled pane was
+            // effectively stuck showing old output for the rest of the run.
+            KeyCode::End | KeyCode::Char('G') => {
+                if let Some(pane) = self.layout.focused_pane_mut() {
+                    pane.scroll_to_bottom();
                 }
             }
             KeyCode::PageDown => {
