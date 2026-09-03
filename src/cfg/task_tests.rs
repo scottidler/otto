@@ -158,13 +158,16 @@ fn test_foreach_requires_source() {
 
 #[test]
 fn test_foreach_jobs_deserializes_all_and_positive_integers() {
-    assert_eq!(serde_yaml::from_str::<ForeachJobs>("all\n").unwrap(), ForeachJobs::All);
     assert_eq!(
-        serde_yaml::from_str::<ForeachJobs>("4\n").unwrap(),
+        serde_yaml_ng::from_str::<ForeachJobs>("all\n").unwrap(),
+        ForeachJobs::All
+    );
+    assert_eq!(
+        serde_yaml_ng::from_str::<ForeachJobs>("4\n").unwrap(),
         ForeachJobs::Fixed(std::num::NonZeroUsize::new(4).unwrap())
     );
     assert_eq!(
-        serde_yaml::from_str::<ForeachJobs>("1\n").unwrap(),
+        serde_yaml_ng::from_str::<ForeachJobs>("1\n").unwrap(),
         ForeachJobs::Fixed(std::num::NonZeroUsize::new(1).unwrap())
     );
 }
@@ -174,7 +177,7 @@ fn test_foreach_jobs_deserializes_all_and_positive_integers() {
 /// truth violation the design doc's Resolved Decisions reject.
 #[test]
 fn test_foreach_jobs_zero_names_all_as_the_replacement() {
-    let err = serde_yaml::from_str::<ForeachJobs>("0\n").unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<ForeachJobs>("0\n").unwrap_err().to_string();
     assert!(err.contains('0'), "error must name the rejected value: {err}");
     assert!(err.contains("all"), "error must name 'all' as the replacement: {err}");
 }
@@ -184,7 +187,7 @@ fn test_foreach_jobs_zero_names_all_as_the_replacement() {
 #[test]
 fn test_foreach_jobs_negative_and_non_integer_are_loud_type_errors() {
     for bad in ["-3\n", "1.5\n", "sometimes\n"] {
-        let err = serde_yaml::from_str::<ForeachJobs>(bad).unwrap_err().to_string();
+        let err = serde_yaml_ng::from_str::<ForeachJobs>(bad).unwrap_err().to_string();
         assert!(
             err.contains("all") || err.contains("positive integer"),
             "error for {bad:?} must describe the expected shape: {err}"
@@ -197,14 +200,14 @@ fn test_foreach_jobs_negative_and_non_integer_are_loud_type_errors() {
 #[test]
 fn test_foreach_jobs_round_trips() {
     let all = ForeachJobs::All;
-    let all_yaml = serde_yaml::to_string(&all).unwrap();
+    let all_yaml = serde_yaml_ng::to_string(&all).unwrap();
     assert_eq!(all_yaml.trim(), "all");
-    assert_eq!(serde_yaml::from_str::<ForeachJobs>(&all_yaml).unwrap(), all);
+    assert_eq!(serde_yaml_ng::from_str::<ForeachJobs>(&all_yaml).unwrap(), all);
 
     let fixed = ForeachJobs::Fixed(std::num::NonZeroUsize::new(4).unwrap());
-    let fixed_yaml = serde_yaml::to_string(&fixed).unwrap();
+    let fixed_yaml = serde_yaml_ng::to_string(&fixed).unwrap();
     assert_eq!(fixed_yaml.trim(), "4");
-    assert_eq!(serde_yaml::from_str::<ForeachJobs>(&fixed_yaml).unwrap(), fixed);
+    assert_eq!(serde_yaml_ng::from_str::<ForeachJobs>(&fixed_yaml).unwrap(), fixed);
 }
 
 /// Resolving `jobs` to the permit count its group's semaphore is built with
@@ -237,7 +240,7 @@ fn test_foreach_spec_jobs_defaults_to_none_and_is_omitted_when_serialized() {
     let spec = ForeachSpec::default();
     assert_eq!(spec.jobs, None);
 
-    let yaml = serde_yaml::to_string(&spec).unwrap();
+    let yaml = serde_yaml_ng::to_string(&spec).unwrap();
     assert!(
         !yaml.contains("jobs"),
         "default ForeachSpec must not emit 'jobs': {yaml}"
@@ -650,7 +653,7 @@ fn test_taskspec_as_virtual_parent() {
 fn deny_unknown_fields_names_a_misspelled_foreach_items_key() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "tasks:\n  up:\n    foreach:\n      itmes: [a, b]\n    bash: echo hi\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("itmes"), "must name the field: {err}");
     assert!(err.contains("tasks.up.foreach"), "must name the path: {err}");
 }
@@ -664,7 +667,7 @@ fn deny_unknown_fields_names_a_misspelled_foreach_items_key() {
 fn deny_unknown_fields_names_a_wrong_level_parallel_key() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "tasks:\n  up:\n    parallel: false\n    foreach: {items: [alpha, beta, gamma], as: svc}\n    bash: |\n      echo \"start ${svc}\"; sleep 0.3; echo \"end ${svc}\"\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("parallel"), "must name the field: {err}");
     assert!(err.contains("tasks.up"), "must name the path: {err}");
 }
@@ -681,7 +684,7 @@ fn test_foreach_yaml_deserialization() {
               echo ${example}
         "#;
 
-    let task: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
 
     assert!(task.foreach.is_some());
     let foreach = task.foreach.unwrap();
@@ -698,7 +701,7 @@ fn test_foreach_yaml_deserialization_with_glob() {
             bash: echo test
         "#;
 
-    let task: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
 
     assert!(task.foreach.is_some());
     let foreach = task.foreach.unwrap();
@@ -715,7 +718,7 @@ fn test_foreach_yaml_deserialization_with_range() {
             bash: echo ${num}
         "#;
 
-    let task: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
 
     assert!(task.foreach.is_some());
     let foreach = task.foreach.unwrap();
@@ -730,15 +733,15 @@ fn test_foreach_yaml_deserialization_with_range() {
 #[test]
 fn test_tty_defaults_to_none_when_absent() {
     let yaml = "action: echo hi";
-    let spec: TaskSpec = serde_yaml::from_str(yaml).expect("parse failed");
+    let spec: TaskSpec = serde_yaml_ng::from_str(yaml).expect("parse failed");
     assert_eq!(spec.tty, None, "an ottofile without tty: must not gain one");
 }
 
 #[test]
 fn test_tty_parses_both_values() {
-    let on: TaskSpec = serde_yaml::from_str("action: aws sso login\ntty: true").expect("parse failed");
+    let on: TaskSpec = serde_yaml_ng::from_str("action: aws sso login\ntty: true").expect("parse failed");
     assert_eq!(on.tty, Some(true));
-    let off: TaskSpec = serde_yaml::from_str("action: echo hi\ntty: false").expect("parse failed");
+    let off: TaskSpec = serde_yaml_ng::from_str("action: echo hi\ntty: false").expect("parse failed");
     assert_eq!(off.tty, Some(false));
 }
 
@@ -749,9 +752,9 @@ fn test_tty_serializes_only_when_set() {
         action: "#!/bin/bash\naws sso login".to_string(),
         ..Default::default()
     };
-    assert!(!serde_yaml::to_string(&spec).unwrap().contains("tty"));
+    assert!(!serde_yaml_ng::to_string(&spec).unwrap().contains("tty"));
     spec.tty = Some(true);
-    assert!(serde_yaml::to_string(&spec).unwrap().contains("tty: true"));
+    assert!(serde_yaml_ng::to_string(&spec).unwrap().contains("tty: true"));
 }
 
 /// A task naming both `bash:` and `python:` used to silently run bash and
@@ -760,7 +763,7 @@ fn test_tty_serializes_only_when_set() {
 #[test]
 fn bash_and_python_together_is_a_loud_config_error() {
     let yaml = "bash: echo FROM_BASH\npython: print('FROM_PYTHON')\n";
-    let err = serde_yaml::from_str::<TaskSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<TaskSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("bash"), "{err}");
     assert!(err.contains("python"), "{err}");
 }
@@ -891,7 +894,7 @@ const BOGUS_KEY_PROBE: &str = "__ottofile_reference_drift_probe__: true\n";
 /// copying them. Handles all three of serde's phrasings: "expected `a`",
 /// "expected `a` or `b`", and "expected one of `a`, `b`, ..., `z`".
 fn expected_keys_from_deny_unknown_fields<T: serde::de::DeserializeOwned>() -> Vec<String> {
-    let err = serde_yaml::from_str::<T>(BOGUS_KEY_PROBE)
+    let err = serde_yaml_ng::from_str::<T>(BOGUS_KEY_PROBE)
         .err()
         .expect("bogus key must be rejected")
         .to_string();
@@ -1004,7 +1007,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         foreach: _,
         on_failure: _,
         tty: _,
-    } = serde_yaml::from_str::<TaskSpecHelper>("{}\n").unwrap();
+    } = serde_yaml_ng::from_str::<TaskSpecHelper>("{}\n").unwrap();
     let ParamSpec {
         name: _,
         short: _,
@@ -1018,7 +1021,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         help: _,
         required: _,
         value: _,
-    } = serde_yaml::from_str::<ParamSpec>("{}\n").unwrap();
+    } = serde_yaml_ng::from_str::<ParamSpec>("{}\n").unwrap();
     // EdgeSpec has two bookkeeping fields (`from_sugar`, `is_injected_sugar`)
     // alongside its two on-disk keys (`task`, `when`); all four are bound
     // here so the destructuring still breaks on ANY field added or removed,

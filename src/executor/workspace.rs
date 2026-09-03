@@ -3,7 +3,7 @@ use crate::ports::{FileSystem, RealFs, StateStore, record_blocking};
 use eyre::{Result, eyre};
 use log::warn;
 use serde::{Deserialize, Serialize};
-use serde_yaml;
+use serde_yaml_ng;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -340,7 +340,7 @@ impl<F: FileSystem> Workspace<F> {
     pub async fn save_execution_context(&self, context: ExecutionContext) -> Result<()> {
         let run_yaml_path = self.metadata("run");
         let yaml_content =
-            serde_yaml::to_string(&context).map_err(|e| eyre!("Failed to serialize execution context: {}", e))?;
+            serde_yaml_ng::to_string(&context).map_err(|e| eyre!("Failed to serialize execution context: {}", e))?;
 
         self.fs
             .write(&run_yaml_path, yaml_content.as_bytes())
@@ -452,7 +452,7 @@ impl<F: FileSystem> Workspace<F> {
     pub async fn save_task_context(&self, task_name: &str, context: &ExecutionContext) -> Result<()> {
         let task_run_yaml = self.task(task_name).join("run.yaml");
         let yaml_content =
-            serde_yaml::to_string(context).map_err(|e| eyre!("Failed to serialize task context: {}", e))?;
+            serde_yaml_ng::to_string(context).map_err(|e| eyre!("Failed to serialize task context: {}", e))?;
 
         self.fs
             .write(&task_run_yaml, yaml_content.as_bytes())

@@ -57,14 +57,14 @@ fn test_retention_spec_defaults() {
 #[test]
 fn test_retention_spec_deserialize_empty() {
     let yaml = "{}";
-    let spec: RetentionSpec = serde_yaml::from_str(yaml).unwrap();
+    let spec: RetentionSpec = serde_yaml_ng::from_str(yaml).unwrap();
     assert_eq!(spec, RetentionSpec::default());
 }
 
 #[test]
 fn test_retention_spec_deserialize_partial() {
     let yaml = "keep_days: 14\nkeep_last: 5";
-    let spec: RetentionSpec = serde_yaml::from_str(yaml).unwrap();
+    let spec: RetentionSpec = serde_yaml_ng::from_str(yaml).unwrap();
     assert_eq!(spec.keep_days, 14);
     assert_eq!(spec.keep_last, 5);
     assert_eq!(spec.keep_failed, 60); // default
@@ -81,7 +81,7 @@ keep_failed: 14
 auto_prune: false
 prune_interval_hours: 12
 "#;
-    let spec: RetentionSpec = serde_yaml::from_str(yaml).unwrap();
+    let spec: RetentionSpec = serde_yaml_ng::from_str(yaml).unwrap();
     assert_eq!(spec.keep_days, 7);
     assert_eq!(spec.keep_last, 3);
     assert_eq!(spec.keep_failed, 14);
@@ -97,7 +97,7 @@ retention:
   keep_days: 14
   keep_last: 5
 "#;
-    let spec: OttoSpec = serde_yaml::from_str(yaml).unwrap();
+    let spec: OttoSpec = serde_yaml_ng::from_str(yaml).unwrap();
     assert_eq!(spec.name, "test-project");
     assert_eq!(spec.retention.keep_days, 14);
     assert_eq!(spec.retention.keep_last, 5);
@@ -111,7 +111,7 @@ retention:
 fn wrap_unknown_field_error_names_the_key_and_the_upgrade_fix() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "otto:\n  not-a-real-key: foo\ntasks:\n  up:\n    bash: echo hi\n";
-    let raw_err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err();
+    let raw_err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err();
     let wrapped = wrap_unknown_field_error(raw_err).to_string();
     assert!(wrapped.contains("not-a-real-key"), "must still name the key: {wrapped}");
     assert!(wrapped.contains("otto Upgrade"), "must name the fix: {wrapped}");
@@ -124,7 +124,7 @@ fn wrap_unknown_field_error_names_the_key_and_the_upgrade_fix() {
 fn wrap_unknown_field_error_hedges_a_genuine_misspelling() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "tsaks:\n  up:\n    bash: echo hi\n";
-    let raw_err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err();
+    let raw_err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err();
     let wrapped = wrap_unknown_field_error(raw_err).to_string();
     assert!(wrapped.contains("tsaks"), "must still name the key: {wrapped}");
     assert!(
@@ -140,7 +140,7 @@ fn wrap_unknown_field_error_hedges_a_genuine_misspelling() {
 fn wrap_unknown_field_error_is_a_noop_for_other_serde_failures() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "otto:\n  jobs: not-a-number\ntasks:\n  up:\n    bash: echo hi\n";
-    let raw_err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err();
+    let raw_err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err();
     let raw_message = raw_err.to_string();
     let wrapped = wrap_unknown_field_error(raw_err).to_string();
     assert_eq!(
@@ -160,7 +160,7 @@ fn supported_api_versions_stays_exactly_one() {
 #[test]
 fn test_otto_spec_without_retention() {
     let yaml = "name: test-project";
-    let spec: OttoSpec = serde_yaml::from_str(yaml).unwrap();
+    let spec: OttoSpec = serde_yaml_ng::from_str(yaml).unwrap();
     assert_eq!(spec.retention, RetentionSpec::default());
 }
 
@@ -171,7 +171,7 @@ fn test_otto_spec_without_retention() {
 fn deny_unknown_fields_names_a_misspelled_otto_task_key() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "otto:\n  task: foo\ntasks:\n  up:\n    bash: echo hi\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("task"), "must name the field: {err}");
     assert!(err.contains("otto"), "must name the path: {err}");
 }
@@ -183,7 +183,7 @@ fn deny_unknown_fields_names_a_misspelled_otto_task_key() {
 fn deny_unknown_fields_names_a_kebab_retention_key_the_schema_keeps_snake() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "otto:\n  retention:\n    keep-days: 5\ntasks:\n  up:\n    bash: echo hi\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("keep-days"), "must name the field: {err}");
     assert!(err.contains("otto.retention"), "must name the path: {err}");
 }
@@ -197,8 +197,8 @@ fn test_retention_spec_roundtrip() {
         auto_prune: false,
         prune_interval_hours: 12,
     };
-    let yaml = serde_yaml::to_string(&spec).unwrap();
-    let deserialized: RetentionSpec = serde_yaml::from_str(&yaml).unwrap();
+    let yaml = serde_yaml_ng::to_string(&spec).unwrap();
+    let deserialized: RetentionSpec = serde_yaml_ng::from_str(&yaml).unwrap();
     assert_eq!(spec, deserialized);
 }
 
@@ -218,7 +218,7 @@ mod jobs_range_tests {
     /// a 12s timeout, 100% CPU, zero output).
     #[test]
     fn jobs_zero_is_rejected_at_config_load() {
-        let err = serde_yaml::from_str::<ConfigSpec>("otto:\n  jobs: 0\ntasks:\n  build:\n    bash: true\n")
+        let err = serde_yaml_ng::from_str::<ConfigSpec>("otto:\n  jobs: 0\ntasks:\n  build:\n    bash: true\n")
             .expect_err("jobs: 0 must not load");
         let msg = err.to_string();
         assert!(
@@ -231,7 +231,7 @@ mod jobs_range_tests {
     fn a_positive_jobs_value_still_loads() {
         for n in [1usize, 2, 64] {
             let yaml = format!("otto:\n  jobs: {n}\ntasks:\n  build:\n    bash: true\n");
-            let spec: ConfigSpec = serde_yaml::from_str(&yaml).expect("positive jobs must load");
+            let spec: ConfigSpec = serde_yaml_ng::from_str(&yaml).expect("positive jobs must load");
             assert_eq!(spec.otto.jobs, Some(n));
         }
     }
@@ -243,7 +243,7 @@ mod jobs_range_tests {
     #[test]
     fn an_absent_jobs_key_stays_none_without_error() {
         let spec: ConfigSpec =
-            serde_yaml::from_str("tasks:\n  build:\n    bash: true\n").expect("absent jobs must load");
+            serde_yaml_ng::from_str("tasks:\n  build:\n    bash: true\n").expect("absent jobs must load");
         assert_eq!(spec.otto.jobs, None, "an absent jobs key must not invent a count");
     }
 }

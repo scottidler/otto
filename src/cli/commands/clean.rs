@@ -474,7 +474,7 @@ impl CleanCommand {
         }
 
         let content = fs::read_to_string(&run_yaml_path).ok()?;
-        let metadata: RunMetadata = serde_yaml::from_str(&content).ok()?;
+        let metadata: RunMetadata = serde_yaml_ng::from_str(&content).ok()?;
         metadata.ottofile
     }
 

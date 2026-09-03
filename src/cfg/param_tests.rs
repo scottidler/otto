@@ -16,7 +16,7 @@ fn test_boolean_flag_detection_true_default() {
             help: Enable verbose output
         "#;
 
-    let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task_spec: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
     let verbose = task_spec.params.get("verbose").unwrap();
 
     assert_eq!(verbose.param_type, ParamType::FLG);
@@ -37,7 +37,7 @@ fn test_boolean_flag_detection_false_default() {
             help: Enable debug mode
         "#;
 
-    let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task_spec: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
     let debug = task_spec.params.get("debug").unwrap();
 
     assert_eq!(debug.param_type, ParamType::FLG);
@@ -58,7 +58,7 @@ fn test_boolean_flag_case_insensitive() {
             help: Enable feature
         "#;
 
-    let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task_spec: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
     let enable = task_spec.params.get("enable").unwrap();
 
     assert_eq!(enable.param_type, ParamType::FLG);
@@ -77,7 +77,7 @@ fn test_argument_flag_with_choices() {
             help: Target environment
         "#;
 
-    let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task_spec: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
     let env = task_spec.params.get("env").unwrap();
 
     assert_eq!(env.param_type, ParamType::OPT);
@@ -98,7 +98,7 @@ fn test_argument_flag_no_default() {
             help: Path to config file
         "#;
 
-    let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task_spec: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
     let config = task_spec.params.get("config").unwrap();
 
     assert_eq!(config.param_type, ParamType::OPT);
@@ -118,7 +118,7 @@ fn test_positional_parameter() {
             help: Input filename
         "#;
 
-    let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task_spec: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
     let filename = task_spec.params.get("filename").unwrap();
 
     assert_eq!(filename.param_type, ParamType::POS);
@@ -138,7 +138,7 @@ fn test_positional_parameter_with_metavar() {
             metavar: FILE
         "#;
 
-    let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task_spec: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
     let input_file = task_spec.params.get("input_file").unwrap();
 
     assert_eq!(input_file.param_type, ParamType::POS);
@@ -165,7 +165,7 @@ fn test_mixed_parameters() {
             help: Input file path
         "#;
 
-    let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task_spec: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
 
     // Boolean flag
     let verbose = task_spec.params.get("verbose").unwrap();
@@ -196,8 +196,8 @@ fn test_mixed_parameters() {
 fn a_minimal_param_serializes_with_no_null_valued_keys() {
     use crate::cfg::task::TaskSpec;
     let yaml = "params:\n  filename:\n    help: Input file\nbash: echo hi\n";
-    let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
-    let emitted = serde_yaml::to_string(&task_spec).unwrap();
+    let task_spec: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
+    let emitted = serde_yaml_ng::to_string(&task_spec).unwrap();
     for absent in ["metavar", "default", "choices-command", "nargs"] {
         assert!(!emitted.contains(absent), "must not emit unset `{absent}`:\n{emitted}");
     }
@@ -329,7 +329,7 @@ fn deny_duplicate_divined_names_in_one_params_map() {
           --verbose:
             help: second
         "#;
-    let err = serde_yaml::from_str::<TaskSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<TaskSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("verbose"), "{err}");
 }
 
@@ -342,7 +342,7 @@ fn deny_duplicate_divined_names_in_one_params_map() {
 fn deny_unknown_fields_rejects_a_skip_field_written_by_the_user() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "tasks:\n  up:\n    params:\n      -s|--svc:\n        name: something\n    bash: echo hi\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("name"), "must name the field: {err}");
     assert!(err.contains("tasks.up.params"), "must name the path: {err}");
     assert!(err.contains("-s|--svc"), "must name the rich param key: {err}");
@@ -365,7 +365,7 @@ fn test_value_display() {
 fn nargs_zero_min_is_rejected_naming_the_param() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "tasks:\n  build:\n    params:\n      -v|--verbose:\n        nargs: \"0:5\"\n    bash: echo hi\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("-v|--verbose"), "{err}");
     assert!(err.contains("0:5"), "{err}");
 }
@@ -375,7 +375,7 @@ fn nargs_zero_min_is_rejected_naming_the_param() {
 fn nargs_inverted_range_is_rejected_naming_the_param() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "tasks:\n  build:\n    params:\n      --files:\n        nargs: \"5:2\"\n    bash: echo hi\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("files"), "{err}");
     assert!(err.contains("5:2"), "{err}");
 }
@@ -385,7 +385,7 @@ fn nargs_inverted_range_is_rejected_naming_the_param() {
 fn nargs_extra_colon_is_rejected_naming_the_param() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "tasks:\n  build:\n    params:\n      --files:\n        nargs: \"1:2:3\"\n    bash: echo hi\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("files"), "{err}");
     assert!(err.contains("1:2:3"), "{err}");
 }
@@ -398,7 +398,7 @@ fn nargs_extra_colon_is_rejected_naming_the_param() {
 fn nargs_empty_string_is_rejected() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "tasks:\n  build:\n    params:\n      --files:\n        nargs: \"\"\n    bash: echo hi\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("files"), "{err}");
     assert!(err.contains("invalid count"), "{err}");
 }
@@ -408,7 +408,7 @@ fn nargs_empty_string_is_rejected() {
 /// `Display`, `nargs_to_num_args`) had to add one back.
 #[test]
 fn nargs_valid_range_still_parses() {
-    let nargs: Nargs = serde_yaml::from_str("\"2:5\"").unwrap();
+    let nargs: Nargs = serde_yaml_ng::from_str("\"2:5\"").unwrap();
     assert_eq!(nargs, Nargs::Range(2, 5));
 }
 
@@ -424,8 +424,8 @@ fn test_nargs_roundtrip_all_variants() {
         Nargs::Range(2, 5),
     ];
     for nargs in cases {
-        let yaml = serde_yaml::to_string(&nargs).unwrap();
-        let parsed: Nargs = serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("failed to parse {yaml:?}: {e}"));
+        let yaml = serde_yaml_ng::to_string(&nargs).unwrap();
+        let parsed: Nargs = serde_yaml_ng::from_str(&yaml).unwrap_or_else(|e| panic!("failed to parse {yaml:?}: {e}"));
         assert_eq!(nargs, parsed, "round-trip failed for {nargs:?} (yaml: {yaml:?})");
     }
 }
@@ -436,7 +436,7 @@ fn test_nargs_roundtrip_all_variants() {
 
 fn spec_for(yaml: &str, param: &str) -> ParamSpec {
     use crate::cfg::task::TaskSpec;
-    let task_spec: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task_spec: TaskSpec = serde_yaml_ng::from_str(yaml).unwrap();
     task_spec.params.get(param).unwrap().clone()
 }
 
@@ -468,7 +468,7 @@ fn choices_command_serializes_back_to_the_kebab_case_key() {
             "#,
         "svc",
     );
-    let emitted = serde_yaml::to_string(&spec).unwrap();
+    let emitted = serde_yaml_ng::to_string(&spec).unwrap();
     assert!(emitted.contains("choices-command: list-services"), "{emitted}");
     assert!(!emitted.contains("choices_command"), "{emitted}");
 }
@@ -490,7 +490,7 @@ fn a_param_without_choices_command_stays_static() {
 #[test]
 fn choices_and_choices_command_together_is_a_loud_config_error() {
     use crate::cfg::task::TaskSpec;
-    let err = serde_yaml::from_str::<TaskSpec>(
+    let err = serde_yaml_ng::from_str::<TaskSpec>(
         r#"
             params:
               -s|--svc:
@@ -571,9 +571,9 @@ fn resolve_choices_command_zero_lines_is_an_error_unlike_foreach() {
 /// `Range(0, N)`, which every reader then interpreted as 1..=N.
 #[test]
 fn a_bare_nargs_count_means_exactly_that_many() {
-    let nargs: Nargs = serde_yaml::from_str("\"3\"").unwrap();
+    let nargs: Nargs = serde_yaml_ng::from_str("\"3\"").unwrap();
     assert_eq!(nargs, Nargs::Range(3, 3));
-    assert_eq!(serde_yaml::to_string(&nargs).unwrap().trim(), "'3'");
+    assert_eq!(serde_yaml_ng::to_string(&nargs).unwrap().trim(), "'3'");
     assert_eq!(nargs.to_string(), "Nargs::Range[3, 3]");
 }
 
@@ -581,6 +581,6 @@ fn a_bare_nargs_count_means_exactly_that_many() {
 /// and `?`/`*` are the spellings for the zero-capable cases.
 #[test]
 fn a_zero_bounded_span_is_still_rejected() {
-    let err = serde_yaml::from_str::<Nargs>("\"0:5\"").unwrap_err().to_string();
+    let err = serde_yaml_ng::from_str::<Nargs>("\"0:5\"").unwrap_err().to_string();
     assert!(err.contains("min must be at least 1"), "{err}");
 }

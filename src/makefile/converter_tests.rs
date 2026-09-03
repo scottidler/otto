@@ -414,6 +414,6 @@ fn test_converted_spec_carries_no_machine_specific_jobs() {
 
     // `jobs` at its default is omitted on serialize, so the converting
     // machine's CPU count never reaches the ottofile.
-    let yaml = serde_yaml::to_string(&config).unwrap();
+    let yaml = serde_yaml_ng::to_string(&config).unwrap();
     assert!(!yaml.contains("jobs:"), "{yaml}");
 }

@@ -516,3 +516,18 @@ None.
 
 ### Open questions
 None.
+
+## Phase 15: YAML crate
+
+### Design decisions
+- **`serde_yaml_ng` swapped in as a direct rename, not a `package = "serde_yaml_ng"` alias under the old `serde_yaml` key** — `Cargo.toml:26`, all 21 call-site files — the doc's own instruction is "swap the dependency and the `use` paths"; an alias would satisfy the `cargo tree` success criterion (the real package name still shows) but would leave every `serde_yaml::` call site claiming a dependency that's actually gone, which is exactly the kind of quiet mismatch the rest of this remediation doc keeps calling out elsewhere (e.g. Phase 14's "make the schema tell the truth" framing). Renamed the crate identifier everywhere instead: `serde_yaml::` → `serde_yaml_ng::` in all 21 files (`src/cfg/{config,edge,otto,param,task}_tests.rs`, `src/cfg/otto.rs`, `src/cli/commands/{clean,clean_tests,convert,tasks,tasks_tests}.rs`, `src/cli/parser/config.rs`, `src/executor/{workspace.rs,state/metadata_tests.rs}`, `src/makefile/converter_tests.rs`, `tests/{execution_context_integration_test,file_dependencies_integration_test,makefile_converter_test,on_failure_sugar_test,roundtrip,tasks_flag_test}.rs`), plus the one doc-comment mention in `src/cfg/otto.rs:104` (`` `serde_yaml` `` → `` `serde_yaml_ng` ``) so the comment names the crate it's actually describing.
+- **Spike result: zero test-text drift.** `cargo test --all` (48 test binaries, unit + integration + doctests) passed unchanged after the swap — no re-pinning needed anywhere, including the `deny_unknown_fields` location-suffix tests in `src/cfg/task_tests.rs` (`expected_keys_from_deny_unknown_fields`, which parses the exact "expected `a`, `b`, ... at line N column M" shape out of a live error) and the root-no-location case in `src/cfg/otto_tests.rs`. `serde_yaml_ng` 0.10.0 is a drop-in fork at the error-message level for every case this suite exercises.
+
+### Deviations
+None. Zero test failures, so the "Step 2: fix what the suite reports" step of the plan had nothing to fix, and the exit clause was not triggered — the swap landed clean rather than as a null result.
+
+### Tradeoffs
+None beyond the alias-vs-rename call above.
+
+### Open questions
+None.

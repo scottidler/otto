@@ -58,7 +58,7 @@ struct ApiHeaderOtto {
 /// `ApiHeader` (unparseable YAML, an `otto:` block of the wrong shape) is
 /// passed through so the typed parse can report the real, specific error.
 pub fn check_api_version(content: &str) -> Result<()> {
-    let Ok(header) = serde_yaml::from_str::<ApiHeader>(content) else {
+    let Ok(header) = serde_yaml_ng::from_str::<ApiHeader>(content) else {
         log::debug!("cfg::check_api_version: no readable api header, deferring to the typed parse");
         return Ok(());
     };
@@ -101,10 +101,10 @@ pub fn check_api_version(content: &str) -> Result<()> {
 /// to have shipped a new generation, and it fires on every future addition
 /// natively.
 ///
-/// A no-op for every other `serde_yaml` failure (a missing field, a type
+/// A no-op for every other `serde_yaml_ng` failure (a missing field, a type
 /// mismatch, unparseable YAML): none of those are "a key this binary does
 /// not recognize", so none of them get the trailing line.
-pub fn wrap_unknown_field_error(err: serde_yaml::Error) -> eyre::Report {
+pub fn wrap_unknown_field_error(err: serde_yaml_ng::Error) -> eyre::Report {
     let message = err.to_string();
     if message.contains("unknown field") {
         eyre::eyre!(

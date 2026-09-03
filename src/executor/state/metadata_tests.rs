@@ -60,8 +60,8 @@ fn test_serde_roundtrip() {
         Some(vec!["build".to_string()]),
     );
 
-    let yaml = serde_yaml::to_string(&meta).unwrap();
-    let parsed: RunMetadata = serde_yaml::from_str(&yaml).unwrap();
+    let yaml = serde_yaml_ng::to_string(&meta).unwrap();
+    let parsed: RunMetadata = serde_yaml_ng::from_str(&yaml).unwrap();
 
     assert_eq!(meta, parsed);
 }
@@ -75,7 +75,7 @@ hash: abc123
 timestamp: 1234567890
 "#;
 
-    let parsed: RunMetadata = serde_yaml::from_str(yaml).unwrap();
+    let parsed: RunMetadata = serde_yaml_ng::from_str(yaml).unwrap();
     assert_eq!(parsed.ottofile, Some(PathBuf::from("/test/otto.yml")));
     assert_eq!(parsed.hash, "abc123");
     assert_eq!(parsed.timestamp, 1234567890);

@@ -223,7 +223,7 @@ tasks:
     help: "Package application and test results"
 "#;
 
-    let config_spec: ConfigSpec = serde_yaml::from_str(yaml_content)?;
+    let config_spec: ConfigSpec = serde_yaml_ng::from_str(yaml_content)?;
 
     // Convert tasks to TaskSpecs
     let mut task_specs = Vec::new();
