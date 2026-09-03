@@ -83,7 +83,7 @@ pub fn convert_makefile(content: String) -> Result<(String, Vec<Diagnostic>)> {
         .collect();
     diagnostics.sort_by_key(|d| d.line);
 
-    let yaml = serde_yaml_ng::to_string(&config).wrap_err("Failed to serialize to YAML")?;
+    let yaml = yaml_serde::to_string(&config).wrap_err("Failed to serialize to YAML")?;
 
     Ok((yaml, diagnostics))
 }

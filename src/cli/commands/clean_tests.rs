@@ -191,7 +191,7 @@ async fn test_read_ottofile_path_with_metadata() -> Result<()> {
         "abc12345".to_string(),
         1234567890,
     );
-    let yaml_content = serde_yaml_ng::to_string(&metadata)?;
+    let yaml_content = yaml_serde::to_string(&metadata)?;
     fs::write(run_dir.join("run.yaml"), yaml_content)?;
 
     let cmd = CleanCommand {
@@ -237,7 +237,7 @@ async fn test_read_ottofile_path_no_ottofile_field() -> Result<()> {
     fs::create_dir_all(&run_dir)?;
 
     let metadata = RunMetadata::minimal(None, "abc12345".to_string(), 1234567890);
-    let yaml_content = serde_yaml_ng::to_string(&metadata)?;
+    let yaml_content = yaml_serde::to_string(&metadata)?;
     fs::write(run_dir.join("run.yaml"), yaml_content)?;
 
     let cmd = CleanCommand {
@@ -333,7 +333,7 @@ async fn test_scan_with_ottofile_metadata() -> Result<()> {
         "abc12345".to_string(),
         old_timestamp,
     );
-    let yaml_content = serde_yaml_ng::to_string(&metadata)?;
+    let yaml_content = yaml_serde::to_string(&metadata)?;
     fs::write(run_dir.join("run.yaml"), yaml_content)?;
 
     let cmd = CleanCommand {

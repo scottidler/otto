@@ -212,7 +212,7 @@ tasks:
   fmt-fix:
     bash: cargo fmt
 "#;
-    let config: ConfigSpec = serde_yaml_ng::from_str(yaml_in).unwrap();
+    let config: ConfigSpec = yaml_serde::from_str(yaml_in).unwrap();
     // The desugar pass runs in process_tasks_with_filter, not at deserialize time -
     // so the raw config still has on-failure on fmt-check and no synthetic after on fmt-fix.
     let fmt_check = config.tasks.get("fmt-check").expect("fmt-check");
@@ -224,7 +224,7 @@ tasks:
 
     // Re-serialize. The output should contain `on-failure:` on fmt-check and
     // no synthetic `after:` entry.
-    let yaml_out = serde_yaml_ng::to_string(&config).unwrap();
+    let yaml_out = yaml_serde::to_string(&config).unwrap();
     assert!(
         yaml_out.contains("on-failure"),
         "expected on-failure: in serialized output, got:\n{}",

@@ -208,7 +208,7 @@ fn render_tasks_view_json_and_yaml_share_key_set() {
     let yaml = render_tasks_view(&view, TasksFormat::Yaml).unwrap();
 
     let json_value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    let yaml_value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let yaml_value: yaml_serde::Value = yaml_serde::from_str(&yaml).unwrap();
 
     let mut json_keys: Vec<String> = json_value.as_object().unwrap().keys().cloned().collect();
     let mut yaml_keys: Vec<String> = yaml_value

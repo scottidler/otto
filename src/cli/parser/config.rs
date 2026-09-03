@@ -52,7 +52,7 @@ impl Parser {
             // fix, without an api bump (design doc `2026-09-01-cancellation-
             // reaping-and-foreach-concurrency.md`, Phase 4).
             let config_spec: ConfigSpec =
-                serde_yaml_ng::from_str(&content).map_err(crate::cfg::otto::wrap_unknown_field_error)?;
+                yaml_serde::from_str(&content).map_err(crate::cfg::otto::wrap_unknown_field_error)?;
 
             // Validate that no tasks use reserved builtin task or param names.
             // Task names first: a task named `Clean` is shadowed by the builtin

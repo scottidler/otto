@@ -154,7 +154,7 @@ fn convert(content: String) -> Conversion {
         .collect();
     diagnostics.sort_by_key(|d| d.line);
 
-    let yaml = serde_yaml_ng::to_string(&config).expect("ConfigSpec should serialize");
+    let yaml = yaml_serde::to_string(&config).expect("ConfigSpec should serialize");
     Conversion {
         config,
         yaml,
@@ -246,8 +246,8 @@ fn test_every_fixture_matches_its_expected_output() {
             )
         });
 
-        let expected: ConfigSpec = serde_yaml_ng::from_str(&expected_yaml)
-            .unwrap_or_else(|e| panic!("{expected_path} is not a ConfigSpec: {e}"));
+        let expected: ConfigSpec =
+            yaml_serde::from_str(&expected_yaml).unwrap_or_else(|e| panic!("{expected_path} is not a ConfigSpec: {e}"));
 
         assert_eq!(
             convert_fixture(&name).config,
@@ -264,7 +264,7 @@ fn test_every_fixture_round_trips_through_config_spec() {
 
         // Loading is the real test: `ConfigSpec` denies unknown fields, so this
         // proves the converter emits keys otto actually accepts.
-        let reloaded: ConfigSpec = serde_yaml_ng::from_str(&conversion.yaml).unwrap_or_else(|e| {
+        let reloaded: ConfigSpec = yaml_serde::from_str(&conversion.yaml).unwrap_or_else(|e| {
             panic!(
                 "converted makefiles/{name}/Makefile does not load: {e}\n{}",
                 conversion.yaml
@@ -279,7 +279,7 @@ fn test_every_fixture_round_trips_through_config_spec() {
 }
 
 /// Every fixture's conversion must load through the *real* otto, not through
-/// `serde_yaml_ng`.
+/// `yaml_serde`.
 ///
 /// `test_every_fixture_round_trips_through_config_spec` deserializes the
 /// converted YAML directly, which proves serde accepts the shape and nothing
@@ -469,7 +469,7 @@ clean:
 "#;
 
     let conversion = convert(simple_makefile.to_string());
-    let reloaded: ConfigSpec = serde_yaml_ng::from_str(&conversion.yaml).expect("Failed to deserialize from YAML");
+    let reloaded: ConfigSpec = yaml_serde::from_str(&conversion.yaml).expect("Failed to deserialize from YAML");
 
     assert!(conversion.warnings.is_empty(), "{:?}", conversion.warnings);
     assert_eq!(reloaded, conversion.config);

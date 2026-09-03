@@ -85,7 +85,7 @@ tasks:
         );
 
         // Parse and verify the content
-        let saved_context: otto::executor::workspace::ExecutionContext = serde_yaml_ng::from_str(&run_yaml_content)?;
+        let saved_context: otto::executor::workspace::ExecutionContext = yaml_serde::from_str(&run_yaml_content)?;
         assert_eq!(saved_context.ottofile, parsed_ottofile_path);
         assert_eq!(saved_context.hash, hash);
 

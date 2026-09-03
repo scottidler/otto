@@ -586,3 +586,29 @@ None.
 
 ### Open questions
 None.
+
+## Post-phase amendment: yaml_serde replaces serde_yaml_ng
+
+### Design decisions
+- `Cargo.toml:26` — `yaml_serde = "0.10"` written under its real crate name, no `package = ` alias, matching Phase 15's own stated preference that what resolves matches what is written.
+- 21 call sites (`Cargo.toml` plus 20 `.rs` files under `src/` and `tests/`) had `serde_yaml_ng::` mechanically renamed to `yaml_serde::` — the same four symbols as Phase 15 (`from_str`, `to_string`, `Value`, `Error`), same seam, no signature changes anywhere.
+- The compatibility check is the existing suite, per Phase 15's own design: `cargo test --all` (930 lib tests plus every integration test file) was run unmodified after the rename. Every test passed, including the strict-schema pins in `src/cfg/task_tests.rs` (`expected_keys_from_deny_unknown_fields`, which parses serde's own `unknown field` / `expected` / `at line N column M` text) and `src/cfg/otto_tests.rs` (`wrap_unknown_field_error_names_the_key_and_the_upgrade_fix`, `wrap_unknown_field_error_hedges_a_genuine_misspelling`). Nothing in the pinned error text changed — no re-pin was needed, and `docs/design/2026-08-29-strict-ottofile-schema.md`'s quoted messages (which describe `serde_yaml`-family behavior generically, not a specific crate name) needed no edit.
+- MSRV check: `yaml_serde 0.10.7` declares `rust-version: 1.82` (verified via `cargo info yaml_serde`). This repo's CI toolchain is pinned to `1.96.0` (`.github/workflows/checks.yml: RUST_VERSION: 1.96.0`, used by all three jobs); `Cargo.toml` itself sets no explicit `rust-version` (only `edition = "2024"`). 1.82 is comfortably satisfied by 1.96.0.
+- Verification run and observed, per the amendment's brief:
+  - `cargo tree -e normal | grep -c 'serde_yaml v0.9'` -> `0`; `serde_yaml_ng` is absent from the tree too (`cargo tree -e normal | grep yaml_serde` shows only `yaml_serde v0.10.7`).
+  - `otto ci` -> green: lint, check, full test suite, coverage 94.4% (23840/25248 lines) against the 87% floor, `[ci] ✅ All CI checks passed!`.
+  - `otto -o examples/foreach-glob --help`: rebuilt the main checkout's binary from its current working tree (`cargo build --release --manifest-path /home/saidler/repos/otto-rs/otto/Cargo.toml`, still on `serde_yaml_ng` there) and diffed against this worktree's post-swap binary; identical md5sum on both sides (`f4ef5b372cb121cb2b2ec45082df8b73`). Byte-identical. (Note: the *stale, pre-built* binary already sitting in that checkout's `target/release/` before this rebuild differed by one unrelated line — `convert.rs`'s help text, changed by a different phase already committed to source but not yet rebuilt into that stale binary — so the baseline was rebuilt from source rather than trusted as a leftover artifact.)
+  - Bogus `foreach` key (`not-a-real-foreach-key: true` under `tasks.build.foreach`) still produces: `` tasks.build.foreach: unknown field `not-a-real-foreach-key`, expected one of `glob`, `items`, `range`, `command`, `as`, `parallel`, `max_items`, `buffer`, `jobs` at line 11 column 7 `` followed by `` this key is either new to a newer otto than this binary, or simply misspelled in the ottofile; if the ottofile targets a newer otto, run `otto Upgrade` to update this binary ``.
+  - `otto -o examples/hello-world --tasks --format json | sha256sum` -> `3eef1056c76faf6ca07b8165102fd76ff2d094ef46b76b3d04b9b8ca9129b2dd`, 895 bytes. Unchanged; the doc's regression guard holds.
+- The swap landed; the exit clause was not taken. No parsing difference, no error-text drift, nothing to re-pin.
+
+### Deviations
+- None from the swap's own shape (Phase 15's exact mirror: dependency line, 21 call sites, run the suite, verify). One deviation from a literal reading of the brief: item 2 said "Rename `serde_yaml_ng::` to the new crate's path across every call site (phase 15 touched 21 files)" and separately "otto uses four symbols" — the count of 21 files matched exactly, confirming no drift since Phase 15 (no new call sites added, none removed) before this amendment touched anything.
+- This worktree's branch (`worktree-agent-a84851c6f1b1af1f1`) was found at `f9882ed`, an ancestor of local `main`'s `2b4d904` with zero divergent commits of its own (`git log main..HEAD` was empty), rather than already sitting at `2b4d904` as the assignment stated. Fast-forwarded (`git merge main --ff-only`) before starting, since that carried no risk of losing worktree-only work (there was none) and was the only way to reach the design doc, implementation notes, and `serde_yaml_ng` dependency this task amends — none of which existed in the worktree's pre-fast-forward state.
+
+### Tradeoffs
+- Rebuilt the main checkout's binary from source for the byte-identical `--help` comparison, rather than using the pre-existing binary already in its `target/release/` — the pre-existing binary was stale relative to that checkout's own current source (see Design decisions), so comparing against it would have reported a false difference unrelated to this change. Rebuilding from the actual current source of the comparison point is the only way the byte-identical check means what it claims to mean.
+- Kept the Phase 15 Resolved Decisions entry intact and added a new dated entry beside it, rather than rewriting the original — the brief for this amendment and the repo's own append-only convention for notes both point the same direction: the 2026-09-02 reasoning for choosing `serde_yaml_ng` over `serde-saphyr` was correct given what was known then; only the crate's continued-maintenance status changed.
+
+### Open questions
+None.

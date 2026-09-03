@@ -9,10 +9,10 @@ use otto::cfg::config::ConfigSpec;
 
 fn assert_roundtrips(yaml: &str) {
     let config: ConfigSpec =
-        serde_yaml_ng::from_str(yaml).unwrap_or_else(|e| panic!("initial parse failed: {e}\nyaml:\n{yaml}"));
-    let emitted = serde_yaml_ng::to_string(&config).unwrap_or_else(|e| panic!("serialize failed: {e}"));
+        yaml_serde::from_str(yaml).unwrap_or_else(|e| panic!("initial parse failed: {e}\nyaml:\n{yaml}"));
+    let emitted = yaml_serde::to_string(&config).unwrap_or_else(|e| panic!("serialize failed: {e}"));
     let reparsed: ConfigSpec =
-        serde_yaml_ng::from_str(&emitted).unwrap_or_else(|e| panic!("reparse failed: {e}\nemitted:\n{emitted}"));
+        yaml_serde::from_str(&emitted).unwrap_or_else(|e| panic!("reparse failed: {e}\nemitted:\n{emitted}"));
     assert_eq!(
         config, reparsed,
         "structural drift after round-trip.\noriginal yaml:\n{yaml}\nemitted yaml:\n{emitted}"
@@ -40,8 +40,8 @@ fn jobs_equal_to_the_host_cpu_count_survives_the_round_trip() {
     let yaml = format!("otto:\n  jobs: {cpus}\n");
     assert_roundtrips(&yaml);
 
-    let config: ConfigSpec = serde_yaml_ng::from_str(&yaml).expect("parse");
-    let emitted = serde_yaml_ng::to_string(&config).expect("serialize");
+    let config: ConfigSpec = yaml_serde::from_str(&yaml).expect("parse");
+    let emitted = yaml_serde::to_string(&config).expect("serialize");
 
     assert!(
         emitted.contains(&format!("jobs: {cpus}")),
@@ -55,8 +55,8 @@ fn jobs_equal_to_the_host_cpu_count_survives_the_round_trip() {
 fn an_absent_jobs_key_stays_absent_on_re_emit() {
     let yaml = "tasks:\n  build:\n    bash: echo hi\n";
 
-    let config: ConfigSpec = serde_yaml_ng::from_str(yaml).expect("parse");
-    let emitted = serde_yaml_ng::to_string(&config).expect("serialize");
+    let config: ConfigSpec = yaml_serde::from_str(yaml).expect("parse");
+    let emitted = yaml_serde::to_string(&config).expect("serialize");
 
     assert_eq!(emitted, yaml, "an absent jobs key must not be invented");
 }
@@ -68,8 +68,8 @@ fn an_absent_jobs_key_stays_absent_on_re_emit() {
 fn a_bare_nargs_count_round_trips_byte_identical() {
     let yaml = "tasks:\n  build:\n    params:\n      --files:\n        nargs: '3'\n    bash: echo hi\n";
 
-    let config: ConfigSpec = serde_yaml_ng::from_str(yaml).expect("parse");
-    let emitted = serde_yaml_ng::to_string(&config).expect("serialize");
+    let config: ConfigSpec = yaml_serde::from_str(yaml).expect("parse");
+    let emitted = yaml_serde::to_string(&config).expect("serialize");
 
     assert_eq!(emitted, yaml, "round-trip must be byte-identical");
 }
@@ -82,8 +82,8 @@ fn an_nargs_span_re_emits_the_counts_that_were_written() {
     let yaml = "tasks:\n  build:\n    params:\n      --files:\n        nargs: '2:5'\n    bash: echo hi\n";
     assert_roundtrips(yaml);
 
-    let config: ConfigSpec = serde_yaml_ng::from_str(yaml).expect("parse");
-    let emitted = serde_yaml_ng::to_string(&config).expect("serialize");
+    let config: ConfigSpec = yaml_serde::from_str(yaml).expect("parse");
+    let emitted = yaml_serde::to_string(&config).expect("serialize");
 
     assert!(emitted.contains("nargs: 2:5"), "got:\n{emitted}");
     assert!(!emitted.contains("1:5"), "got:\n{emitted}");
@@ -97,8 +97,8 @@ fn an_nargs_span_re_emits_the_counts_that_were_written() {
 fn a_minimal_foreach_round_trips_without_gaining_keys() {
     let yaml = "tasks:\n  up:\n    foreach:\n      items:\n      - a\n    bash: echo hi\n";
 
-    let config: ConfigSpec = serde_yaml_ng::from_str(yaml).expect("parse");
-    let emitted = serde_yaml_ng::to_string(&config).expect("serialize");
+    let config: ConfigSpec = yaml_serde::from_str(yaml).expect("parse");
+    let emitted = yaml_serde::to_string(&config).expect("serialize");
 
     assert_eq!(emitted, yaml, "round-trip must be byte-identical");
     for noise in [
@@ -273,8 +273,8 @@ tasks:
       -s|--svc:
         choices-command: "list-services --all"
 "#;
-    let config: ConfigSpec = serde_yaml_ng::from_str(yaml).expect("parse failed");
-    let emitted = serde_yaml_ng::to_string(&config).expect("serialize failed");
+    let config: ConfigSpec = yaml_serde::from_str(yaml).expect("parse failed");
+    let emitted = yaml_serde::to_string(&config).expect("serialize failed");
     assert!(
         emitted.contains("choices-command: list-services --all"),
         "emitted yaml lost the kebab-case key:\n{emitted}"
@@ -349,8 +349,8 @@ tasks:
   build:
     bash: echo hello
 "#;
-    let config: ConfigSpec = serde_yaml_ng::from_str(yaml).expect("parse failed");
-    let emitted = serde_yaml_ng::to_string(&config).expect("serialize failed");
+    let config: ConfigSpec = yaml_serde::from_str(yaml).expect("parse failed");
+    let emitted = yaml_serde::to_string(&config).expect("serialize failed");
     assert!(emitted.contains("bash:"), "{emitted}");
     assert!(!emitted.contains("action:"), "{emitted}");
 }
@@ -386,12 +386,12 @@ tasks:
     // produce the same order", not merely "one object serializes the same as
     // itself".
     let first = {
-        let config: ConfigSpec = serde_yaml_ng::from_str(yaml).expect("parse failed");
-        serde_yaml_ng::to_string(&config).expect("serialize failed")
+        let config: ConfigSpec = yaml_serde::from_str(yaml).expect("parse failed");
+        yaml_serde::to_string(&config).expect("serialize failed")
     };
     for attempt in 1..5 {
-        let config: ConfigSpec = serde_yaml_ng::from_str(yaml).expect("parse failed");
-        let emitted = serde_yaml_ng::to_string(&config).expect("serialize failed");
+        let config: ConfigSpec = yaml_serde::from_str(yaml).expect("parse failed");
+        let emitted = yaml_serde::to_string(&config).expect("serialize failed");
         assert_eq!(emitted, first, "serialize #{attempt} produced a different key order");
     }
 }
@@ -409,8 +409,8 @@ tasks:
   build:
     action: cargo build
 "#;
-    let config: ConfigSpec = serde_yaml_ng::from_str(yaml).expect("parse failed");
-    let emitted = serde_yaml_ng::to_string(&config).expect("serialize failed");
+    let config: ConfigSpec = yaml_serde::from_str(yaml).expect("parse failed");
+    let emitted = yaml_serde::to_string(&config).expect("serialize failed");
     assert!(emitted.contains("tty: true"), "emitted yaml lost tty: true:\n{emitted}");
     assert!(
         !emitted.contains("tty: false"),
@@ -430,8 +430,8 @@ tasks:
 fn a_minimal_config_round_trips_without_gaining_keys() {
     let yaml = "tasks:\n  build:\n    params:\n      -v|--verbose:\n        help: be loud\n    bash: echo hi\n";
 
-    let config: ConfigSpec = serde_yaml_ng::from_str(yaml).expect("parse");
-    let out = serde_yaml_ng::to_string(&config).expect("serialize");
+    let config: ConfigSpec = yaml_serde::from_str(yaml).expect("parse");
+    let out = yaml_serde::to_string(&config).expect("serialize");
 
     assert_eq!(out, yaml, "round-trip must be byte-identical;\ngot:\n{out}");
 
