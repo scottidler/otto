@@ -162,7 +162,9 @@ impl CleanCommand {
         } else {
             self.print("\nDeleting runs...\n");
             let mut deleted_size = 0u64;
-            let mut missing = 0usize;
+            // Counted apart from `failed`, and deliberately not fatal: see the
+            // exit-code comment below.
+            let mut already_gone = 0usize;
             let mut failed = 0usize;
 
             for run in &runs_to_delete {
@@ -203,7 +205,7 @@ impl CleanCommand {
                     }
                     Ok(None) => {
                         eprintln!("  Warning: Run {} not found in database", run.timestamp);
-                        missing += 1;
+                        already_gone += 1;
                     }
                     Err(e) => {
                         eprintln!("  Error deleting run {}: {}", run.timestamp, e);
@@ -218,9 +220,20 @@ impl CleanCommand {
             // path. This path used to print each failure and still return
             // `Ok(())`, so a script driving `Clean` could not tell a clean
             // sweep from one that left behind a run it was told to remove.
-            if missing > 0 || failed > 0 {
+            //
+            // A row that is already gone (`delete_run` -> `Ok(None)`) is not
+            // one of those. It is the normal outcome of two pruners racing over
+            // one store, which `auto_prune` makes routine: `otto Clean` beside
+            // a run whose own auto-prune fires selects the same rows, and
+            // whichever loses the race finds them deleted. The row is gone,
+            // which is what was asked for, so it is warned about above and left
+            // out of the exit code. Folding it in failed the losing racer and,
+            // through `auto_prune`'s `return` on that error, also skipped the
+            // orphan-cache prune and the `.last_prune` touch, so auto-prune
+            // re-fired on every subsequent run.
+            if failed > 0 {
                 return Err(eyre::eyre!(
-                    "clean did not remove every run it selected: {missing} not found in the database, {failed} failed"
+                    "clean did not remove every run it selected: {failed} failed ({already_gone} were already gone)"
                 ));
             }
         }

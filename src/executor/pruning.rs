@@ -113,9 +113,14 @@ pub async fn auto_prune(otto_home: &Path, retention: &RetentionSpec) {
         }
     };
 
+    // Warned about and carried past, not returned on. The run prune, the
+    // orphan-cache prune and the interval marker are three independent pieces
+    // of best-effort housekeeping; one refusing to delete a run directory is no
+    // reason to leave orphaned cache entries behind, and leaving the marker
+    // untouched made auto-prune re-fire on every subsequent run instead of once
+    // per interval.
     if let Err(e) = cmd.execute_with_store(Some(std::sync::Arc::new(store))).await {
         warn!("Auto-prune failed: {}", e);
-        return;
     }
 
     // Prune orphaned cache entries
