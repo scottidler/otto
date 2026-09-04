@@ -417,3 +417,52 @@ fn test_converted_spec_carries_no_machine_specific_jobs() {
     let yaml = yaml_serde::to_string(&config).unwrap();
     assert!(!yaml.contains("jobs:"), "{yaml}");
 }
+
+// ----------------------------------------------------------------------
+// Built-in command names: the loader reserves them, so the converter renames.
+// ----------------------------------------------------------------------
+
+/// `Clean` is otto's built-in command name. The task, every `before:` edge
+/// naming it, and the default goal all move to `clean` together, and the
+/// rename is warned about at the target's line. A `clean` target already in
+/// the Makefile pushes the rename to `clean-task`.
+#[test]
+fn a_target_named_like_a_builtin_is_renamed_everywhere_it_appears() {
+    let mut clean = target("Clean", &["rm -rf build"]);
+    clean.line = 4;
+    let mut build = target("build", &["echo build"]);
+    build.dependencies = vec!["Clean".to_string()];
+    let ast = MakefileAst {
+        targets: vec![clean, build],
+        default_goal: Some("Clean".to_string()),
+        ..Default::default()
+    };
+
+    let (config, diagnostics) = convert(ast);
+
+    assert!(config.tasks.contains_key("clean") && !config.tasks.contains_key("Clean"));
+    assert_eq!(config.tasks["clean"].name, "clean");
+    assert_eq!(config.otto.tasks, vec!["clean".to_string()]);
+    let edges: Vec<String> = config.tasks["build"].before.iter().map(|e| e.task.clone()).collect();
+    assert_eq!(edges, vec!["clean".to_string()]);
+    assert!(
+        messages(&diagnostics).contains(
+            "Makefile:4: warning: target `Clean` is otto's built-in command name and cannot be a task; converted as `clean`"
+        ),
+        "got: {}",
+        messages(&diagnostics)
+    );
+}
+
+#[test]
+fn a_builtin_rename_steps_aside_for_a_target_that_already_has_the_lowercase_name() {
+    let ast = MakefileAst {
+        targets: vec![target("Clean", &["rm -rf build"]), target("clean", &["rm -rf dist"])],
+        ..Default::default()
+    };
+
+    let (config, _) = convert(ast);
+
+    assert_eq!(config.tasks["clean"].action, "#!/bin/bash\nrm -rf dist");
+    assert_eq!(config.tasks["clean-task"].action, "#!/bin/bash\nrm -rf build");
+}

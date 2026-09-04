@@ -67,6 +67,12 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
     ("command-prefixes", &[]),
     ("phony-space", &[]),
     (
+        "builtin-name-target",
+        &[
+            "Makefile:4: warning: target `Clean` is otto's built-in command name and cannot be a task; converted as `clean`",
+        ],
+    ),
+    (
         "dollar-paren-target",
         &[
             "Makefile:9: warning: target `$(TARGETS)` is a make expansion; otto task names cannot be computed; the rule is skipped",
@@ -740,4 +746,33 @@ fn test_space_indented_recipe_fails_the_command_with_the_line_number() {
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.contains("Makefile:6"), "{stderr}");
     assert!(stderr.contains("indented with spaces"), "{stderr}");
+}
+
+/// Every converting fixture's output loads through otto itself. The converter's
+/// consumer is the loader, and nothing checked that the two agreed: phase 5
+/// reserved the built-in command names at load, `Convert` kept emitting a
+/// `Clean:` target under that name, and the output it wrote at exit 0 failed
+/// `otto --tasks` with "defines reserved builtin command name". A golden
+/// compared as a `ConfigSpec` cannot see that; running the binary can.
+#[test]
+fn test_every_fixture_output_loads_through_otto() {
+    for name in converting_fixtures() {
+        let conversion = convert_fixture(&name);
+        let temp = TempDir::new().expect("tempdir");
+        let ottofile = temp.path().join("otto.yml");
+        fs::write(&ottofile, &conversion.yaml).expect("write converted ottofile");
+
+        let output = common::otto_cmd(temp.path())
+            .arg("-o")
+            .arg(&ottofile)
+            .arg("--tasks")
+            .output()
+            .expect("otto --tasks");
+        assert!(
+            output.status.success(),
+            "makefiles/{name}/Makefile converted to an ottofile otto itself rejects:\n{}\n--- output ---\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            conversion.yaml
+        );
+    }
 }

@@ -30,14 +30,27 @@ const AUTOMATIC_VARIABLES: &[char] = &['@', '<', '^', '?', '*', '+', '%', '|'];
 pub struct OttoConverter {
     ast: MakefileAst,
     diagnostics: Vec<Diagnostic>,
+    /// Targets whose name is one of otto's built-in command names, mapped to
+    /// the task name they are emitted under. See [`builtin_renames`].
+    renames: HashMap<String, String>,
 }
 
 impl OttoConverter {
     pub fn new(ast: MakefileAst) -> Self {
+        let renames = builtin_renames(&ast);
         Self {
             ast,
             diagnostics: Vec::new(),
+            renames,
         }
+    }
+
+    /// The task a target is emitted as: its own name, unless that name is a
+    /// built-in command's. Every place a target name reaches the output goes
+    /// through here (the task key, `before:` edges, `otto.tasks`), so a rename
+    /// is applied everywhere or nowhere.
+    fn task_name(&self, target: &str) -> String {
+        self.renames.get(target).cloned().unwrap_or_else(|| target.to_string())
     }
 
     /// Everything the conversion could see but not translate faithfully.
@@ -209,8 +222,26 @@ impl OttoConverter {
                 );
             }
 
+            // The loader reserves the built-in command names (`Clean`,
+            // `History`, ...) for the builtins themselves, so an ottofile with
+            // a task called `Clean` fails to load. Emitting the target under
+            // that name produced output this converter's own consumer rejects,
+            // at exit 0, with `--strict` silent: v2.2.1 loaded it because the
+            // reservation did not exist yet. The rename is a lossy conversion
+            // like any other here, so it warns, and `--strict` refuses it.
+            let name = self.task_name(&target.name);
+            if name != target.name {
+                self.warn(
+                    target.line,
+                    format!(
+                        "target `{}` is otto's built-in command name and cannot be a task; converted as `{name}`",
+                        target.name
+                    ),
+                );
+            }
+
             let task = self.convert_target_to_task(&target);
-            tasks.insert(target.name.clone(), task);
+            tasks.insert(name, task);
         }
 
         tasks
@@ -250,11 +281,11 @@ impl OttoConverter {
         let before: Vec<crate::cfg::edge::EdgeSpec> = target
             .dependencies
             .iter()
-            .map(crate::cfg::edge::EdgeSpec::sugar)
+            .map(|dependency| crate::cfg::edge::EdgeSpec::sugar(self.task_name(dependency)))
             .collect();
 
         TaskSpec {
-            name: target.name.clone(),
+            name: self.task_name(&target.name),
             help: target.comment.clone(),
             after: Vec::new(),
             before,
@@ -435,14 +466,41 @@ impl OttoConverter {
 
     fn determine_default_tasks(&self) -> Vec<String> {
         if let Some(ref default_goal) = self.ast.default_goal {
-            vec![default_goal.clone()]
+            vec![self.task_name(default_goal)]
         } else if !self.ast.targets.is_empty() {
             // If no default goal, use the first target
-            vec![self.ast.targets[0].name.clone()]
+            vec![self.task_name(&self.ast.targets[0].name)]
         } else {
             vec!["*".to_string()]
         }
     }
+}
+
+/// For every target named like a built-in command (`Clean`, `Convert`, `Graph`,
+/// `History`, `Stats`, `Upgrade`), the task name it is emitted under: the same
+/// name with its first letter lowercased, which is how the Makefile would have
+/// spelled it in the first place, and `-task` appended as many times as it
+/// takes to avoid a target that already has that name. The check is the
+/// loader's own (`is_builtin`), so the two cannot disagree about which names
+/// are reserved.
+fn builtin_renames(ast: &MakefileAst) -> HashMap<String, String> {
+    let taken: HashSet<&str> = ast.targets.iter().map(|t| t.name.as_str()).collect();
+    let mut renames = HashMap::new();
+    for target in &ast.targets {
+        if !crate::cli::builtins::is_builtin(&target.name) || renames.contains_key(&target.name) {
+            continue;
+        }
+        let mut chars = target.name.chars();
+        let mut candidate = match chars.next() {
+            Some(first) => first.to_lowercase().chain(chars).collect::<String>(),
+            None => continue,
+        };
+        while taken.contains(candidate.as_str()) || renames.values().any(|v| v == &candidate) {
+            candidate.push_str("-task");
+        }
+        renames.insert(target.name.clone(), candidate);
+    }
+    renames
 }
 
 /// Index of the `)`/`}` matching the opener at `open`, counting nested pairs of
