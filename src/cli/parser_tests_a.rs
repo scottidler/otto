@@ -378,6 +378,87 @@ fn take_tui_flag_leaves_other_args_alone() {
     assert!(!found);
 }
 
+/// A foreach subtask is addressed as `up:gamma`, which is not a key of the task
+/// map, so the question "does a task in this arg list declare `-t`?" answered no
+/// for every subtask and otto took the short away from the parent that declared
+/// it: `otto up:gamma -t x` stripped `-t` as the TUI flag and `x` became a stray
+/// positional clap refused.
+#[test]
+fn a_foreach_subtask_claims_its_parents_short_t() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile_path = temp_dir.path().join("otto.yml");
+    fs::write(
+        &ottofile_path,
+        "tasks:\n  up:\n    foreach:\n      items: [alpha, beta, gamma]\n    params:\n      -t|--target:\n        help: where to deploy\n    action: echo up\n",
+    )
+    .unwrap();
+
+    let args = names(&[
+        "otto",
+        "--ottofile",
+        ottofile_path.to_str().unwrap(),
+        "up:gamma",
+        "-t",
+        "x",
+    ]);
+    let (tasks, _, _, _, tui_mode, _) = Parser::new(args)
+        .unwrap()
+        .parse()
+        .expect("the subtask's own -t must not be stripped")
+        .into_run()
+        .unwrap()
+        .into_parts();
+
+    assert!(!tui_mode, "a task that declares -t owns it, subtask id included");
+    let up = tasks
+        .iter()
+        .find(|t| t.name == "up:gamma")
+        .expect("up:gamma must be in the run set");
+    assert_eq!(up.values.get("target"), Some(&Value::Item("x".to_string())));
+}
+
+/// The same lookup gates `-h`: with the parent's `-h|--host` invisible behind
+/// the subtask id, `otto up:gamma -h example.com` printed help and then failed
+/// with `Task 'up:gamma' not found`.
+#[test]
+fn a_foreach_subtask_claims_its_parents_short_h() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile_path = temp_dir.path().join("otto.yml");
+    fs::write(
+        &ottofile_path,
+        "tasks:\n  up:\n    foreach:\n      items: [alpha, beta, gamma]\n    params:\n      -h|--host:\n        help: host to deploy to\n    action: echo up\n",
+    )
+    .unwrap();
+
+    let args = names(&[
+        "otto",
+        "--ottofile",
+        ottofile_path.to_str().unwrap(),
+        "up:gamma",
+        "-h",
+        "example.com",
+    ]);
+    let (tasks, _, _, _, _, _) = Parser::new(args)
+        .unwrap()
+        .parse()
+        .expect("help must not intercept a short the parent declares")
+        .into_run()
+        .unwrap()
+        .into_parts();
+
+    let up = tasks
+        .iter()
+        .find(|t| t.name == "up:gamma")
+        .expect("up:gamma must be in the run set");
+    assert_eq!(up.values.get("host"), Some(&Value::Item("example.com".to_string())));
+}
+
 #[test]
 fn take_tui_flag_respects_a_double_dash() {
     let (kept, found) = take_tui_flag(names(&["build", "--", "--tui", "-t"]), true);

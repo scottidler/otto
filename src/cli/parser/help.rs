@@ -102,11 +102,18 @@ impl Parser {
     /// also a name otto takes away from the ottofile author, so each one asks
     /// this first: a task that declares the short owns it, and otto keeps its
     /// hands off. Reads declarations only - resolves nothing, runs nothing.
+    ///
+    /// A subtask id is looked up through its parent: `up:gamma` is not a key of
+    /// the task map, and asking for it directly answered "no task claims this"
+    /// for every foreach subtask, so a parent that declares `-t` or `-h` lost it
+    /// the moment the user addressed one of its items. `value_taking_options`
+    /// (`discovery.rs`) already partitions subtask arguments through the same
+    /// mapping.
     fn args_claim_short(&self, args: &[String], short: char) -> bool {
         args.iter().any(|arg| {
             self.config_spec
                 .tasks
-                .get(arg)
+                .get(crate::naming::parent_or_self(arg))
                 .is_some_and(|spec| spec.params.values().any(|param| param.short == Some(short)))
         })
     }
