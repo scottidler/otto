@@ -809,13 +809,15 @@ fn two_keys_referencing_each_other_inside_commands_report_a_cycle() {
     );
 }
 
-/// A command that exits non-zero is terminal, not a dependency to wait on, so it
-/// runs exactly once. `Err(_) => still_pending` re-ran it on every pass plus once
-/// more in the partial-resolution fallback: three executions for this two-key
-/// map, and one per key for a larger one. `$$` is the shell's PID, so each
-/// execution leaves its own marker.
+/// A command that fails while a sibling is still unresolved runs once more after
+/// that sibling settles, and then its failure is final: two executions for this
+/// two-key map, whatever its size. The pre-2.3.0 loop re-ran it on every pass
+/// plus once in the partial-resolution fallback (three here, one per key for a
+/// larger map); the first cut of 2.3.0 ran it once and failed at load, which
+/// broke commands that read a sibling from their environment (next test). `$$`
+/// is the shell's PID, so each execution leaves its own marker.
 #[test]
-fn a_failing_command_runs_exactly_once() {
+fn a_failing_command_runs_once_more_after_its_siblings_resolve() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut envs = HashMap::new();
     envs.insert(
@@ -832,7 +834,83 @@ fn a_failing_command_runs_exactly_once() {
         error.contains("OTTO_TEST_A_BAD") && error.contains("failed with exit code 1"),
         "expected the failing command named, got: {error}"
     );
-    assert_eq!(marker_count(dir.path()), 1, "the failing command must run exactly once");
+    assert_eq!(
+        marker_count(dir.path()),
+        2,
+        "the failing command must run once, then once more against the complete environment"
+    );
+}
+
+/// With nothing else pending there is no environment to complete, so a failing
+/// command is not retried at all.
+#[test]
+fn a_failing_command_with_no_siblings_runs_exactly_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut envs = HashMap::new();
+    envs.insert(
+        "OTTO_TEST_A_BAD".to_string(),
+        format!("$(touch {}/mark.$$; false)", dir.path().display()),
+    );
+
+    let error = evaluate_envs(&envs, None, &HashMap::new())
+        .expect_err("a failing command must fail the load")
+        .to_string();
+
+    assert!(
+        error.contains("OTTO_TEST_A_BAD") && error.contains("failed with exit code 1"),
+        "expected the failing command named, got: {error}"
+    );
+    assert_eq!(
+        marker_count(dir.path()),
+        1,
+        "a lone failing command must run exactly once"
+    );
+}
+
+/// A command can read a declared sibling without spelling its name: `env | grep`,
+/// or any tool that reads `VAULT_ADDR`-style settings from its environment. The
+/// reference scan cannot see that, so the sibling is absent from the command's
+/// environment on the first run and the command fails. v2.2.1 retried it after
+/// the sibling resolved and the load succeeded; the first cut of 2.3.0 failed the
+/// load on the first run. The retry is the behavior; this pins it.
+#[test]
+fn a_command_reading_a_sibling_from_its_environment_waits_for_it() {
+    let mut envs = HashMap::new();
+    envs.insert(
+        "OTTO_TEST_A_ENDPOINT".to_string(),
+        "$(env | grep '^OTTO_TEST_Z_HOST=' | cut -d= -f2 | grep .)".to_string(),
+    );
+    envs.insert("OTTO_TEST_Z_HOST".to_string(), "vault.example".to_string());
+
+    let result = evaluate_envs(&envs, None, &HashMap::new()).expect("the value must resolve");
+
+    assert_eq!(
+        result.get("OTTO_TEST_A_ENDPOINT").map(String::as_str),
+        Some("vault.example"),
+        "the command must see its sibling once the sibling has resolved"
+    );
+}
+
+/// A key deferred on a failing sibling is waiting on the failure, not on a
+/// cycle, so the failure is what gets reported.
+#[test]
+fn a_key_waiting_on_a_failed_sibling_reports_the_failure_not_a_cycle() {
+    let mut envs = HashMap::new();
+    envs.insert("OTTO_TEST_A_BAD".to_string(), "$(false)".to_string());
+    envs.insert("OTTO_TEST_B_WAITS".to_string(), "$OTTO_TEST_A_BAD".to_string());
+
+    let error = evaluate_envs(&envs, None, &HashMap::new())
+        .expect_err("a failing command must fail the load")
+        .to_string();
+
+    assert!(
+        error.contains("OTTO_TEST_A_BAD") && error.contains("failed with exit code 1"),
+        "expected the failing command named, got: {error}"
+    );
+    assert!(
+        !error.contains("Circular"),
+        "a wait on a failed sibling is not a cycle, got: {error}"
+    );
 }
 
 /// A value that is a command plus a reference to a later sibling defers whole:

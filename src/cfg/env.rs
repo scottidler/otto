@@ -36,14 +36,19 @@ pub fn evaluate_envs(
     let mut pending: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     pending.sort_unstable_by_key(|(k, _)| *k);
     let mut iterations = 0;
-    // One pass per key, plus one. Every pass either resolves at least one key or
-    // hits the no-progress branch below, so a map of N keys cannot need more than
-    // N passes and this bound is unreachable for any resolvable input.
+    // One pass per key, plus one. Every pass either resolves at least one key,
+    // is the single retry of the parked keys below, or hits the no-progress
+    // branch, so a map of N keys cannot need more than N + 1 passes and this
+    // bound is unreachable for any resolvable input.
     //
     // It was a flat 100, which made a valid 200-deep chain a coin flip: measured
     // over 20 runs of one unchanged ottofile, 9 resolved correctly and 11 exited 1
     // with "Maximum iterations reached", purely on HashMap seeding order.
     let max_iterations = envs.len() + 1;
+    // Keys whose evaluation failed while other declared keys were still
+    // unresolved. They get exactly one more run once everything else has
+    // settled; see the `Err` arm in the loop.
+    let mut parked: Vec<(&str, &str, eyre::Report)> = Vec::new();
 
     // The environment otto itself was invoked with, before any declared key shadows it,
     // with `base_overrides` layered on top. This is what a declared key's own expression
@@ -104,20 +109,46 @@ pub fn evaluate_envs(
                     evaluated.insert(var_name.to_string(), resolved_value);
                     made_progress = true;
                 }
-                // Every declared reference this value makes is already resolved, or
-                // the check above would have deferred it. So an error here is not a
-                // dependency to wait on: it is a command that exited non-zero, or a
-                // reference to a name that is neither declared nor inherited. Both
-                // are terminal. Treating every error as "wait" re-ran a failing
-                // command once per pass, plus once more in the partial-resolution
-                // fallback below.
+                // Every declared reference this value SPELLS is resolved, or the
+                // check above would have deferred it. But a command body can read
+                // a sibling without naming it - `$(env | grep '^Z_HOST=')`, or a
+                // tool that reads `VAULT_ADDR` from its environment - and that
+                // sibling is stripped from the context until it resolves. So a
+                // failure here is parked, not returned: once every other key has
+                // settled, the command runs one more time against the complete
+                // environment, and only a failure then is terminal. Returning at
+                // once, which is what the first cut of 2.3.0 did, failed at load
+                // a v2.2.1 ottofile whose `$(env | grep '^Z_HOST=' ...)` key
+                // sorted before `Z_HOST`. Two runs of a failing command at most,
+                // not one per pass, and a key that fails with nothing else
+                // pending is not retried at all.
                 Err(e) => {
-                    return Err(eyre!("Failed to resolve environment variable '{}': {}", var_name, e));
+                    log::debug!("cfg::evaluate_envs: parking '{var_name}' after a failed evaluation: {e}");
+                    parked.push((var_name, raw_value, e));
                 }
             }
         }
 
+        // Every other declared key is resolved: the parked keys get their one
+        // retry. If this pass WAS that retry, nothing else ran, `made_progress`
+        // is false, and the failure stands.
+        if still_pending.is_empty() && !parked.is_empty() {
+            if !made_progress {
+                let (var_name, _, e) = parked.swap_remove(0);
+                return Err(eyre!("Failed to resolve environment variable '{}': {}", var_name, e));
+            }
+            pending = parked.drain(..).map(|(name, raw_value, _)| (name, raw_value)).collect();
+            continue;
+        }
+
         if !made_progress && !still_pending.is_empty() {
+            // A key still deferred here may be waiting on a parked one, so the
+            // parked failure is the root cause and is reported first; a cycle
+            // report would blame the waiting end.
+            if let Some((var_name, _, e)) = parked.first() {
+                return Err(eyre!("Failed to resolve environment variable '{}': {}", var_name, e));
+            }
+
             // A cycle is its own error, named as one. Checked before the retry
             // below, whose message ("... 'B' not found") describes a variable
             // that exists and blames the wrong end of the loop.
