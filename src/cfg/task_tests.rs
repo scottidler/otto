@@ -1194,3 +1194,72 @@ fn a_range_that_exactly_fills_max_items_is_accepted() {
     assert!(foreach.validate("count").is_ok());
     assert_eq!(foreach.resolve_items(&PathBuf::from(".")).unwrap().len(), 1000);
 }
+
+// ============================================================================
+// Scalar task keys and the edges that name them
+// ============================================================================
+
+#[derive(Deserialize)]
+struct TaskMapOnly {
+    #[serde(deserialize_with = "deserialize_task_map")]
+    tasks: TaskSpecs,
+}
+
+fn task_map(yaml: &str) -> TaskSpecs {
+    yaml_serde::from_str::<TaskMapOnly>(yaml).unwrap().tasks
+}
+
+/// `0x1f:` keys a task named `0x1f` (the source text), while `after: [0x1f]`
+/// reaches the edge visitor as the integer 31. Both must end up naming the one
+/// task the author wrote.
+#[test]
+fn a_hex_task_key_and_an_edge_naming_it_agree() {
+    let tasks = task_map("tasks:\n  0x1f:\n    bash: echo hi\n  report:\n    after: [0x1f]\n    bash: echo r\n");
+    assert!(
+        tasks.contains_key("0x1f"),
+        "the author's spelling keys the task: {:?}",
+        tasks.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(tasks["report"].after[0].task, "0x1f");
+}
+
+#[test]
+fn a_boolean_task_key_and_an_edge_naming_it_agree() {
+    let tasks = task_map("tasks:\n  True:\n    bash: echo hi\n  report:\n    after: [True]\n    bash: echo r\n");
+    assert!(tasks.contains_key("True"), "{:?}", tasks.keys().collect::<Vec<_>>());
+    assert_eq!(tasks["report"].after[0].task, "True");
+}
+
+#[test]
+fn a_signed_decimal_task_key_and_an_edge_naming_it_agree() {
+    let tasks = task_map("tasks:\n  \"+5\":\n    bash: echo hi\n  report:\n    after: [+5]\n    bash: echo r\n");
+    assert!(tasks.contains_key("+5"), "{:?}", tasks.keys().collect::<Vec<_>>());
+    assert_eq!(tasks["report"].after[0].task, "+5");
+}
+
+/// `before:` names tasks the same way `after:` does.
+#[test]
+fn a_scalar_edge_target_in_before_resolves_too() {
+    let tasks = task_map("tasks:\n  0x1f:\n    bash: echo hi\n  report:\n    before: [0x1f]\n    bash: echo r\n");
+    assert_eq!(tasks["report"].before[0].task, "0x1f");
+}
+
+/// A plain decimal key already agrees with its stringified edge, and an edge
+/// that names an existing task must never be re-pointed at another one.
+#[test]
+fn an_exact_task_key_match_wins_over_a_resolved_one() {
+    let tasks = task_map(
+        "tasks:\n  0x1f:\n    bash: echo hex\n  31:\n    bash: echo dec\n  report:\n    after: [31]\n    bash: echo r\n",
+    );
+    assert_eq!(tasks["report"].after[0].task, "31");
+}
+
+/// Two keys resolving to one name is ambiguous, so neither claims the edge and
+/// the run fails loudly on the unresolved name rather than picking one.
+#[test]
+fn two_task_keys_resolving_to_one_name_claim_no_edge() {
+    let tasks = task_map(
+        "tasks:\n  0x1f:\n    bash: echo a\n  \"+31\":\n    bash: echo b\n  report:\n    after: [0x1f]\n    bash: echo r\n",
+    );
+    assert_eq!(tasks["report"].after[0].task, "31");
+}

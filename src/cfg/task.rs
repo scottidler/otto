@@ -1083,6 +1083,63 @@ fn test_namify() {
     assert_eq!(namify("--name"), "name".to_string());
 }
 
+/// The name a YAML plain scalar collapses to once it is resolved, when that
+/// differs from the source text: `0x1f` -> `31`, `True` -> `true`, `+5` -> `5`.
+/// `None` for anything that resolves to a string (the overwhelming majority of
+/// task names) or is not a single scalar at all.
+fn resolved_scalar_name(name: &str) -> Option<String> {
+    match yaml_serde::from_str::<yaml_serde::Value>(name) {
+        Ok(yaml_serde::Value::Number(number)) => Some(number.to_string()),
+        Ok(yaml_serde::Value::Bool(boolean)) => Some(boolean.to_string()),
+        _ => None,
+    }
+}
+
+/// Reconcile the two spellings one task name arrives in.
+///
+/// A task keyed `0x1f:` and an edge naming it (`after: [0x1f]`) are the same
+/// name written by the same hand, but they reach us through different serde
+/// calls: the task map asks for a `String` key and gets the raw source text
+/// (`0x1f`), while the edge is deserialized with `deserialize_any` and gets the
+/// resolved integer, which it can only render as `31`. yaml_serde hands a
+/// visitor no way back to the source text of a plain scalar (see
+/// `visit_untagged_scalar`), so the reconciliation happens here, once the whole
+/// map is in hand: an edge target that names no task, and that is the resolved
+/// form of exactly one task key, is rewritten to that key. The author's
+/// spelling is what survives - the task stays `0x1f` on the command line, in
+/// help, and on re-emit.
+fn resolve_scalar_edge_targets(tasks: &mut TaskSpecs) {
+    let mut by_resolved: HashMap<String, Option<String>> = HashMap::new();
+    for key in tasks.keys() {
+        let Some(resolved) = resolved_scalar_name(key) else {
+            continue;
+        };
+        if resolved == *key {
+            continue;
+        }
+        // Two keys resolving to one name (`0x1f` and `0X1F`) is ambiguous;
+        // `None` parks it so neither claims the edge.
+        by_resolved
+            .entry(resolved)
+            .and_modify(|winner| *winner = None)
+            .or_insert_with(|| Some(key.clone()));
+    }
+    if by_resolved.is_empty() {
+        return;
+    }
+    let keys: Vec<String> = tasks.keys().cloned().collect();
+    for spec in tasks.values_mut() {
+        for edge in spec.after.iter_mut().chain(spec.before.iter_mut()) {
+            if keys.contains(&edge.task) {
+                continue;
+            }
+            if let Some(Some(key)) = by_resolved.get(&edge.task) {
+                edge.task = key.clone();
+            }
+        }
+    }
+}
+
 pub fn deserialize_task_map<'de, D>(deserializer: D) -> Result<TaskSpecs, D::Error>
 where
     D: Deserializer<'de>,
@@ -1105,6 +1162,7 @@ where
                 task_spec.name = namify(&name);
                 tasks.insert(name.clone(), task_spec);
             }
+            resolve_scalar_edge_targets(&mut tasks);
             Ok(tasks)
         }
     }
