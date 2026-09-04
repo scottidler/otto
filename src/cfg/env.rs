@@ -551,6 +551,40 @@ pub(crate) fn expand_var_refs<F>(input: &str, mut lookup: F) -> Result<String>
 where
     F: FnMut(&str) -> Option<String>,
 {
+    walk_var_refs(input, |_, reference| lookup(reference))
+}
+
+/// The variable a brace reference reads: its leading identifier, after an
+/// optional `#` (`${#NAME}` is a length expansion). `${NAME}` gives `NAME`,
+/// `${NAME:-x}` and `${NAME%y}` give `NAME`, `${#NAME}` gives `NAME`. A
+/// reference with no leading identifier (`${}`, `${1}`) is returned whole, so it
+/// fails lookup naming exactly what was written.
+fn expansion_name(reference: &str) -> &str {
+    let body = reference.strip_prefix('#').unwrap_or(reference);
+    let end = body
+        .bytes()
+        .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+        .unwrap_or(body.len());
+    if end == 0 || body.as_bytes()[0].is_ascii_digit() {
+        return reference;
+    }
+    &body[..end]
+}
+
+/// The one scan behind [`expand_var_refs`] and [`referenced_vars`]. For every
+/// reference, `on_ref` receives the variable NAME the shell would read and the
+/// raw REFERENCE otto resolves. They are the same text for `$NAME` and `${NAME}`
+/// and differ for a parameter expansion: `${NAME:-x}` names `NAME` and
+/// references `NAME:-x`. otto's templates do not implement parameter expansion,
+/// so the expander looks the raw reference up and fails naming it (pinned by
+/// `tests/dollar_escape_test.rs`); inside a `$(...)` body the shell does
+/// implement it, so the deferral scan has to see `NAME`, or `AAA: '$(echo
+/// "${ZZZ:-x}")'` runs before `ZZZ` resolves and prints the fallback. `on_ref`
+/// returning `None` is an unresolved reference.
+fn walk_var_refs<F>(input: &str, mut on_ref: F) -> Result<String>
+where
+    F: FnMut(&str, &str) -> Option<String>,
+{
     let bytes = input.as_bytes();
     let mut result = String::with_capacity(input.len());
     let mut i = 0;
@@ -580,8 +614,9 @@ where
                     i += 1;
                     continue;
                 };
-                let name = &input[i + 2..close];
-                let value = lookup(name).ok_or_else(|| eyre!("Environment variable '{}' not found", name))?;
+                let reference = &input[i + 2..close];
+                let value = on_ref(expansion_name(reference), reference)
+                    .ok_or_else(|| eyre!("Environment variable '{}' not found", reference))?;
                 result.push_str(&value);
                 i = close + 1;
             }
@@ -592,7 +627,7 @@ where
                     end += 1;
                 }
                 let name = &input[start..end];
-                let value = lookup(name).ok_or_else(|| eyre!("Environment variable '{}' not found", name))?;
+                let value = on_ref(name, name).ok_or_else(|| eyre!("Environment variable '{}' not found", name))?;
                 result.push_str(&value);
                 i = end;
             }
@@ -607,11 +642,12 @@ where
     Ok(result)
 }
 
-/// Every variable name `value` references, in order. Same scanning rules as the
-/// expander, so "what it references" and "what it resolves" cannot disagree.
+/// Every variable name `value` references, in order: the name the shell would
+/// read, so `${NAME:-x}` reports `NAME`. Same scan as the expander
+/// ([`walk_var_refs`]), so the two cannot disagree about where a reference is.
 fn referenced_vars(value: &str) -> Vec<String> {
     let mut names = Vec::new();
-    let _ = expand_var_refs(value, |name| {
+    let _ = walk_var_refs(value, |name, _| {
         names.push(name.to_string());
         Some(String::new())
     });

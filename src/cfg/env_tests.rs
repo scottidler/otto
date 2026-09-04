@@ -1125,3 +1125,72 @@ fn parse_env_assignments_accepts_an_underscore_leading_key() {
 
     assert_eq!(parsed.get("_PRIVATE").map(String::as_str), Some("x"));
 }
+
+// ----------------------------------------------------------------------
+// Deferral through parameter expansions: `${SIB:-x}`, `${#SIB}`, `${SIB%y}`.
+// ----------------------------------------------------------------------
+
+/// The reference scan reports the variable the shell will read, not the raw
+/// brace text. Before this, `${ZZZ:-fallback}` scanned as a variable named
+/// `ZZZ:-fallback`, which is not a declared key, so no deferral happened and
+/// the command ran before `ZZZ` resolved: the order-dependent result phase 3
+/// fixed for `$ZZZ` survived for every parameter-expansion form.
+#[test]
+fn referenced_vars_reports_the_variable_a_parameter_expansion_reads() {
+    assert_eq!(
+        referenced_vars("${A:-x} ${#B} ${C%y} ${D/a/b} $E ${F}"),
+        vec!["A", "B", "C", "D", "E", "F"]
+    );
+    // No leading identifier: reported whole, so the expander's error names
+    // exactly what was written.
+    assert_eq!(referenced_vars("${} ${1} ${#}"), vec!["", "1", "#"]);
+}
+
+/// `AAA` sorts before `ZZZ`, so without deferral the command runs first and
+/// the shell default is what comes out. Measured on the first cut of 2.3.0:
+/// `AAA=[got:fallback]`; renaming the keys so the sibling sorted first gave
+/// `got:hello`. Same value, same ottofile, two answers.
+#[test]
+fn a_command_referencing_a_sibling_through_a_parameter_expansion_waits_for_it() {
+    let mut envs = HashMap::new();
+    envs.insert(
+        "OTTO_TEST_AAA_DEFAULT".to_string(),
+        "$(echo \"got:${OTTO_TEST_ZZZ_SIB:-fallback}\")".to_string(),
+    );
+    envs.insert(
+        "OTTO_TEST_AAA_LEN".to_string(),
+        "$(echo \"len:${#OTTO_TEST_ZZZ_SIB}\")".to_string(),
+    );
+    envs.insert(
+        "OTTO_TEST_AAA_STRIP".to_string(),
+        "$(echo \"strip:${OTTO_TEST_ZZZ_SIB%lo}\")".to_string(),
+    );
+    envs.insert("OTTO_TEST_ZZZ_SIB".to_string(), "hello".to_string());
+
+    let result = evaluate_envs(&envs, None, &HashMap::new()).expect("the values must resolve");
+
+    assert_eq!(
+        result.get("OTTO_TEST_AAA_DEFAULT").map(String::as_str),
+        Some("got:hello")
+    );
+    assert_eq!(result.get("OTTO_TEST_AAA_LEN").map(String::as_str), Some("len:5"));
+    assert_eq!(result.get("OTTO_TEST_AAA_STRIP").map(String::as_str), Some("strip:hel"));
+}
+
+/// Outside a command the expander still resolves only `${NAME}`; a parameter
+/// expansion there is the unresolvable reference it always was, and the error
+/// names the whole reference (pinned end to end by `tests/dollar_escape_test.rs`).
+#[test]
+fn a_parameter_expansion_outside_a_command_still_fails_naming_the_whole_reference() {
+    let mut context = HashMap::new();
+    context.insert("OTTO_TEST_PRESENT".to_string(), "x".to_string());
+
+    let error = resolve_env_variables("${OTTO_TEST_PRESENT:-fallback}", &context)
+        .expect_err("otto templates do not implement parameter expansion")
+        .to_string();
+
+    assert!(
+        error.contains("'OTTO_TEST_PRESENT:-fallback' not found"),
+        "the error must name the whole reference, got: {error}"
+    );
+}
