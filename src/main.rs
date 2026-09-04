@@ -232,9 +232,20 @@ async fn main() {
     };
 
     if let Err(e) = otto::run(config).await {
-        eprintln!("{e:#}");
+        report_fatal(&e);
         std::process::exit(1);
     }
+}
+
+/// Print a fatal error to stderr, best effort.
+///
+/// Not `eprintln!`: a run that ended because the terminal hung up has a stderr
+/// whose every write fails EIO, and `eprintln!` panics on a failed write. The
+/// run is already recorded by the time this is reached; a panic here would
+/// only swap the exit code from 1 to 101 for a message nobody can see.
+fn report_fatal(e: &Report) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{e:#}");
 }
 
 /// Handle --is-valid-ottofile argument. Returns Some(exit_code) if handled.

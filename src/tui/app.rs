@@ -13,6 +13,156 @@ use std::time::{Duration, Instant};
 
 const TUI_TICK_RATE_MS: u64 = 100; // 10 FPS
 
+/// What the terminal did within one wait.
+enum TerminalWait {
+    /// Input is available; crossterm can be asked to read it.
+    Ready,
+    /// The timeout passed with nothing to read.
+    Idle,
+    /// The terminal is gone: the pty master closed, or the descriptor errored.
+    HungUp,
+}
+
+/// Wait for terminal input without entering crossterm's reader on a terminal
+/// that is gone.
+///
+/// crossterm 0.29's event source (`UnixInternalEventSource::try_read`) loops on
+/// its tty read until it has an event or sees `WouldBlock`. A read that returns
+/// `Ok(0)` or `Err(EIO)`, which is what a pty whose master has closed returns,
+/// never breaks that loop and never re-checks the timeout, so `event::poll`
+/// never returns. Reproduced by closing the pty master under `otto --tui`: the
+/// main thread spun at 100% CPU, the shutdown flag two lines below the poll was
+/// never read, and the run row stayed `running`.
+///
+/// So the wait happens here, with `poll(2)` on the terminal's own descriptor,
+/// and a hangup (`POLLHUP`, `POLLERR`, `POLLNVAL`) is reported before crossterm
+/// is asked to read anything. crossterm is entered only once input is known to
+/// be present, and then with a zero timeout. What remains is a hangup landing
+/// between this poll and that read, which needs a keystroke and the hangup in
+/// the same instant.
+///
+/// When stdin is not a terminal (crossterm then opens `/dev/tty` itself), or
+/// off unix, the check is skipped and crossterm's own poll runs as before.
+fn wait_for_terminal_input(timeout: Duration) -> io::Result<TerminalWait> {
+    #[cfg(unix)]
+    {
+        use std::io::IsTerminal;
+        if io::stdin().is_terminal() {
+            return poll_stdin(timeout);
+        }
+    }
+    Ok(if crossterm::event::poll(timeout)? {
+        TerminalWait::Ready
+    } else {
+        TerminalWait::Idle
+    })
+}
+
+#[cfg(unix)]
+fn poll_stdin(timeout: Duration) -> io::Result<TerminalWait> {
+    poll_terminal_fd(libc::STDIN_FILENO, timeout)
+}
+
+/// `poll(2)` one descriptor for input or hangup. The whole hangup detection is
+/// here, split out from [`poll_stdin`] so it can be tested against a pty whose
+/// master is closed without touching the process's real stdin.
+#[cfg(unix)]
+fn poll_terminal_fd(fd: libc::c_int, timeout: Duration) -> io::Result<TerminalWait> {
+    let mut fds = [libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    let millis = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `fds` is one initialized `pollfd` that outlives the call, and the
+    // count passed is its length.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, millis) };
+    if ready < 0 {
+        let err = io::Error::last_os_error();
+        // A signal landed during the wait (SIGHUP itself, or a resize). The
+        // loop comes back around and reads the shutdown flag the handler set.
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(TerminalWait::Idle);
+        }
+        return Err(err);
+    }
+    if ready == 0 {
+        return Ok(TerminalWait::Idle);
+    }
+    if fds[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        return Ok(TerminalWait::HungUp);
+    }
+    Ok(TerminalWait::Ready)
+}
+
+#[cfg(all(test, unix))]
+mod hangup_tests {
+    use super::{TerminalWait, poll_terminal_fd};
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::time::Duration;
+
+    /// A pty pair, so a test can be the terminal and then close it. This is the
+    /// one condition that made `otto --tui` spin forever, and the only way to
+    /// reproduce it is to own the master and close it.
+    fn open_pty() -> (OwnedFd, OwnedFd) {
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: both out-params are valid; the three optional args are null.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: two fresh descriptors openpty just returned, owned by nothing else.
+        unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
+    }
+
+    #[test]
+    fn a_closed_master_reports_a_hangup_rather_than_blocking() {
+        let (master, slave) = open_pty();
+        drop(master); // the terminal window closes
+        // Would have blocked forever inside crossterm's reader; here it returns.
+        let waited = poll_terminal_fd(slave.as_raw_fd(), Duration::from_secs(5)).expect("poll");
+        assert!(
+            matches!(waited, TerminalWait::HungUp),
+            "a closed pty master must read as a hangup"
+        );
+    }
+
+    #[test]
+    fn pending_input_reads_as_ready() {
+        let (master, slave) = open_pty();
+        // SAFETY: `master` is an open, owned writable descriptor.
+        let mut writer = unsafe { std::fs::File::from_raw_fd(master.as_raw_fd()) };
+        std::mem::forget(master); // `writer` owns the fd now
+        // A full line: the slave is in canonical mode here, where poll does not
+        // report input until a line is complete. otto puts the real terminal in
+        // raw mode; this test only needs poll to see POLLIN.
+        writer.write_all(b"q\n").expect("write to pty");
+        let waited = poll_terminal_fd(slave.as_raw_fd(), Duration::from_secs(5)).expect("poll");
+        assert!(
+            matches!(waited, TerminalWait::Ready),
+            "pending input must read as ready"
+        );
+    }
+
+    #[test]
+    fn a_quiet_terminal_times_out_idle() {
+        let (_master, slave) = open_pty();
+        let waited = poll_terminal_fd(slave.as_raw_fd(), Duration::from_millis(50)).expect("poll");
+        assert!(
+            matches!(waited, TerminalWait::Idle),
+            "a quiet terminal must time out idle"
+        );
+    }
+}
+
 /// Main TUI application
 pub struct TuiApp {
     layout: PaneLayout,
@@ -88,11 +238,19 @@ impl TuiApp {
                 .checked_sub(self.last_tick.elapsed())
                 .unwrap_or_else(|| Duration::from_secs(0));
 
-            if crossterm::event::poll(timeout)?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                self.handle_key_event(key);
+            match wait_for_terminal_input(timeout)? {
+                TerminalWait::HungUp => {
+                    return Err(io::Error::other("the terminal hung up"));
+                }
+                TerminalWait::Ready => {
+                    if crossterm::event::poll(Duration::ZERO)?
+                        && let Event::Key(key) = event::read()?
+                        && key.kind == KeyEventKind::Press
+                    {
+                        self.handle_key_event(key);
+                    }
+                }
+                TerminalWait::Idle => {}
             }
 
             if self.last_tick.elapsed() >= self.tick_rate {

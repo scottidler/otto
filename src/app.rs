@@ -11,7 +11,7 @@ use eyre::{Report, Result, eyre};
 use log::{error, info};
 use std::collections::HashMap;
 use std::env;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -662,30 +662,40 @@ pub async fn execute_with_tui(
     // alternate one that is about to be discarded.
     let still_running = app.running_task_names();
     if let Err(e) = terminal.restore() {
-        eprintln!("Warning: Failed to restore terminal: {}", e);
+        // Not `eprintln!`: after a hangup this write fails EIO too, and
+        // `eprintln!` panics on a failed write, which would unwind past the
+        // cancel and the run record below. The warning is best effort.
+        let _ = writeln!(std::io::stderr(), "Warning: Failed to restore terminal: {e}");
+        // A terminal that cannot be restored is gone. ratatui's `Terminal`
+        // shows the cursor in its `Drop` and `eprintln!`s when that fails,
+        // which on a dead terminal is a panic at the very end of an otherwise
+        // clean shutdown: exit 101 instead of 1, measured with the pty master
+        // closed. Skipping the drop leaks a handle the process is about to
+        // release anyway.
+        std::mem::forget(terminal);
     }
 
-    // Handle TUI errors. A draw error is how a hangup reaches this path: every
-    // terminal write fails EIO, `run()` returns `Err`, and propagating that
-    // straight out - which is what this line used to do - returned from here
-    // BEFORE the cancel below, leaving the scheduler and its whole subtree
-    // running with nobody watching. Cancel first, drain the scheduler, then
-    // propagate. No "dashboard closed" message: the dashboard did not close, the
-    // terminal went away, and saying otherwise would name the wrong cause.
-    if let Err(e) = tui_result {
+    // Handle TUI errors. A hangup is how this path is reached: the terminal's
+    // descriptor reports it, or every write fails EIO, `run()` returns `Err`,
+    // and propagating that straight out - which is what this used to do -
+    // returned BEFORE the cancel below, leaving the scheduler and its whole
+    // subtree running with nobody watching. Then it returned before
+    // `record_run_complete_in_db`, so a hung-up run stayed `running` in the
+    // database until `Clean` aged it out. Cancel, then fall through to the same
+    // drain, record and prune as the ordinary path, and propagate at the end.
+    // No "dashboard closed" message: the dashboard did not close, the terminal
+    // went away, and saying otherwise would name the wrong cause.
+    let tui_error = tui_result.err();
+    if tui_error.is_some() {
         if !scheduler_handle.is_finished() {
             cancel.cancel();
-            let _ = scheduler_handle.await;
         }
-        return Err(eyre::eyre!("TUI error: {}", e));
-    }
-
-    // The dashboard is gone, so nothing is watching the run any more. Cancel it and
-    // say so. Before this, quitting left the user staring at a bare prompt while
-    // children they could no longer see ran to completion, with no way to stop them.
-    // `CancelSignal::cancel` is idempotent (`scheduler.rs`), so a run the signal
-    // handler already cancelled passes through here harmlessly.
-    if !scheduler_handle.is_finished() {
+    } else if !scheduler_handle.is_finished() {
+        // The dashboard is gone, so nothing is watching the run any more. Cancel it and
+        // say so. Before this, quitting left the user staring at a bare prompt while
+        // children they could no longer see ran to completion, with no way to stop them.
+        // `CancelSignal::cancel` is idempotent (`scheduler.rs`), so a run the signal
+        // handler already cancelled passes through here harmlessly.
         eprintln!("otto: dashboard closed, cancelling the run...");
         cancel.cancel();
         // Naming what is still running is the difference between "otto hung"
@@ -713,6 +723,10 @@ pub async fn execute_with_tui(
     // Auto-prune runs even if tasks failed
     if let Ok(otto_home) = crate::executor::layout::resolve_otto_home() {
         crate::executor::pruning::auto_prune(&otto_home, &retention).await;
+    }
+
+    if let Some(e) = tui_error {
+        return Err(eyre::eyre!("TUI error: {}", e));
     }
 
     result

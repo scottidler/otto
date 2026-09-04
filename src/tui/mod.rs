@@ -85,7 +85,11 @@ impl<T: TerminalRestore> TerminalGuard<T> {
 impl<T: TerminalRestore> Drop for TerminalGuard<T> {
     fn drop(&mut self) {
         if let Err(e) = self.restore() {
-            eprintln!("otto: failed to restore the terminal: {e}");
+            // Best effort: a restore fails when the terminal is gone, and
+            // then this write fails too. `eprintln!` would panic inside a
+            // destructor for a message nobody can see.
+            use std::io::Write;
+            let _ = writeln!(io::stderr(), "otto: failed to restore the terminal: {e}");
         }
     }
 }
