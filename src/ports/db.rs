@@ -96,6 +96,13 @@ pub struct MemoryStateStore {
     next_run_id: std::sync::atomic::AtomicI64,
     next_task_id: std::sync::atomic::AtomicI64,
     next_project_id: std::sync::atomic::AtomicI64,
+    /// Answer every `delete_run` with `Ok(None)`, leaving the rows in place.
+    ///
+    /// That is what the loser of a race between two pruners over one store
+    /// sees: `find_old_runs` reported rows, and by the time it asked for them
+    /// the other pruner had deleted them. Off by default, so this fake behaves
+    /// exactly as it always has unless a test asks for the race.
+    delete_run_returns_none: std::sync::atomic::AtomicBool,
 }
 
 impl MemoryStateStore {
@@ -107,7 +114,14 @@ impl MemoryStateStore {
             next_run_id: std::sync::atomic::AtomicI64::new(1),
             next_task_id: std::sync::atomic::AtomicI64::new(1),
             next_project_id: std::sync::atomic::AtomicI64::new(1),
+            delete_run_returns_none: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Make every subsequent `delete_run` answer `Ok(None)`. See the field.
+    pub fn lose_every_delete_race(&self) {
+        self.delete_run_returns_none
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn get_or_create_project(&self, hash: &str, ottofile_path: Option<&PathBuf>) -> i64 {
@@ -499,6 +513,10 @@ impl StateStore for MemoryStateStore {
     }
 
     fn delete_run(&self, run_id: i64, _delete_filesystem: bool) -> Result<Option<RunRecord>> {
+        if self.delete_run_returns_none.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(None);
+        }
+
         let mut runs = self.runs.write().unwrap();
         let mut tasks = self.tasks.write().unwrap();
         let mut projects = self.projects.write().unwrap();

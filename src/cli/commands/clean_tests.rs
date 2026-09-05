@@ -937,104 +937,25 @@ async fn a_db_path_clean_with_one_refused_directory_exits_non_zero() -> Result<(
     Ok(())
 }
 
-/// The loser of a race between two pruners over one store: `find_old_runs`
-/// reports rows, and by the time this `Clean` gets to them the other pruner has
-/// deleted them, so every `delete_run` answers `Ok(None)`. Everything else
-/// delegates to a real `MemoryStateStore`.
-struct RacedStore {
-    inner: Arc<MemoryStateStore>,
-}
-
-impl StateStore for RacedStore {
-    fn record_run_start(&self, metadata: &RunMetadata) -> Result<i64> {
-        self.inner.record_run_start(metadata)
-    }
-    fn record_run_complete(&self, run_id: i64, status: RunStatus, size_bytes: Option<u64>) -> Result<()> {
-        self.inner.record_run_complete(run_id, status, size_bytes)
-    }
-    fn record_task_start(
-        &self,
-        run_id: i64,
-        task_name: &str,
-        script_hash: Option<&str>,
-        stdout_path: Option<&PathBuf>,
-        stderr_path: Option<&PathBuf>,
-        script_path: Option<&PathBuf>,
-    ) -> Result<i64> {
-        self.inner
-            .record_task_start(run_id, task_name, script_hash, stdout_path, stderr_path, script_path)
-    }
-    fn record_task_complete(
-        &self,
-        task_id: i64,
-        exit_code: i32,
-        status: crate::executor::state::TaskStatus,
-    ) -> Result<()> {
-        self.inner.record_task_complete(task_id, exit_code, status)
-    }
-    fn record_task_skipped(
-        &self,
-        run_id: i64,
-        task_name: &str,
-        script_hash: Option<&str>,
-        skip_reason: Option<&str>,
-        skip_kind: Option<crate::executor::state::SkipKind>,
-    ) -> Result<i64> {
-        self.inner
-            .record_task_skipped(run_id, task_name, script_hash, skip_reason, skip_kind)
-    }
-    fn get_task_history(&self, task_name: &str, limit: usize) -> Result<Vec<crate::executor::state::TaskRecord>> {
-        self.inner.get_task_history(task_name, limit)
-    }
-    fn get_overall_stats(&self) -> Result<crate::executor::state::OverallStats> {
-        self.inner.get_overall_stats()
-    }
-    fn get_all_projects(&self) -> Result<Vec<crate::executor::state::ProjectSummary>> {
-        self.inner.get_all_projects()
-    }
-    fn get_task_stats(&self, task_name: &str) -> Result<Vec<crate::executor::state::TaskStats>> {
-        self.inner.get_task_stats(task_name)
-    }
-    fn get_all_task_stats(&self, limit: Option<usize>) -> Result<Vec<crate::executor::state::TaskStats>> {
-        self.inner.get_all_task_stats(limit)
-    }
-    fn get_runs_with_filters(
-        &self,
-        status_filter: Option<RunStatus>,
-        project_filter: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<crate::executor::state::RunRecord>> {
-        self.inner.get_runs_with_filters(status_filter, project_filter, limit)
-    }
-    fn find_old_runs(
-        &self,
-        keep_days: u64,
-        keep_last: Option<usize>,
-        keep_failed_days: Option<u64>,
-        project_filter: Option<&str>,
-    ) -> Result<Vec<crate::executor::state::RunRecord>> {
-        self.inner
-            .find_old_runs(keep_days, keep_last, keep_failed_days, project_filter)
-    }
-    fn delete_run(&self, _run_id: i64, _delete_filesystem: bool) -> Result<Option<crate::executor::state::RunRecord>> {
-        Ok(None)
-    }
-}
-
 /// A row someone else deleted first is not a failed delete: `Clean` exits 0, so
 /// a script driving it beside a run whose own `auto_prune` fires does not see a
 /// spurious failure.
 ///
-/// Scope, because the commit that added this covers more than the test does:
-/// this asserts the exit code and nothing else. `auto_prune` carrying on past a
-/// `Clean` error to reach `prune_orphaned_cache` and the `.last_prune` touch is
-/// control flow in `executor::pruning` that no test pins; the `quiet` gate on
-/// the per-run warning is likewise unasserted here.
+/// The store is a real `MemoryStateStore` told to lose every delete race
+/// (`lose_every_delete_race`), which is what the losing pruner sees:
+/// `find_old_runs` reported rows and every `delete_run` then answered
+/// `Ok(None)`. That switch replaced a 14-method delegating double in this file,
+/// which churned every time `StateStore` grew a method.
+///
+/// Scope: this asserts the exit code and nothing else. The `quiet` gate on the
+/// per-run warning is not asserted here (stderr is not capturable from a unit
+/// test), and `auto_prune`'s fall-through past a `Clean` error is pinned in
+/// `executor::pruning_tests`, not here.
 #[tokio::test]
 async fn a_run_deleted_by_someone_else_first_is_not_a_failed_delete() -> Result<()> {
-    let store: Arc<dyn StateStore> = Arc::new(RacedStore {
-        inner: create_store_with_runs(),
-    });
+    let memory = create_store_with_runs();
+    memory.lose_every_delete_race();
+    let store: Arc<dyn StateStore> = memory;
 
     let cmd = CleanCommand {
         keep_days: 30,
