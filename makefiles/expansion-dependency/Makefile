@@ -5,6 +5,10 @@
 #
 # `headers`, a prerequisite that simply has no rule in this Makefile, keeps its
 # edge on purpose: that name could be a real task in an included Makefile.
+#
+# `deps.d`'s prerequisite is a SUBSTITUTION reference, so it carries a colon of
+# its own. That colon used to make the rule read as a static pattern rule
+# (`objs: %.o: %.c`) and the whole rule was skipped, recipe and all.
 
 OBJS = a.o b.o
 
@@ -13,3 +17,6 @@ link: $(OBJS)
 
 package: headers
 	echo packaging
+
+deps.d: $(OBJS:%.o=%.d)
+	echo depend

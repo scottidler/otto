@@ -81,10 +81,12 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
     (
         "expansion-dependency",
         &[
-            "Makefile:11: warning: `link` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
-            "Makefile:11: warning: dependency `$(OBJS)` of `link` is a make expansion; otto task names cannot be computed",
-            "Makefile:14: warning: `package` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
-            "Makefile:14: warning: dependency `headers` of `package` has no rule in this Makefile; otto will reject the edge",
+            "Makefile:15: warning: `link` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:15: warning: dependency `$(OBJS)` of `link` is a make expansion; otto task names cannot be computed",
+            "Makefile:18: warning: `package` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:18: warning: dependency `headers` of `package` has no rule in this Makefile; otto will reject the edge",
+            "Makefile:21: warning: `deps.d` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:21: warning: dependency `$(OBJS:%.o=%.d)` of `deps.d` is a make expansion; otto task names cannot be computed",
         ],
     ),
     (

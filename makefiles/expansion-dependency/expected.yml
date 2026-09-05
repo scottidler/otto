@@ -1,6 +1,7 @@
 # Expected conversion of this directory's Makefile: `link`'s expansion
-# prerequisite is dropped (no `before:` at all), while `package` keeps its
-# edge to `headers`, which is merely a name with no rule here.
+# prerequisite is dropped (no `before:` at all) and `deps.d`'s substitution
+# reference likewise, while `package` keeps its edge to `headers`, which is
+# merely a name with no rule here.
 otto:
   about: Converted from Makefile
   api: '1'
@@ -15,3 +16,5 @@ tasks:
     before:
     - headers
     bash: echo packaging
+  deps.d:
+    bash: echo depend

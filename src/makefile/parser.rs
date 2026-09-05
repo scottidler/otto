@@ -341,7 +341,16 @@ impl MakefileParser {
 
         // `objs: %.o: %.c` - a static pattern rule, whose middle field is not a
         // dependency list at all.
-        if dep_part.contains(':') {
+        //
+        // Asked through `rule_colon` for the same reason the target side is: a
+        // substitution reference in the DEPENDENCY list carries a colon of its
+        // own, so `deps.d: $(OBJS:%.o=%.d)` read as a static pattern rule and
+        // the whole rule was skipped. Only a top-level colon makes a third
+        // field. This is safe to fix only because `converter.rs` now drops the
+        // edge for an expansion it cannot compute: emitting `before:
+        // ['$(OBJS:%.o=%.d)']` instead would trade a skipped rule for an
+        // ottofile that cannot run.
+        if Self::rule_colon(&dep_part).is_some() {
             self.warn(
                 number,
                 format!("static pattern rule `{target_part}` is not supported; the rule is skipped"),
