@@ -14,6 +14,15 @@
 # that contains it (stripping any trailing #fragment) and must exist on
 # disk.
 #
+# Portability: the extractor is a POSIX `grep -oE`, not `grep -oP`. `-P` (Perl
+# regex, needed for the lookbehind this used to use) is a GNU extension that
+# BSD grep does not have, so on macOS the read loop got nothing, `fail` stayed
+# 0, and the script printed its success banner having checked no links at all.
+# The repo targets macOS (release artifacts, a bash-3.2 job), so a check that
+# silently passes there is not a check. The `checked` counter below closes the
+# same hole from the other side: no links found at all is now a failure, not a
+# pass.
+#
 # Usage:
 #   bin/check-doc-links
 
@@ -22,6 +31,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 fail=0
+checked=0
 
 check_file() {
     local file="$1"
@@ -29,6 +39,10 @@ check_file() {
     dir="$(dirname "$file")"
 
     while IFS=: read -r line target; do
+        # `grep -oE` matches the whole `](target)`; peel the delimiters off
+        # here rather than asking for a lookbehind grep may not have.
+        target="${target#\](}"
+        target="${target%)}"
         [ -z "$target" ] && continue
         case "$target" in
         http://* | https://* | mailto:* | '#'*) continue ;;
@@ -43,12 +57,13 @@ check_file() {
         local path="${target%%#*}"
         [ -z "$path" ] && continue
 
+        checked=$((checked + 1))
         local resolved="$dir/$path"
         if [ ! -e "$resolved" ]; then
             echo "$file:$line: broken link -> $target (resolved: $resolved)"
             fail=1
         fi
-    done < <(grep -noP '(?<=\]\()[^)]+(?=\))' "$file")
+    done < <(grep -noE '\]\([^)]*\)' "$file")
 }
 
 files=()
@@ -61,8 +76,13 @@ for f in "${files[@]}"; do
     [ -f "$f" ] && check_file "$f"
 done
 
+if [ "$checked" -eq 0 ]; then
+    echo "check-doc-links: extracted no links at all; the extractor is broken on this grep" >&2
+    exit 1
+fi
+
 if [ "$fail" -eq 0 ]; then
-    echo "✅ check-doc-links: every relative .md link resolves"
+    echo "✅ check-doc-links: $checked relative .md links, every one resolves"
 else
     exit 1
 fi

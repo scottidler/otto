@@ -211,16 +211,24 @@ tasks:
     # `cov`'s own `after: [cov-report]` chains the gate: cov instruments and
     # runs the suite, then cov-report reads its output and fails the run if
     # line coverage is under `--fail-under`'s default (see cov-report above).
-    before: [lint, check, test, cov]
+    before: [lint, check, test, cov, docs-check]
     bash: |
       echo "✅ All CI checks passed!"
+
+  # The doc-link guard on its own, so a gate can depend on it without paying
+  # for `cargo doc`. It ran only under `docs`/`all`, and CI runs neither, so
+  # the structural fix for the broken-link recurrence never ran on a PR.
+  docs-check:
+    help: "Verify every relative .md link in the docs resolves"
+    bash: |
+      bin/check-doc-links
 
   # Build documentation
   docs:
     help: "Build documentation"
+    before: [docs-check]
     bash: |
       cargo doc --no-deps --workspace
-      bin/check-doc-links
       echo "✅ Documentation built"
 
   # Validate example ottofiles
@@ -251,8 +259,8 @@ tasks:
 
   # Quick validation
   quick:
-    help: "Quick validation (check + test in parallel)"
-    before: [check, test]
+    help: "Quick validation (check + test + doc links in parallel)"
+    before: [check, test, docs-check]
     bash: |
       echo "✅ Quick checks passed!"
 
