@@ -1215,7 +1215,7 @@ fn every_builtin_meta_task_matches_its_clap_command() {
     let mut parser = Parser::new(vec!["otto".to_string()]).expect("a parser with no ottofile");
     parser.inject_builtin_commands();
 
-    for (command, _help) in builtin_clap_commands() {
+    for command in builtin_clap_commands() {
         let name = command.get_name();
         let spec = parser
             .config_spec
@@ -1234,6 +1234,36 @@ fn every_builtin_meta_task_matches_its_clap_command() {
 
         assert_eq!(actual, expected, "meta task '{name}' disagrees with its clap Command");
         assert!(!expected.is_empty(), "builtin '{name}' declares no args at all");
+    }
+}
+
+/// `otto --help` and `otto <BUILTIN> --help` describe the same command, so they
+/// must not describe it differently. The one-line help was a second,
+/// hand-written sentence per builtin, and three of the six had drifted from the
+/// `about` clap renders: `--help` said "Clean old runs from ~/.otto/" while
+/// `otto Clean --help` said "Clean old otto run directories".
+#[test]
+fn every_builtin_help_line_is_its_clap_about() {
+    let mut parser = Parser::new(vec!["otto".to_string()]).expect("a parser with no ottofile");
+    parser.inject_builtin_commands();
+
+    for command in builtin_clap_commands() {
+        let name = command.get_name();
+        let about = command
+            .get_about()
+            .unwrap_or_else(|| panic!("builtin '{name}' declares no about"))
+            .to_string();
+        let spec = parser
+            .config_spec
+            .tasks
+            .get(name)
+            .unwrap_or_else(|| panic!("builtin '{name}' has no meta task"));
+
+        assert_eq!(
+            spec.help.as_deref(),
+            Some(format!("[built-in] {about}").as_str()),
+            "the line '{name}' gets in `otto --help` must be its own about, marked"
+        );
     }
 }
 

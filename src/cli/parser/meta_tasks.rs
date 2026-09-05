@@ -2,15 +2,14 @@ impl Parser {
     /// Give every builtin a `TaskSpec`, so its name is reserved, `otto --help`
     /// lists it, and `otto help <NAME>` can render its flags.
     fn inject_builtin_commands(&mut self) {
-        for (command, help) in builtin_clap_commands() {
-            let task = builtin_task(&command, help);
+        for command in builtin_clap_commands() {
+            let task = builtin_task(&command);
             self.config_spec.tasks.insert(task.name.clone(), task);
         }
     }
 }
 
-/// Every builtin, as the clap `Command` its own parser uses plus the one-line
-/// help `otto --help` lists it with.
+/// Every builtin, as the clap `Command` its own parser uses.
 ///
 /// This is the whole point of the derivation below: the `Command` here is the
 /// same one `main`'s early route parses the invocation with, so a flag exists
@@ -25,52 +24,37 @@ impl Parser {
 /// Each `#[command(name = ...)]` is the builtin's task name (`Clean`, not
 /// `clean`), because that name is what the derived `TaskSpec` is keyed by and
 /// what `BUILTIN_COMMANDS` reserves.
-fn builtin_clap_commands() -> Vec<(Command, &'static str)> {
+fn builtin_clap_commands() -> Vec<Command> {
     use crate::cli::commands::{
         CleanCommand, ConvertCommand, GraphCommand, HistoryCommand, StatsCommand, UpgradeCommand,
     };
     use clap::CommandFactory;
 
     vec![
-        (
-            CleanCommand::command(),
-            "[built-in] Clean old runs from ~/.otto/",
-        ),
-        (
-            ConvertCommand::command(),
-            "[built-in] Convert a Makefile on stdin to an ottofile",
-        ),
-        (
-            GraphCommand::command(),
-            "[built-in] Visualize the task dependency graph",
-        ),
-        (
-            HistoryCommand::command(),
-            "[built-in] View execution history",
-        ),
-        (
-            StatsCommand::command(),
-            "[built-in] View execution statistics",
-        ),
-        (
-            UpgradeCommand::command(),
-            "[built-in] Upgrade Otto to a newer version",
-        ),
+        CleanCommand::command(),
+        ConvertCommand::command(),
+        GraphCommand::command(),
+        HistoryCommand::command(),
+        StatsCommand::command(),
+        UpgradeCommand::command(),
     ]
 }
 
 /// The `TaskSpec` for a builtin, derived from its clap `Command`.
 ///
-/// `help` is passed rather than read from `Command::get_about`, because the
-/// task list renders it with the `[built-in]` marker that tells a reader the
-/// name is otto's and not their ottofile's.
+/// `help` is that `Command`'s own `about` with the `[built-in]` marker in
+/// front, the marker being what tells a reader the name is otto's and not
+/// their ottofile's. It used to be a second, hand-written sentence per
+/// builtin, and three of the six had drifted from the `about` clap renders:
+/// `otto --help` said "Clean old runs from ~/.otto/" where `otto Clean --help`
+/// said "Clean old otto run directories". One declaration, two renderings.
 ///
 /// The fields clap has no way to express are identical for all six and live
 /// here: a builtin is dispatched by name (`app::dispatch_builtin`), so its
 /// `action` is never executed and exists only to be printed by a serialized
 /// spec; and none of them is a foreach parent, a virtual parent, a tty task,
 /// or an `on-failure:` target.
-fn builtin_task(cmd: &Command, help: &str) -> TaskSpec {
+fn builtin_task(cmd: &Command) -> TaskSpec {
     let name = cmd.get_name().to_string();
     let params = cmd
         .get_arguments()
@@ -84,7 +68,7 @@ fn builtin_task(cmd: &Command, help: &str) -> TaskSpec {
         .collect();
 
     TaskSpec {
-        help: Some(help.to_string()),
+        help: Some(format!("[built-in] {}", cmd.get_about().map(|about| about.to_string()).unwrap_or_default())),
         after: vec![],
         before: vec![],
         input: vec![],

@@ -14,10 +14,11 @@
 /// 2. Add a variant to the `Builtin` enum (`app.rs`) and its `task_name()` and
 ///    `all()` arms; `dispatch_builtin` is an exhaustive match, so the compiler
 ///    then demands the handler.
-/// 3. Add the command's clap `Command` and its `[built-in]` help line to
-///    `builtin_clap_commands()` (`cli/parser/meta_tasks.rs`), so the name has
-///    a `TaskSpec` derived from that `Command` and appears in `--help`. Its
-///    params come from the derive; there is no second list of flags to write.
+/// 3. Add the command's clap `Command` to `builtin_clap_commands()`
+///    (`cli/parser/meta_tasks.rs`), so the name has a `TaskSpec` derived from
+///    that `Command` and appears in `--help`. Its params and its one-line help
+///    both come from the derive; there is no second list of flags and no
+///    second description to write.
 /// 4. Add the execution handler `app.rs` dispatches to.
 /// 5. Add a variant to `EarlyCommand` (`main.rs`) if it can run without an
 ///    ottofile, so `otto NAME --flags` reaches its own clap parser before
