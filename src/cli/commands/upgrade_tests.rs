@@ -1250,6 +1250,80 @@ fn rollback_skips_a_backup_whose_version_is_not_a_semver() {
     assert_eq!(chosen.version, "1.0.0");
 }
 
+/// `git describe` past a tag names a build NEWER than that tag. Semver reads
+/// `2.2.1-27-g85bb8fb` as a PRERELEASE of 2.2.1, which sorts below the release,
+/// so every ordering built on `Version::parse` alone went the wrong way for a
+/// dev build.
+#[test]
+fn a_dev_build_orders_above_the_tag_it_descends_from() {
+    let dev = parse_build_version("v2.2.1-27-g85bb8fb").expect("a describe string is orderable");
+    let release = parse_build_version("2.2.1").expect("a tag is orderable");
+    let next = parse_build_version("2.2.2").expect("a tag is orderable");
+
+    assert!(dev > release, "27 commits past v2.2.1 is newer than v2.2.1, not older");
+    assert!(dev < next, "and still older than the next release");
+
+    // A genuine prerelease has no `-<n>-g<sha>` suffix, so it keeps semver's
+    // own ordering: rc.1 comes before the release it is a candidate for.
+    let rc = parse_build_version("2.3.0-rc.1").expect("a prerelease tag is orderable");
+    assert!(rc < parse_build_version("2.3.0").expect("a tag is orderable"));
+}
+
+/// `git describe --tags --always` falls back to a bare sha in a checkout with
+/// no reachable tag, which used to reach the user as semver's own
+/// `unexpected character` with no hint of where the string came from.
+#[test]
+fn a_bare_sha_is_refused_with_a_reason() {
+    let err = parse_build_version("85bb8fb").expect_err("a sha is not a version");
+    let message = format!("{err:#}");
+    assert!(message.contains("bare commit sha"), "{message}");
+}
+
+#[test]
+fn rollback_refuses_a_dev_build_that_is_newer_than_the_current_version() {
+    let backups = vec![
+        BackupInfo {
+            path: PathBuf::from("/backups/otto-2.2.1-27-g85bb8fb-500.backup"),
+            version: "2.2.1-27-g85bb8fb".to_string(),
+            timestamp: 500,
+        },
+        BackupInfo {
+            path: PathBuf::from("/backups/otto-2.1.0-100.backup"),
+            version: "2.1.0".to_string(),
+            timestamp: 100,
+        },
+    ];
+
+    // The newest backup is a build 27 commits PAST the version running now.
+    // Read as a semver prerelease it looked older, so rollback restored a newer
+    // binary and called it a rollback.
+    let chosen = select_rollback_target(&backups, "2.2.1").expect("2.1.0 is older");
+    assert_eq!(chosen.version, "2.1.0");
+}
+
+/// The same ordering, through `execute()`: a dev build is not upgraded "up" to
+/// the release it descends from.
+#[tokio::test]
+async fn execute_refuses_to_downgrade_a_dev_build_to_its_own_base_tag() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let api_base = spawn_fixture_release(scratch.path(), "2.2.1", None);
+    let target = installed_binary(scratch.path(), "0.0.1");
+
+    command()
+        .with_fixture(api_base, &target)
+        .with_current_version("2.2.1-27-gcfc60e6")
+        .tap_no_backup()
+        .execute()
+        .await
+        .expect("a refused downgrade is not an error");
+
+    assert_eq!(
+        run_version(&target),
+        "otto 0.0.1",
+        "v2.2.1-27-gcfc60e6 is newer than v2.2.1; installing it is a downgrade and needs --force"
+    );
+}
+
 /// A staging copy that cannot be made executable takes its own file with it.
 ///
 /// The copy has already succeeded at that point, so the old `?` returned and

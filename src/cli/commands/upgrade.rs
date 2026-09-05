@@ -415,6 +415,46 @@ struct BackupInfo {
     timestamp: u64,
 }
 
+/// A version that can be ordered even when it came from `git describe`.
+///
+/// `git describe --tags --always` (what `build.rs` records as `GIT_DESCRIBE`)
+/// prints `v2.2.1` on a tag and `v2.2.1-27-g85bb8fb` twenty-seven commits past
+/// it. Semver reads that suffix as a PRERELEASE of 2.2.1, which sorts BELOW the
+/// release, so every dev build compared as older than the tag it descends from:
+/// `otto Upgrade` on one planned a downgrade to that release and called it an
+/// upgrade, and `--rollback` treated a newer dev build as a rollback candidate.
+/// A build past a tag is newer than the tag, so the commit count breaks the tie
+/// upward instead. A genuine prerelease tag (`v2.3.0-rc.1`) has no `-<n>-g<sha>`
+/// suffix and keeps semver's own ordering.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct BuildVersion {
+    release: Version,
+    commits: u64,
+}
+
+/// `2.2.1-27-g85bb8fb` -> `("2.2.1", 27)`. `None` for anything that is not a
+/// `git describe` suffix, including a real prerelease.
+fn split_describe(text: &str) -> Option<(&str, u64)> {
+    let (rest, sha) = text.rsplit_once('-')?;
+    let hex = sha.strip_prefix('g')?;
+    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (core, count) = rest.rsplit_once('-')?;
+    Some((core, count.parse::<u64>().ok()?))
+}
+
+fn parse_build_version(version: &str) -> Result<BuildVersion> {
+    let text = version.trim_start_matches('v');
+    let (core, commits) = split_describe(text).unwrap_or((text, 0));
+    let release = Version::parse(core).map_err(|err| {
+        eyre!(
+            "Cannot order the version 'v{version}': {err}. `git describe --tags --always` prints a bare commit sha when no tag is reachable, and a sha cannot be compared with a release."
+        )
+    })?;
+    Ok(BuildVersion { release, commits })
+}
+
 /// The backup a rollback should restore: the most recent one whose version is
 /// older than the version running now.
 ///
@@ -429,13 +469,13 @@ struct BackupInfo {
 /// the name comes from a directory anything can write into, and a version that
 /// cannot be ordered cannot be shown to be older than this one.
 fn select_rollback_target<'a>(backups: &'a [BackupInfo], current_version: &str) -> Result<&'a BackupInfo> {
-    let current = Version::parse(current_version)
+    let current = parse_build_version(current_version)
         .with_context(|| format!("Cannot order backups against the current version v{current_version}"))?;
 
     // `list_backups` returns newest first, so the first match is the newest.
     backups
         .iter()
-        .find(|backup| match Version::parse(&backup.version) {
+        .find(|backup| match parse_build_version(&backup.version) {
             Ok(version) => version < current,
             Err(err) => {
                 debug!(
@@ -571,8 +611,8 @@ impl UpgradeCommand {
 
         // 5. Check if upgrade needed
         if !self.force {
-            let current = Version::parse(&current_version)?;
-            let target = Version::parse(&target_version)?;
+            let current = parse_build_version(&current_version)?;
+            let target = parse_build_version(&target_version)?;
 
             match current.cmp(&target) {
                 Ordering::Equal => {
