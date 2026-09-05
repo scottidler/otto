@@ -251,6 +251,36 @@ impl MakefileParser {
         Ok(ast)
     }
 
+    /// The byte offset of the `:` that separates a rule's targets from its
+    /// dependencies: the first one that is not inside a make expansion.
+    ///
+    /// `$(SRCS:.c=.o): headers` is a substitution reference, and its colon
+    /// belongs to the expansion, not to the rule. Splitting on the first colon
+    /// found made the target `$(SRCS` and the dependency list `.c=.o): headers`,
+    /// which then matched `is_target_specific_variable` (it contains an `=`) and
+    /// the rule was dropped with a message naming a target nobody wrote, its
+    /// recipe orphaned. The `$(`-in-target guard that would have reported this
+    /// correctly never ran, because the mis-split hid the `$(` from it.
+    fn rule_colon(text: &str) -> Option<usize> {
+        let bytes = text.as_bytes();
+        let mut depth = 0usize;
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'$' if matches!(bytes.get(index + 1), Some(b'(') | Some(b'{')) => {
+                    depth += 1;
+                    index += 2;
+                    continue;
+                }
+                b')' | b'}' if depth > 0 => depth -= 1,
+                b':' if depth == 0 => return Some(index),
+                _ => {}
+            }
+            index += 1;
+        }
+        None
+    }
+
     /// Parse one rule. Returns every target it declares: `test check: build` is
     /// two rules in make, and used to become a single task named "test check".
     fn parse_rule(
@@ -264,7 +294,7 @@ impl MakefileParser {
         let (body, inline_comment) = split_inline_comment(&raw);
         let trimmed = body.trim().to_string();
 
-        let colon_pos = match trimmed.find(':') {
+        let colon_pos = match Self::rule_colon(&trimmed) {
             Some(pos) => pos,
             None => {
                 self.warn(number, format!("unrecognized line ignored: `{trimmed}`"));

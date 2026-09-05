@@ -79,6 +79,13 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "substitution-ref-target",
+        &[
+            "Makefile:11: warning: target `$(SRCS:.c=.o)` is a make expansion; otto task names cannot be computed; the rule is skipped",
+            "Makefile:14: warning: target `$(OBJS:%.o=%.d)` is a make expansion; otto task names cannot be computed; the rule is skipped",
+        ],
+    ),
+    (
         "unsupported-constructs",
         &[
             "Makefile:9: warning: `FLAGS +=` cannot append in otto; only the appended text is kept",
