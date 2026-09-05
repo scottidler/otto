@@ -1108,6 +1108,17 @@ fn resolved_scalar_name(name: &str) -> Option<String> {
 /// form of exactly one task key, is rewritten to that key. The author's
 /// spelling is what survives - the task stays `0x1f` on the command line, in
 /// help, and on re-emit.
+///
+/// The limit of that, deliberately accepted: a QUOTED key is indistinguishable
+/// from an unquoted one by the time it gets here. YAML strips the quotes before
+/// `next_key::<String>()` sees anything, so `"0x1f":` and `0x1f:` are the same
+/// four bytes, and `tasks: {"0x1f": ..., report: {after: [31]}}` binds the edge
+/// to the quoted key even though the author wrote one as a string and the other
+/// as a number. Reaching that takes a hex-, octal-, boolean- or signed-decimal
+/// spelling quoted on one side and written as its resolved value on the other,
+/// which is a config nobody writes on purpose; the alternative is to give up the
+/// case authors do write. Pinned by
+/// `a_quoted_scalar_key_is_indistinguishable_from_an_unquoted_one`.
 fn resolve_scalar_edge_targets(tasks: &mut TaskSpecs) {
     let mut by_resolved: HashMap<String, Option<String>> = HashMap::new();
     for key in tasks.keys() {

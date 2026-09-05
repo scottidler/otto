@@ -1254,6 +1254,19 @@ fn an_exact_task_key_match_wins_over_a_resolved_one() {
     assert_eq!(tasks["report"].after[0].task, "31");
 }
 
+/// The accepted limit of the reconciliation, pinned so it is a decision rather
+/// than a surprise: YAML strips a key's quotes before serde is handed the key,
+/// so `"0x1f":` and `0x1f:` arrive as the same four bytes and an edge written as
+/// the resolved value binds to either. v2.2.1 refused this config outright
+/// (`invalid type: integer 31`). Reaching it takes one spelling quoted and the
+/// other written as its resolved value, which is not a config anyone writes on
+/// purpose, and the alternative is to give up the case authors do write.
+#[test]
+fn a_quoted_scalar_key_is_indistinguishable_from_an_unquoted_one() {
+    let tasks = task_map("tasks:\n  \"0x1f\":\n    bash: echo hex\n  report:\n    after: [31]\n    bash: echo r\n");
+    assert_eq!(tasks["report"].after[0].task, "0x1f");
+}
+
 /// Two keys resolving to one name is ambiguous, so neither claims the edge and
 /// the run fails loudly on the unresolved name rather than picking one.
 #[test]
