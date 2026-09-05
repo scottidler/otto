@@ -1403,6 +1403,33 @@ fn the_dry_run_plan_names_the_asset_find_asset_looks_for() {
     );
 }
 
+/// The plan is a promise about the order the real run works in. It listed the
+/// backup before the checksum while `execute_upgrade` verifies the download
+/// first, so a reader who hit a checksum failure went looking for a backup that
+/// was never written.
+#[test]
+fn the_dry_run_plan_checks_the_checksum_before_it_makes_a_backup() {
+    let platform = PlatformInfo::detect().expect("detect platform");
+
+    let steps = command()
+        .dry_run_steps("9.9.9", &platform)
+        .expect("dry-run steps must render");
+
+    let checksum = steps
+        .iter()
+        .position(|s| s.contains("checksum"))
+        .unwrap_or_else(|| panic!("the plan must name the checksum step: {steps:?}"));
+    let backup = steps
+        .iter()
+        .position(|s| s.contains("Create backup"))
+        .unwrap_or_else(|| panic!("the plan must name the backup step: {steps:?}"));
+
+    assert!(
+        checksum < backup,
+        "execute_upgrade verifies the download before it backs anything up: {steps:?}"
+    );
+}
+
 /// Every step in the plan is numbered from its position, so `--no-backup`
 /// cannot print "1, 3, 4, 5" again.
 #[test]

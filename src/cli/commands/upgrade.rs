@@ -746,6 +746,13 @@ impl UpgradeCommand {
             asset_name(target_version, &platform.platform_str)
         )];
 
+        // Checksum before backup, because that is the order `execute_upgrade`
+        // runs them in: `download_and_check_checksum` returns before
+        // `create_backup` is called. Listed the other way round, the plan told
+        // a reader a backup would exist after a checksum failure, and none
+        // does; nothing is backed up until the download has been verified.
+        steps.push("Check the download against the release's published .sha256 checksum".to_string());
+
         if !self.no_backup {
             let backup_dir = self.get_backup_dir()?;
             steps.push(format!(
@@ -754,7 +761,6 @@ impl UpgradeCommand {
             ));
         }
 
-        steps.push("Check the download against the release's published .sha256 checksum".to_string());
         steps.push("Extract the new binary from the archive".to_string());
         steps.push("Run the new binary's --version to confirm it works".to_string());
         steps.push(format!("Replace {}", self.install_target()?.display()));
