@@ -91,6 +91,38 @@ fn only_the_leading_home_prefix_becomes_a_tilde() {
     }
 }
 
+/// The home prefix has to end at a separator. Without that check a sibling
+/// directory whose name merely extends `$HOME` was rewritten as if it were
+/// inside it, and a `HOME` with a trailing slash ate the separator.
+#[test]
+#[serial_test::serial]
+fn a_home_prefix_only_counts_when_it_ends_at_a_separator() {
+    let original = std::env::var("HOME").ok();
+
+    unsafe {
+        std::env::set_var("HOME", "/home/sa");
+    }
+    // `/home/saidler` is a different directory that happens to start with the
+    // same bytes; it used to render as `~idler/proj`.
+    assert_eq!(abbreviate_home("/home/saidler/proj"), "/home/saidler/proj");
+    assert_eq!(abbreviate_home("/home/sa/proj"), "~/proj");
+
+    unsafe {
+        std::env::set_var("HOME", "/home/u/");
+    }
+    // The trailing separator is the home's, not the path's: `~proj` was the
+    // old answer.
+    assert_eq!(abbreviate_home("/home/u/proj"), "~/proj");
+    assert_eq!(abbreviate_home("/home/u"), "~");
+
+    unsafe {
+        match &original {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
 #[test]
 fn test_format_run_status() {
     let success = format_run_status(&RunStatus::Success);

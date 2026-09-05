@@ -319,11 +319,25 @@ fn format_task_status(status: &crate::executor::state::TaskStatus) -> String {
 /// `str::replace` rewrote every occurrence, so a path that repeated the home
 /// prefix inside itself (`/home/u/proj/home/u/x`) came out as
 /// `~/proj~/x`. Only the prefix is a home directory.
+///
+/// The prefix has to end at a path separator, too. A bare `starts_with` made a
+/// sibling directory whose name merely extends the home a home: with
+/// `HOME=/home/sa`, `/home/saidler/proj` rendered as `~idler/proj`. A trailing
+/// separator on `HOME` (`/home/u/`) had the mirror effect, eating the one that
+/// separates the home from the rest and printing `~proj`.
 fn abbreviate_home(path: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
-            format!("~{}", &path[home.len()..])
-        }
+    let Ok(home) = std::env::var("HOME") else {
+        return path.to_string();
+    };
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return path.to_string();
+    }
+    if path == home {
+        return "~".to_string();
+    }
+    match path.strip_prefix(home) {
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
         _ => path.to_string(),
     }
 }
