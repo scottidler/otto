@@ -79,6 +79,15 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "expansion-dependency",
+        &[
+            "Makefile:11: warning: `link` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:11: warning: dependency `$(OBJS)` of `link` is a make expansion; otto task names cannot be computed",
+            "Makefile:14: warning: `package` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:14: warning: dependency `headers` of `package` has no rule in this Makefile; otto will reject the edge",
+        ],
+    ),
+    (
         "substitution-ref-target",
         &[
             "Makefile:11: warning: target `$(SRCS:.c=.o)` is a make expansion; otto task names cannot be computed; the rule is skipped",

@@ -1,0 +1,17 @@
+# Expected conversion of this directory's Makefile: `link`'s expansion
+# prerequisite is dropped (no `before:` at all), while `package` keeps its
+# edge to `headers`, which is merely a name with no rule here.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - link
+  envs:
+    OBJS: a.o b.o
+tasks:
+  link:
+    bash: echo linking
+  package:
+    before:
+    - headers
+    bash: echo packaging
