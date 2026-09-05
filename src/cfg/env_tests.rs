@@ -520,6 +520,49 @@ fn test_evaluate_envs_circular_reference_errors_even_when_inherited() {
     );
 }
 
+/// A key that reads its own inherited value is legal (that is why the deferral
+/// rule excludes a key's own name), so it is not the cycle. The reporter
+/// followed it anyway and named `AAA -> AAA` while the real cycle, `BBB` and
+/// `CCC` pointing at each other, went unmentioned.
+#[test]
+#[serial]
+fn a_legal_self_reference_is_not_reported_as_the_cycle() {
+    let (a, b, c) = (
+        "OTTO_TEST_SELFREF_AAA",
+        "OTTO_TEST_SELFREF_BBB",
+        "OTTO_TEST_SELFREF_CCC",
+    );
+    unsafe {
+        env::set_var(a, "seeded-from-the-environment");
+        env::remove_var(b);
+        env::remove_var(c);
+    }
+
+    let mut envs = HashMap::new();
+    envs.insert(a.to_string(), format!("${a} ${b}"));
+    envs.insert(b.to_string(), format!("${c}"));
+    envs.insert(c.to_string(), format!("${b}"));
+
+    let result = evaluate_envs(&envs, None, &HashMap::new());
+
+    unsafe {
+        env::remove_var(a);
+    }
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("Circular dependency between environment variables"),
+        "expected a cycle, got: {error}"
+    );
+    assert!(
+        error.contains(b) && error.contains(c),
+        "the message must name the real cycle, got: {error}"
+    );
+    assert!(
+        !error.contains(&format!("{a} -> {a}")),
+        "a key reading its own inherited value is not a cycle, got: {error}"
+    );
+}
+
 /// Command output is data. It used to be spliced in before variable
 /// resolution, so a `$NAME` inside the output was resolved - out of otto's
 /// own environment, which the evaluation context carries.

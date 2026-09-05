@@ -671,9 +671,16 @@ fn find_reference_cycle(pending: &[String], envs: &HashMap<String, String>) -> O
         while let Some(value) = envs.get(&current) {
             // Follow the first reference that is itself still unresolved; a cycle
             // reachable this way is a cycle, which is all the message needs.
+            //
+            // A key's own name is not such a reference, for the same reason the
+            // deferral rule excludes it (`name.as_str() != var_name` in
+            // `evaluate_envs`): `AAA: '$AAA $BBB'` reads the inherited seed for
+            // `$AAA`, by design. Following it anyway reported the legal
+            // self-reference as `AAA -> AAA` and never reached the real cycle
+            // further down the chain.
             let Some(next) = referenced_vars(value)
                 .into_iter()
-                .find(|name| pending_set.contains(name.as_str()))
+                .find(|name| name.as_str() != current && pending_set.contains(name.as_str()))
             else {
                 break;
             };
