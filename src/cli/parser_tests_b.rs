@@ -1242,6 +1242,15 @@ fn every_builtin_meta_task_matches_its_clap_command() {
 /// hand-written sentence per builtin, and three of the six had drifted from the
 /// `about` clap renders: `--help` said "Clean old runs from ~/.otto/" while
 /// `otto Clean --help` said "Clean old otto run directories".
+///
+/// What this is, named so nobody mistakes it for more: a REINTRODUCTION guard,
+/// not a behavior test. It reads the `about` from the same
+/// `builtin_clap_commands()` the production code derives the line from, so it
+/// cannot fail while the derivation exists, and it is not sensitive to what any
+/// particular builtin's sentence says. It fails exactly when someone puts a
+/// hand-written string back, which is the drift that happened. Pinning the six
+/// sentences literally instead would be a second copy of the thing this fix
+/// deleted.
 #[test]
 fn every_builtin_help_line_is_its_clap_about() {
     let mut parser = Parser::new(vec!["otto".to_string()]).expect("a parser with no ottofile");
