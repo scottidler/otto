@@ -1021,11 +1021,15 @@ impl StateStore for RacedStore {
     }
 }
 
-/// A row someone else deleted first is not a failed delete. `Clean` warns about
-/// it and still exits 0, so a script driving `Clean` beside a run whose own
-/// `auto_prune` fires does not see a spurious failure - and `auto_prune`, which
-/// carries on past a `Clean` error rather than returning on it, still reaches
-/// the orphan-cache prune and the `.last_prune` marker.
+/// A row someone else deleted first is not a failed delete: `Clean` exits 0, so
+/// a script driving it beside a run whose own `auto_prune` fires does not see a
+/// spurious failure.
+///
+/// Scope, because the commit that added this covers more than the test does:
+/// this asserts the exit code and nothing else. `auto_prune` carrying on past a
+/// `Clean` error to reach `prune_orphaned_cache` and the `.last_prune` touch is
+/// control flow in `executor::pruning` that no test pins; the `quiet` gate on
+/// the per-run warning is likewise unasserted here.
 #[tokio::test]
 async fn a_run_deleted_by_someone_else_first_is_not_a_failed_delete() -> Result<()> {
     let store: Arc<dyn StateStore> = Arc::new(RacedStore {

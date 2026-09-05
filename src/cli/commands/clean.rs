@@ -204,7 +204,17 @@ impl CleanCommand {
                         }
                     }
                     Ok(None) => {
-                        eprintln!("  Warning: Run {} not found in database", run.timestamp);
+                        // Gated on `quiet`, unlike the `Err` arm below: a row
+                        // someone else deleted first is the expected outcome of
+                        // a race, and `auto_prune` runs with `quiet: true` on
+                        // the way out of an ordinary `otto <task>`. Ungated, a
+                        // racing prune wrote one of these per selected run onto
+                        // the user's stderr, in the middle of their build
+                        // output, about something that went right. A real
+                        // failure still prints either way.
+                        if !self.quiet {
+                            eprintln!("  Warning: Run {} not found in database", run.timestamp);
+                        }
                         already_gone += 1;
                     }
                     Err(e) => {
