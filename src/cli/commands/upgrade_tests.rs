@@ -1269,6 +1269,32 @@ fn a_dev_build_orders_above_the_tag_it_descends_from() {
     assert!(rc < parse_build_version("2.3.0").expect("a tag is orderable"));
 }
 
+/// A dirty working tree does not move a build's position in the version order.
+///
+/// `build.rs` does not pass `--dirty` today, and the point of handling it is
+/// that adding it would otherwise break this silently: the `-<n>-g<sha>` match
+/// fails on the extra field, semver reads the whole string as a prerelease of
+/// the tag, and a dev build sorts BELOW the release again.
+#[test]
+fn a_dirty_describe_string_orders_like_the_clean_one() {
+    let dirty_dev = parse_build_version("v2.2.1-27-g85bb8fb-dirty").expect("a dirty describe string is orderable");
+    let clean_dev = parse_build_version("v2.2.1-27-g85bb8fb").expect("a describe string is orderable");
+    let release = parse_build_version("2.2.1").expect("a tag is orderable");
+
+    assert_eq!(dirty_dev, clean_dev, "-dirty is not a position in the order");
+    assert!(dirty_dev > release, "27 commits past v2.2.1 is newer, dirty or not");
+
+    // A dirty build sitting exactly on the tag is still that tag.
+    assert_eq!(
+        parse_build_version("v2.2.1-dirty").expect("a dirty tag is orderable"),
+        release
+    );
+
+    // And a dirty sha is still a sha: refused, not guessed at.
+    let err = parse_build_version("85bb8fb-dirty").expect_err("a sha is not a version");
+    assert!(format!("{err:#}").contains("bare commit sha"), "{err:#}");
+}
+
 /// `git describe --tags --always` falls back to a bare sha in a checkout with
 /// no reachable tag, which used to reach the user as semver's own
 /// `unexpected character` with no hint of where the string came from.

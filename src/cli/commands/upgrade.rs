@@ -444,8 +444,30 @@ fn split_describe(text: &str) -> Option<(&str, u64)> {
     Some((core, count.parse::<u64>().ok()?))
 }
 
+/// Every shape `git describe --tags --always [--dirty]` can print, and nothing
+/// else:
+///
+/// | printed                     | ordered as              |
+/// |-----------------------------|-------------------------|
+/// | `v2.2.1`                    | 2.2.1, 0 commits        |
+/// | `v2.2.1-dirty`              | 2.2.1, 0 commits        |
+/// | `v2.2.1-27-g85bb8fb`        | 2.2.1, 27 commits       |
+/// | `v2.2.1-27-g85bb8fb-dirty`  | 2.2.1, 27 commits       |
+/// | `85bb8fb` / `85bb8fb-dirty` | refused, with a reason  |
+///
+/// `-dirty` is stripped before anything else and then ignored. It says the
+/// working tree had uncommitted changes at build time, which is not a position
+/// in the version order: the build still descends from exactly the commits its
+/// `-<n>-g<sha>` names.
+///
+/// `build.rs` does not pass `--dirty` today. Handled anyway because the failure
+/// mode if someone adds it is silent: the suffix match would fail, semver would
+/// read the whole string as a PRERELEASE of the tag, and a dev build would sort
+/// BELOW the release again, which is the exact inversion this function exists
+/// to prevent. A comment in `build.rs` is a request; this is a guarantee.
 fn parse_build_version(version: &str) -> Result<BuildVersion> {
     let text = version.trim_start_matches('v');
+    let text = text.strip_suffix("-dirty").unwrap_or(text);
     let (core, commits) = split_describe(text).unwrap_or((text, 0));
     let release = Version::parse(core).map_err(|err| {
         eyre!(
