@@ -35,6 +35,19 @@ pub struct MakefileParser {
     diagnostics: Vec<Diagnostic>,
 }
 
+/// What `MakefileParser::rule_colon` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleColon {
+    /// The byte offset of the colon that splits targets from dependencies: the
+    /// first one that is not inside a `$(...)` or `${...}` expansion.
+    At(usize),
+    /// No colon outside an expansion, and every expansion was closed.
+    Missing,
+    /// An expansion was opened and never closed, so any colon after it is
+    /// inside a group that never ends.
+    Unclosed,
+}
+
 impl MakefileParser {
     pub fn new(content: String) -> Self {
         Self {
@@ -251,17 +264,12 @@ impl MakefileParser {
         Ok(ast)
     }
 
-    /// The byte offset of the `:` that separates a rule's targets from its
-    /// dependencies: the first one that is not inside a make expansion.
+    /// Where a rule's colon is, or why there isn't one.
     ///
-    /// `$(SRCS:.c=.o): headers` is a substitution reference, and its colon
-    /// belongs to the expansion, not to the rule. Splitting on the first colon
-    /// found made the target `$(SRCS` and the dependency list `.c=.o): headers`,
-    /// which then matched `is_target_specific_variable` (it contains an `=`) and
-    /// the rule was dropped with a message naming a target nobody wrote, its
-    /// recipe orphaned. The `$(`-in-target guard that would have reported this
-    /// correctly never ran, because the mis-split hid the `$(` from it.
-    fn rule_colon(text: &str) -> Option<usize> {
+    /// `Unclosed` is kept apart from `Missing` so the author of `$(SRCS: dep`
+    /// is told about the paren they forgot rather than about a line otto did
+    /// not recognize.
+    fn rule_colon(text: &str) -> RuleColon {
         let bytes = text.as_bytes();
         let mut depth = 0usize;
         let mut index = 0usize;
@@ -273,12 +281,12 @@ impl MakefileParser {
                     continue;
                 }
                 b')' | b'}' if depth > 0 => depth -= 1,
-                b':' if depth == 0 => return Some(index),
+                b':' if depth == 0 => return RuleColon::At(index),
                 _ => {}
             }
             index += 1;
         }
-        None
+        if depth > 0 { RuleColon::Unclosed } else { RuleColon::Missing }
     }
 
     /// Parse one rule. Returns every target it declares: `test check: build` is
@@ -295,8 +303,22 @@ impl MakefileParser {
         let trimmed = body.trim().to_string();
 
         let colon_pos = match Self::rule_colon(&trimmed) {
-            Some(pos) => pos,
-            None => {
+            RuleColon::At(pos) => pos,
+            // An expansion that is never closed swallows the rest of the line,
+            // colon included, so this looked like a line otto could not
+            // recognize and its recipe was then reported as belonging to no
+            // rule: two messages, neither naming the typo. The author gets one
+            // that does, and the recipe is skipped with the rule it belongs to.
+            RuleColon::Unclosed => {
+                self.warn(
+                    number,
+                    format!("unclosed `$(` or `${{` in `{trimmed}`; the rule is skipped"),
+                );
+                *index += 1;
+                self.skip_recipe(lines, index);
+                return Ok(None);
+            }
+            RuleColon::Missing => {
                 self.warn(number, format!("unrecognized line ignored: `{trimmed}`"));
                 *index += 1;
                 return Ok(None);
@@ -350,7 +372,7 @@ impl MakefileParser {
         // edge for an expansion it cannot compute: emitting `before:
         // ['$(OBJS:%.o=%.d)']` instead would trade a skipped rule for an
         // ottofile that cannot run.
-        if Self::rule_colon(&dep_part).is_some() {
+        if matches!(Self::rule_colon(&dep_part), RuleColon::At(_)) {
             self.warn(
                 number,
                 format!("static pattern rule `{target_part}` is not supported; the rule is skipped"),
