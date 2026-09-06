@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::executor::state::RunStatus;
-use crate::ports::MemoryStateStore;
+use crate::executor::workspace::{ExecutionContext, Workspace};
+use crate::ports::{MemoryStateStore, RealFs};
 use std::fs;
 use tempfile::TempDir;
 
@@ -141,16 +142,97 @@ async fn test_scan_with_old_runs() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_calculate_dir_size() -> Result<()> {
+async fn test_directory_size_of_a_run() -> Result<()> {
     let temp_dir = TempDir::new()?;
     create_test_run(temp_dir.path(), "testhash", 1234567890, 100)?;
 
     let run_dir = temp_dir.path().join("widget-testhash").join("1234567890");
-    let size = CleanCommand::calculate_dir_size(&run_dir)?;
+    let size = directory_size(&run_dir)?;
 
     // Should be approximately 100KB (may vary slightly due to filesystem overhead)
     assert!(size >= 100 * 1024);
     assert!(size < 110 * 1024);
+    Ok(())
+}
+
+/// AC8: the `Clean` caller and the `Workspace` caller report the **same** size
+/// for the same run directory, and that size excludes the 1 MB file a symlink
+/// inside the run points at.
+///
+/// This drives both production callers, not the shared function twice: `Clean`
+/// through `scan_runs`, `Workspace` through the size it records at run
+/// completion. They used to carry separate implementations that disagreed on
+/// symlinks, so the same directory had two sizes depending on who asked.
+#[tokio::test]
+#[serial_test::serial]
+async fn both_callers_report_one_size_that_excludes_a_symlink_target() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let otto_home = temp_dir.path().join("otto-home");
+    let outside = temp_dir.path().join("outside");
+    fs::create_dir_all(&outside)?;
+    fs::write(outside.join("blob"), vec![0u8; 1024 * 1024])?;
+
+    unsafe {
+        std::env::set_var("OTTO_HOME", &otto_home);
+    }
+
+    let store = Arc::new(MemoryStateStore::new()) as Arc<dyn StateStore>;
+    let workspace = Workspace::new_with_hash_and_fs(
+        temp_dir.path().join("widget"),
+        "widget".to_string(),
+        "abc12345".to_string(),
+        Arc::new(RealFs),
+    )
+    .await?
+    .with_state_store(Arc::clone(&store));
+    workspace.init().await?;
+
+    // Everything the run owns is in place before either caller measures, so a
+    // difference between them can only come from how they measure.
+    workspace.save_execution_context(ExecutionContext::new()).await?;
+    fs::write(workspace.run().join("tasks").join("stdout.log"), vec![0u8; 100 * 1024])?;
+    // Two links to the same 1 MB byte: one straight at the file, and one at the
+    // directory holding it, which is the shape a run's `.cache` link actually
+    // has. A size function that follows either one charges the shared blob to
+    // this run.
+    std::os::unix::fs::symlink(outside.join("blob"), workspace.run().join("blob"))?;
+    std::os::unix::fs::symlink(&outside, workspace.run().join("cache"))?;
+
+    workspace.record_run_complete_in_db(true).await;
+    let rows = store.get_runs_with_filters(None, None, 10)?;
+    assert_eq!(rows.len(), 1, "the run was recorded once");
+    let workspace_size = rows[0].size_bytes.expect("run completion records a size");
+
+    let cmd = CleanCommand {
+        keep_days: 30,
+        keep_last: None,
+        keep_failed: None,
+        dry_run: true,
+        project_filter: None,
+        no_db: true,
+        quiet: true,
+    };
+    let runs = cmd.scan_runs(&otto_home, now_timestamp())?;
+    unsafe {
+        std::env::remove_var("OTTO_HOME");
+    }
+    let scanned = runs
+        .iter()
+        .find(|r| r.path == *workspace.run())
+        .expect("Clean's scan finds the run directory");
+
+    assert_eq!(
+        scanned.size_bytes, workspace_size,
+        "one implementation, so one number for one directory"
+    );
+    assert!(
+        workspace_size >= 100 * 1024,
+        "the run's own 100 KB is counted: {workspace_size}"
+    );
+    assert!(
+        workspace_size < 1024 * 1024,
+        "the 1 MB symlink target is not counted: {workspace_size}"
+    );
     Ok(())
 }
 

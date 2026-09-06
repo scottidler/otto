@@ -1,4 +1,4 @@
-use crate::executor::layout::{expand_tilde, resolve_otto_home, run_dir_name, run_root};
+use crate::executor::layout::{directory_size, expand_tilde, resolve_otto_home, run_dir_name, run_root};
 use crate::ports::{FileSystem, RealFs, StateStore, record_blocking};
 use eyre::{Result, eyre};
 use log::warn;
@@ -420,8 +420,10 @@ impl<F: FileSystem> Workspace<F> {
             super::state::RunStatus::Failed
         };
 
-        // Try to calculate directory size
-        let size_bytes = Self::calculate_directory_size(&self.run).ok();
+        // The size the run directory owns, from the one function that computes
+        // it. This used to follow symlinks while `Clean` skipped them, so the
+        // two reported different sizes for the same directory.
+        let size_bytes = directory_size(&self.run).ok();
 
         // Try to record - log error but don't fail
         if let Err(e) = record_blocking(store, move |store| {
@@ -431,22 +433,6 @@ impl<F: FileSystem> Workspace<F> {
         {
             log::warn!("Failed to record run completion in database: {}", e);
         }
-    }
-
-    fn calculate_directory_size(path: &Path) -> Result<u64> {
-        let mut total = 0u64;
-        if path.is_dir() {
-            for entry in std::fs::read_dir(path)? {
-                let entry = entry?;
-                let entry_path = entry.path();
-                if entry_path.is_dir() {
-                    total += Self::calculate_directory_size(&entry_path)?;
-                } else {
-                    total += entry.metadata()?.len();
-                }
-            }
-        }
-        Ok(total)
     }
 
     pub async fn save_task_context(&self, task_name: &str, context: &ExecutionContext) -> Result<()> {

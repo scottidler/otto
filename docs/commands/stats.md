@@ -75,6 +75,8 @@ Top 10 Tasks by Execution Count
 ╰─────────┴───────┴───────┴─────────┴────────┴──────────────┴──────────────╯
 ```
 
+`Total Disk Usage` (`total_disk_usage` in JSON) sums the size each run recorded when it finished, and that size counts only what the run directory itself holds. Symlinks are neither followed nor counted, so a link into the project's shared `.cache/` charges the cached blob to nobody rather than to every run that referenced it. The number is therefore smaller than earlier versions of otto reported, where the recorded size followed symlinks and the same blob was counted once per referencing run. `otto Clean` sizes run directories through the same function, so the two numbers agree.
+
 Every Success Rate on this page is the share of runs that reached a terminal state: `successful / (successful + failed)`. Runs still `Running` are counted in `Total Runs` and in the `Running` row, but never in the denominator, because they can never reach the numerator. When nothing has reached a terminal state the rate reads `n/a`, not `0.0%`.
 
 There is no "Average Run Duration" row: "Total Execution Time" is the last row of the first table, and it is a sum, not a mean. The Top-N table is only printed when there is at least one task stats row; `-n`/`--limit` caps how many rows it shows (10 by default), heading text included ("Top 10 Tasks by Execution Count").

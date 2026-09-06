@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::executor::layout::parse_project_dir_name;
+use crate::executor::layout::{directory_size, parse_project_dir_name};
 use crate::executor::pruning::ensure_deletable_under_root;
 use crate::executor::state::{Retention, RunAge, RunMetadata, StateManager};
 use crate::ports::StateStore;
@@ -508,7 +508,7 @@ impl CleanCommand {
             // invisible here and leak forever.
             if let Some(timestamp) = crate::executor::layout::parse_run_dir_name(dir_name) {
                 let age_days = now.saturating_sub(timestamp) / 86400;
-                let size_bytes = Self::calculate_dir_size(&path)?;
+                let size_bytes = directory_size(&path)?;
 
                 // Try to read ottofile path from run.yaml
                 let ottofile_path = self.read_ottofile_path(&path);
@@ -536,34 +536,6 @@ impl CleanCommand {
         let content = fs::read_to_string(&run_yaml_path).ok()?;
         let metadata: RunMetadata = yaml_serde::from_str(&content).ok()?;
         metadata.ottofile
-    }
-
-    fn calculate_dir_size(path: &Path) -> Result<u64> {
-        let mut total_size = 0u64;
-
-        if path.is_dir() {
-            for entry in fs::read_dir(path)? {
-                let entry = entry?;
-
-                // `is_dir()` and `metadata()` both follow symlinks. A link
-                // inside a run directory pointing at a large or unreadable tree
-                // would make this scan slow, or abort `Clean` through the `?`.
-                // Sizing a run means sizing what the run owns, so links are
-                // skipped - the same rule `scan_runs` applies one level up.
-                let file_type = entry.file_type()?;
-                if file_type.is_symlink() {
-                    continue;
-                }
-
-                if file_type.is_dir() {
-                    total_size += Self::calculate_dir_size(&entry.path())?;
-                } else {
-                    total_size += entry.metadata()?.len();
-                }
-            }
-        }
-
-        Ok(total_size)
     }
 
     fn get_otto_home(&self) -> Result<PathBuf> {

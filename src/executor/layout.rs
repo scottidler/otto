@@ -132,5 +132,40 @@ pub fn parse_project_dir_name(dir_name: &str) -> Option<(&str, &str)> {
     Some((name, hash))
 }
 
+/// Total size in bytes of the files a directory owns.
+///
+/// Symlinks are not followed and are not counted. Every symlink under the otto
+/// home points into the project's shared `.cache/`, so following them charges
+/// one blob to every run that references it: the run directory is reported as
+/// larger than it is, and deleting it frees a fraction of what was reported.
+/// `is_dir()` and `metadata()` both follow symlinks, so the decision is made
+/// from the entry's `file_type()` instead.
+///
+/// `Clean` and `Workspace` each carried a copy of this and disagreed on exactly
+/// that point, so `otto Clean` and the size recorded at run completion were two
+/// different numbers for the same directory.
+pub fn directory_size(path: &Path) -> Result<u64> {
+    let mut total = 0u64;
+
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+
+            if file_type.is_symlink() {
+                continue;
+            }
+
+            if file_type.is_dir() {
+                total += directory_size(&entry.path())?;
+            } else {
+                total += entry.metadata()?.len();
+            }
+        }
+    }
+
+    Ok(total)
+}
+
 #[path = "layout_tests.rs"]
 mod tests;
