@@ -300,7 +300,7 @@ fn install_binary(source: &Path, target: &Path) -> Result<()> {
 
 /// Upgrade Otto to a newer version
 #[derive(Debug, Default, clap::Parser)]
-#[command(name = "Upgrade")]
+#[command(name = "Upgrade", bin_name = "otto Upgrade")]
 pub struct UpgradeCommand {
     /// Show what would be done without doing it
     #[arg(long)]

@@ -189,7 +189,7 @@ impl Parser {
 
     fn show_task_help(&self, task_name: &str) -> Result<()> {
         if let Some(task) = self.config_spec.tasks.get(task_name) {
-            let mut task_cmd = self.task_to_command_for_help(task);
+            let mut task_cmd = self.task_to_command_for_help(task).bin_name(format!("otto {task_name}"));
             task_cmd.print_help()?;
         } else {
             return Err(match nearest_task_name(task_name, &self.known_task_names()) {

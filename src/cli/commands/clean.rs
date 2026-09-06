@@ -55,7 +55,7 @@ fn already_gone_notice(quiet: bool, timestamp: u64) -> Option<String> {
 
 /// Clean old otto run directories
 #[derive(Debug, clap::Parser)]
-#[command(name = "Clean")]
+#[command(name = "Clean", bin_name = "otto Clean")]
 pub struct CleanCommand {
     /// Keep runs newer than this many days
     #[arg(long, default_value = "30")]
