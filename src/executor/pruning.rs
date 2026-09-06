@@ -105,11 +105,20 @@ pub async fn auto_prune(otto_home: &Path, retention: &RetentionSpec) {
     let db_path = std::env::var_os("OTTO_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| otto_home.join("otto.db"));
+    // A store that will not open is reported and then treated like every other
+    // failure below: carried past, with the marker still written on the way
+    // out. Returning here skipped the marker, so an interval that had been
+    // attempted looked like an interval that had not, and auto-prune re-fired
+    // on every subsequent run. It also made the marker a dishonest observable:
+    // `auto_prune_throttle_boundary_is_exact` infers "pruning happened" from
+    // the marker's mtime, so a SQLite hiccup on a CI runner (measured once:
+    // `Failed to read the journal mode after WAL was refused`) read as a wrong
+    // throttle decision rather than as the environment failure it was.
     let store = match crate::executor::state::StateManager::with_db_path(db_path) {
-        Ok(store) => store,
+        Ok(store) => Some(store),
         Err(e) => {
             report_prune_failure(&format!("could not open the store: {e}"));
-            return;
+            None
         }
     };
 
@@ -119,7 +128,9 @@ pub async fn auto_prune(otto_home: &Path, retention: &RetentionSpec) {
     // reason to leave orphaned cache entries behind, and leaving the marker
     // untouched made auto-prune re-fire on every subsequent run instead of once
     // per interval.
-    if let Err(e) = cmd.execute_with_store(Some(std::sync::Arc::new(store))).await {
+    if let Some(store) = store
+        && let Err(e) = cmd.execute_with_store(Some(std::sync::Arc::new(store))).await
+    {
         report_prune_failure(&format!("{e}"));
     }
 
