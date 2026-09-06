@@ -17,8 +17,20 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Pinned to a SHA, not to `v1`. That tag still points at 299f13c, which
+      # builds the asset name as `otto-v<version>-linux.tar.gz`, and every
+      # release since publishes arch-suffixed assets
+      # (`otto-v<version>-linux-amd64.tar.gz`), so the action fails with
+      # `no assets match the file pattern`. This job has been red since
+      # 2026-04-03 and last passed 2025-12-17. The fix has been on
+      # setup-otto's main since 0676703 (`SUFFIX="linux-amd64"`); the `v1` tag
+      # was never re-pointed at it.
+      #
+      # A SHA is the right pin for a third-party action regardless: a moving
+      # tag is a supply-chain surface, and this one moving is what would
+      # unpin us again.
       - name: Setup otto via setup-otto action
-        uses: otto-rs/setup-otto@v1
+        uses: otto-rs/setup-otto@0676703d0c225f6c782235e181e4498a7726e4b5 # main, post-fix
         id: otto
 
       - name: Verify installation
