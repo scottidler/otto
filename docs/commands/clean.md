@@ -14,7 +14,7 @@ otto Clean [OPTIONS]
 $ otto Clean --help
 Clean old otto run directories
 
-Usage: Clean [OPTIONS]
+Usage: otto Clean [OPTIONS]
 
 Options:
       --keep-days <KEEP_DAYS>
@@ -197,7 +197,7 @@ Full detail, including the input/output files a task with dependencies gets, is 
 ### Database Mode (Default, Recommended)
 
 **Advantages:**
-- ⚡ **Faster** - Reads run metadata from the database instead of measuring every directory
+- 📇 **Named** - Reads run metadata from the database, so a run is identified by its row rather than by its directory name. Both modes walk the filesystem and size what they select: since Phase 8 the database mode scans too, because that is the only way to see run directories no row names
 - 🎯 **Precise filtering** - By status, project, or retention policy
 - 🔒 **Reconciled** - Both stores are considered: rows the database holds, and run directories on disk that no row names. The two modes select the same set of run directories
 - 📊 **Rich queries** - Complex retention policies possible

@@ -699,6 +699,16 @@ to today's, and is not a prefix of it either, since today's output ends in `}`.
 - **Success criteria:** on a fixture tree, `Clean --dry-run` and
   `Clean --dry-run --no-db` select the same set of runs; the NULL-`run_dir`
   fixture leaves no orphaned directory behind.
+- **Upgrade window, added 2026-09-06 by the implementation audit.** Only a build
+  carrying this phase writes the `.lock`, so a run already in flight when that
+  build is installed has no lock and the sweep will delete its directory out from
+  under it. Measured across all three combinations: a pre-lock run swept by a
+  pre-lock `Clean` is deleted, a pre-lock run swept by a lock-aware `Clean` is
+  deleted, and a lock-aware run is skipped with `a run is still using it`. This is
+  not a regression, since the pre-lock build had the identical defect on every
+  run, and it is bounded by retention: reaching it needs `--keep-days 0` or a run
+  outstanding past the 30 day default. It closes itself once every in-flight run
+  postdates the upgrade.
 
 #### Phase 9: The run record says what was asked for
 **Model:** sonnet
@@ -1038,8 +1048,23 @@ gated, so the branch lands through a PR and `bump` cuts the tag afterward.
 
 ## Open Questions
 
-None. The one question this document carried, F1, was answered by the author on
-2026-09-06: correct the docs. Recorded in Resolved Decisions.
+F1, the one question this document carried into implementation, was answered by
+the author on 2026-09-06: correct the docs. Recorded in Resolved Decisions.
+
+One question was opened by the work itself and is still open, carried in the
+implementation notes and repeated here so this section does not read as "None"
+while the notes say otherwise:
+
+- [ ] **The two deletion paths fence against different roots.** Phase 8's sweep
+      fences against the home `Clean` was given; `StateManager::delete_run` fences
+      against `resolve_otto_home()`, which it reads from the environment itself.
+      Not reachable in production: both `auto_prune` call sites (`src/app.rs:472-474`,
+      `:745-747`) pass `resolve_otto_home()`, the exact value `resolve_run_directory`
+      re-resolves, and the mismatched case fails closed (`Refusing to delete run
+      directory`, exit 1, nothing deleted). It is a trap for the next test author
+      rather than a live defect. Worth deciding before something else takes a home
+      as an argument; threading a root through `StateStore::delete_run` was out of
+      scope for Phase 8.
 
 ## Addendum: cut, parked, and recorded
 
