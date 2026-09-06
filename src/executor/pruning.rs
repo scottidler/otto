@@ -108,7 +108,7 @@ pub async fn auto_prune(otto_home: &Path, retention: &RetentionSpec) {
     let store = match crate::executor::state::StateManager::with_db_path(db_path) {
         Ok(store) => store,
         Err(e) => {
-            warn!("Auto-prune could not open the store: {}", e);
+            report_prune_failure(&format!("could not open the store: {e}"));
             return;
         }
     };
@@ -120,18 +120,45 @@ pub async fn auto_prune(otto_home: &Path, retention: &RetentionSpec) {
     // untouched made auto-prune re-fire on every subsequent run instead of once
     // per interval.
     if let Err(e) = cmd.execute_with_store(Some(std::sync::Arc::new(store))).await {
-        warn!("Auto-prune failed: {}", e);
+        report_prune_failure(&format!("{e}"));
     }
 
     // Prune orphaned cache entries
     if let Err(e) = prune_orphaned_cache(otto_home) {
-        warn!("Cache prune failed: {}", e);
+        report_prune_failure(&format!("cache prune failed: {e}"));
     }
 
     // Touch marker file
     if let Err(e) = fs::File::create(&marker) {
-        warn!("Failed to update .last_prune marker: {}", e);
+        report_prune_failure(&format!("failed to update the .last_prune marker: {e}"));
     }
+}
+
+/// Tell the user, not just the log, that housekeeping is failing.
+///
+/// Every failure in `auto_prune` itself used to be a `warn!`, and
+/// `setup_logging` sends the logger to `otto.log`, so nothing about the prune
+/// as a whole reached the terminal. What did reach it was one line per refused
+/// run, printed by `Clean` itself (`  Error deleting run <ts>: Refusing to
+/// delete run directory`) with no indication of who asked or what it means.
+/// Measured: a sabotaged run directory under auto-prune printed exactly that
+/// one line and nothing else. The user is left to work out that an unnamed
+/// background prune is failing, and that old runs are therefore accumulating.
+///
+/// This adds the two things that line cannot say on its own: that the failure
+/// belongs to auto-prune, and what it costs.
+///
+/// The interval throttle is what makes this affordable to print. `auto_prune`
+/// returns early unless `.last_prune` is older than `prune_interval_hours`, so
+/// this is one line per interval (24h by default), not one per run, and the
+/// marker is written even when the prune fails precisely so a failure cannot
+/// re-fire on every invocation.
+///
+/// Still a `warn!` as well, so the log keeps the whole history.
+fn report_prune_failure(detail: &str) {
+    warn!("Auto-prune failed: {detail}");
+    eprintln!("otto: auto-prune failed: {detail}");
+    eprintln!("otto: old runs under $OTTO_HOME are not being cleaned up; `otto Clean --dry-run` shows what is there");
 }
 
 /// Remove orphaned cache entries that are no longer referenced by any run.
