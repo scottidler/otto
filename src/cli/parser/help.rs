@@ -35,7 +35,16 @@ impl Parser {
                 .value_name("FORMAT")
                 .help("Output format for --tasks (yaml or json); default: yaml on a tty, json when piped")
                 .value_parser(["yaml", "json"])
-                .ignore_case(true),
+                .ignore_case(true)
+                // Without --tasks this flag has nothing to format, and silently
+                // fell through to running the ottofile's default tasks instead
+                // of erroring (docs/design/2026-09-06-shakedown-remediation.md
+                // Phase 6, F7). global_args() is also consumed by the two help
+                // builders in command.rs, which only render a Command for
+                // --help and never call try_get_matches_from, so `requires` is
+                // inert there and only bites the real parse path in
+                // Parser::parse() (parser.rs).
+                .requires("tasks"),
             Arg::new("jobs")
                 .short('j')
                 .long("jobs")
