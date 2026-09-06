@@ -6,11 +6,16 @@ otto:
     GIT_SHA: "$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 
 tasks:
-  # Whitespace linting
+  # Whitespace linting.
+  #
+  # `--check`, not a bare `-r`: `whitespace -r` REWRITES files and exits 0, so
+  # for as long as this task has existed it could not fail, and `otto ci`'s
+  # `lint` step gated nothing. `--check` reports and exits 1, changing nothing,
+  # which is what a gate needs. Fixing is `whitespace -r`, run deliberately.
   lint:
-    help: "Run whitespace linting"
+    help: "Fail on trailing whitespace (fix with `whitespace -r`)"
     bash: |
-      whitespace -r
+      whitespace -r --check
 
   # Code quality checks — split into leaf tasks so they parallelize and
   # so fmt-check can auto-fix on failure via the on-failure: sugar.
