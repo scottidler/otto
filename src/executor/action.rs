@@ -178,6 +178,24 @@ impl<F: FileSystem> ActionProcessor<F> {
         // Ensure cache directory exists
         self.workspace.fs().create_dir_all_sync(self.workspace.cache_dir())?;
 
+        // Owner-only, and set before anything is written into it.
+        //
+        // The entries below carry every task parameter verbatim, so the cache is
+        // the one place in the tree that holds secrets a caller passed on the
+        // command line. Left at the process umask it is readable and traversable
+        // by everyone (mode 775 on the tree that turned this up), which leaks the
+        // contents and the file names both. It also has to be tight
+        // *before* the write: `write_sync` stages a temporary file and renames
+        // it, so an entry exists at the umask's mode for the moment between the
+        // rename and the chmod below. A 0o700 directory closes that window,
+        // because nobody else can traverse into it to reach the file at all.
+        #[cfg(unix)]
+        {
+            self.workspace
+                .fs()
+                .set_permissions_sync(self.workspace.cache_dir(), 0o700)?;
+        }
+
         // Write the script to the cache unless a byte-identical copy is already
         // there. "Exists" is not good enough: the cache is content-addressed, so a
         // torn or truncated entry keeps its name, and write-only-if-absent then
@@ -191,10 +209,11 @@ impl<F: FileSystem> ActionProcessor<F> {
         if needs_write {
             self.workspace.fs().write_sync(&cache_file, script.as_bytes())?;
 
-            // Make cached script executable
+            // Owner read and execute, and nothing for anyone else: the script
+            // holds the parameter values it was generated from.
             #[cfg(unix)]
             {
-                self.workspace.fs().set_permissions_sync(&cache_file, 0o755)?;
+                self.workspace.fs().set_permissions_sync(&cache_file, 0o700)?;
             }
         }
 
@@ -647,10 +666,13 @@ otto_set_output() {
             .fs()
             .write_sync(&builtins_path, builtins_content.as_bytes())?;
 
-        // Make builtins executable
+        // Read-only, and owner-only. This file is `source`d by the generated
+        // script, never executed, so the execute bit it used to carry was wrong
+        // as well as too wide: the Python twin of this function has always
+        // written its builtins with no execute bit at all.
         #[cfg(unix)]
         {
-            self.workspace.fs().set_permissions_sync(&builtins_path, 0o755)?;
+            self.workspace.fs().set_permissions_sync(&builtins_path, 0o600)?;
         }
 
         Ok(())
