@@ -331,11 +331,11 @@ pub struct UpgradeCommand {
     pub backup_dir: Option<PathBuf>,
 
     /// GitHub token for API access (avoids rate limits)
-    ///
-    /// `hide_env_values(true)` is not optional here. clap renders an env-backed
-    /// arg as `[env: VAR=<value>]` in `--help`, so without it `otto Upgrade
-    /// --help` printed the user's live token to stdout - into terminal
-    /// scrollback, CI logs, and any transcript of a help invocation.
+    //
+    // `hide_env_values(true)` is not optional here. clap renders an env-backed
+    // arg as `[env: VAR=<value>]` in `--help`, so without it `otto Upgrade
+    // --help` printed the user's live token to stdout - into terminal
+    // scrollback, CI logs, and any transcript of a help invocation.
     #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
     pub github_token: Option<String>,
 
