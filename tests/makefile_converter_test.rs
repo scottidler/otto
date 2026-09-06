@@ -781,6 +781,12 @@ fn test_every_fixture_output_loads_through_otto() {
         let ottofile = temp.path().join("otto.yml");
         fs::write(&ottofile, &conversion.yaml).expect("write converted ottofile");
 
+        // `--tasks` lists the graph without RESOLVING it, so it exits 0 on an
+        // ottofile carrying an edge to a task that does not exist. That is how
+        // `makefiles/expansion-dependency` came to ship an expected output on
+        // which `otto link` died with `Task 'package' has unknown dependency
+        // 'headers'`: this guard, which exists to catch exactly that, passed
+        // it. `Graph` builds the real DAG, so a dangling edge fails here.
         let output = common::otto_cmd(temp.path())
             .arg("-o")
             .arg(&ottofile)
@@ -791,6 +797,23 @@ fn test_every_fixture_output_loads_through_otto() {
             output.status.success(),
             "makefiles/{name}/Makefile converted to an ottofile otto itself rejects:\n{}\n--- output ---\n{}",
             String::from_utf8_lossy(&output.stderr),
+            conversion.yaml
+        );
+
+        let graph = common::otto_cmd(temp.path())
+            .arg("-o")
+            .arg(&ottofile)
+            .arg("Graph")
+            .output()
+            .expect("otto Graph");
+        let stderr = String::from_utf8_lossy(&graph.stderr);
+        // Asserted on the message rather than the exit code: several fixtures
+        // carry `envs:` whose commands need a git repo and fail in this temp
+        // dir, which is an artifact of where the test runs and not a defect in
+        // the conversion. A dangling edge is neither.
+        assert!(
+            !stderr.contains("unknown dependency"),
+            "makefiles/{name}/Makefile converted to an ottofile whose edges do not resolve:\n{stderr}\n--- output ---\n{}",
             conversion.yaml
         );
     }
