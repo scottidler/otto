@@ -14,6 +14,11 @@
 # that contains it (stripping any trailing #fragment) and must exist on
 # disk.
 #
+# The extractor tolerates one level of parentheses inside a target, so
+# `[x](docs/a(b).md)` is read whole. A flat `[^)]*` stopped at the inner `)`
+# and produced a target that could never resolve, which meant a broken link of
+# that shape was silently skipped rather than reported.
+#
 # Portability: the extractor is a POSIX `grep -oE`, not `grep -oP`. `-P` (Perl
 # regex, needed for the lookbehind this used to use) is a GNU extension that
 # BSD grep does not have, so on macOS the read loop got nothing, `fail` stayed
@@ -47,7 +52,7 @@ check_file() {
     # ... )` process substitution it used to hide in, a grep that failed
     # outright was indistinguishable from a file with no links.
     local matches status
-    matches="$(grep -noE '\]\([^)]*\)' "$file")"
+    matches="$(grep -noE '\]\(([^()]|\([^()]*\))*\)' "$file")"
     status=$?
     if [ "$status" -ge 2 ]; then
         echo "$file: link extraction FAILED (grep exited $status); this check is not checking anything" >&2
@@ -92,9 +97,23 @@ while IFS= read -r -d '' f; do
 done < <(find docs examples -name '*.md' -print0 2>/dev/null)
 files+=("README.md")
 
+scanned=0
 for f in "${files[@]}"; do
-    [ -f "$f" ] && check_file "$f"
+    if [ -f "$f" ]; then
+        check_file "$f"
+        scanned=$((scanned + 1))
+    fi
 done
+
+# Zero FILES is a broken check; zero LINKS is a legitimate tree. The two were
+# conflated once in each direction: first by a banner that printed success
+# having matched nothing, then by a guard that made an empty link count fatal.
+# This asserts only the thing that is always wrong -- pointed at a tree with no
+# docs to read, the check has nothing to say and must not say it passed.
+if [ "$scanned" -eq 0 ]; then
+    echo "check-doc-links: found no files to scan under docs/, examples/ or README.md" >&2
+    exit 1
+fi
 
 if [ "$fail" -eq 0 ]; then
     echo "✅ check-doc-links: $checked relative .md links, every one resolves"
