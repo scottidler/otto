@@ -6,18 +6,18 @@ otto:
   tasks:
   - help
   envs:
-    GOTEST: ${GOCMD} test
-    GOLINT: golint
-    GOGET: ${GOCMD} get
-    GOCLEAN: ${GOCMD} clean
-    BINARY_NAME: ttha
-    PROJECT: github.com/dmswe/ttha
-    GOINSTALL: ${GOCMD} install
     GOCMD: go
-    GO_FILES: $(find . -name '*.go' | grep -v _test.go)
-    GOBUILD: ${GOCMD} build
-    NAME: ${PROJECT}
+    GOLINT: golint
+    BINARY_NAME: ttha
     GIT_COMMIT: $(git rev-parse --short HEAD)
+    GOCLEAN: ${GOCMD} clean
+    GOTEST: ${GOCMD} test
+    NAME: ${PROJECT}
+    GOBUILD: ${GOCMD} build
+    GOINSTALL: ${GOCMD} install
+    GO_FILES: $(find . -name '*.go' | grep -v _test.go)
+    PROJECT: github.com/dmswe/ttha
+    GOGET: ${GOCMD} get
 tasks:
   help:
     help: Help me.
@@ -52,8 +52,6 @@ tasks:
       CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 ${GOBUILD} -o ${BINARY_NAME} -v
   package:
     help: Package source code
-    before:
-    - build
     bash: |-
       echo "==> Package source code..."
       tar -czvf ${PROJECT_NAME}.tar.gz ${BINARY_NAME}

@@ -3,8 +3,9 @@
 # named a task that cannot exist, and otto refused the whole run with
 # `Task 'link' has unknown dependency '$(OBJS)'` at conversion exit 0.
 #
-# `headers`, a prerequisite that simply has no rule in this Makefile, keeps its
-# edge on purpose: that name could be a real task in an included Makefile.
+# `headers`, a prerequisite that simply has no rule in this Makefile, is dropped
+# too. It cannot become a task later: the converter refuses `include`, so it
+# never reads another Makefile, and otto rejects a dangling edge file-wide.
 #
 # `deps.d`'s prerequisite is a SUBSTITUTION reference, so it carries a colon of
 # its own. That colon used to make the rule read as a static pattern rule

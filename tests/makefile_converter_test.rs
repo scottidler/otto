@@ -53,7 +53,7 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
             "Makefile:17: warning: `MAKEFILE_LIST` is a make-internal variable; it will be empty in otto",
             "Makefile:42: warning: `package` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
             "Makefile:42: warning: `PROJECT_NAME` is not defined in the Makefile; it will come from the environment",
-            "Makefile:42: warning: dependency `build` of `package` has no rule in this Makefile; otto will reject the edge",
+            "Makefile:42: warning: dependency `build` of `package` has no rule in this Makefile, so the edge is dropped; otto rejects a dangling edge for the whole file, not just this task",
         ],
     ),
     (
@@ -81,12 +81,12 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
     (
         "expansion-dependency",
         &[
-            "Makefile:15: warning: `link` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
-            "Makefile:15: warning: dependency `$(OBJS)` of `link` is a make expansion; otto task names cannot be computed",
-            "Makefile:18: warning: `package` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
-            "Makefile:18: warning: dependency `headers` of `package` has no rule in this Makefile; otto will reject the edge",
-            "Makefile:21: warning: `deps.d` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
-            "Makefile:21: warning: dependency `$(OBJS:%.o=%.d)` of `deps.d` is a make expansion; otto task names cannot be computed",
+            "Makefile:16: warning: `link` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:16: warning: dependency `$(OBJS)` of `link` is a make expansion; otto task names cannot be computed, so the edge is dropped",
+            "Makefile:19: warning: `package` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:19: warning: dependency `headers` of `package` has no rule in this Makefile, so the edge is dropped; otto rejects a dangling edge for the whole file, not just this task",
+            "Makefile:22: warning: `deps.d` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:22: warning: dependency `$(OBJS:%.o=%.d)` of `deps.d` is a make expansion; otto task names cannot be computed, so the edge is dropped",
         ],
     ),
     (

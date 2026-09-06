@@ -1,7 +1,9 @@
-# Expected conversion of this directory's Makefile: `link`'s expansion
-# prerequisite is dropped (no `before:` at all) and `deps.d`'s substitution
-# reference likewise, while `package` keeps its edge to `headers`, which is
-# merely a name with no rule here.
+# Expected conversion of this directory's Makefile: no rule here keeps a
+# prerequisite edge, because none of them names a task this file defines.
+# `link`'s and `deps.d`'s are make expansions; `package`'s `headers` is a plain
+# name with no rule in this Makefile. Every one is warned about and left out,
+# because otto refuses a dangling edge at the level of the whole file: one of
+# them would stop `link` running too.
 otto:
   about: Converted from Makefile
   api: '1'
@@ -13,8 +15,6 @@ tasks:
   link:
     bash: echo linking
   package:
-    before:
-    - headers
     bash: echo packaging
   deps.d:
     bash: echo depend

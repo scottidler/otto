@@ -260,7 +260,7 @@ impl OttoConverter {
                 self.warn(
                     target.line,
                     format!(
-                        "dependency `{dependency}` of `{}` is a make expansion; otto task names cannot be computed",
+                        "dependency `{dependency}` of `{}` is a make expansion; otto task names cannot be computed, so the edge is dropped",
                         target.name
                     ),
                 );
@@ -271,30 +271,36 @@ impl OttoConverter {
                 self.warn(
                     target.line,
                     format!(
-                        "dependency `{dependency}` of `{}` has no rule in this Makefile; otto will reject the edge",
+                        "dependency `{dependency}` of `{}` has no rule in this Makefile, so the edge is dropped; otto rejects a dangling edge for the whole file, not just this task",
                         target.name
                     ),
                 );
             }
         }
 
-        // A dependency that is a make expansion is dropped, not emitted. Its
-        // name cannot be computed here, so the edge can only ever name a task
-        // that does not exist, and otto refuses the whole run with `Task 'foo'
-        // has unknown dependency '$(OBJS)'`. Emitting it turned every Makefile
-        // carrying one into an ottofile that converts at exit 0 and then cannot
-        // run at all, with only `--strict` (which refuses any warning) catching
-        // it. Same treatment the target side already gives an expansion it
-        // cannot compute: warn above, and leave it out.
+        // An edge is emitted only when it names a task this conversion actually
+        // produced. Anything else is dropped, with the warning above kept.
         //
-        // Deliberately narrower than it could be: a dependency that merely
-        // names no rule in THIS Makefile (`package: build`) keeps its edge,
-        // because that name may be a real task in an included Makefile or a
-        // file the author means to add. An expansion can never be a task name.
+        // otto refuses a dangling edge at the level of the WHOLE FILE, not the
+        // task that carries it: one `before:` naming something that is not a
+        // task makes `otto <anything>` fail with `Task 'package' has unknown
+        // dependency 'headers'`, so every other task in the converted ottofile
+        // stops working too. Emitting one meant converting at exit 0 into a
+        // file that cannot run at all, which only `--strict` (refusing every
+        // warning) caught.
+        //
+        // Both shapes reach this and both are dropped. A make expansion can
+        // never be a task name. A plain name with no rule in this Makefile
+        // cannot become one either: `include` is in the unsupported-directive
+        // list (`parser.rs`), so the converter never reads another Makefile and
+        // no later pass can supply the missing rule. It is a file, or a rule
+        // that lives somewhere this converter cannot see; in both cases the
+        // author is told, and the ottofile it produces runs.
+        let known_task_names = self.known_targets();
         let before: Vec<crate::cfg::edge::EdgeSpec> = target
             .dependencies
             .iter()
-            .filter(|dependency| !dependency.contains('$'))
+            .filter(|dependency| known_task_names.contains(*dependency))
             .map(|dependency| crate::cfg::edge::EdgeSpec::sugar(self.task_name(dependency)))
             .collect();
 

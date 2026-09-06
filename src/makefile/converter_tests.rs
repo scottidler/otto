@@ -123,6 +123,8 @@ fn test_convert_target_with_dependencies() {
     let mut build = target("build", &["echo Building"]);
     build.dependencies = vec!["test".to_string(), "clean".to_string()];
     ast.targets.push(build);
+    ast.targets.push(target("test", &["echo Testing"]));
+    ast.targets.push(target("clean", &["echo Cleaning"]));
 
     let (config, _) = convert(ast);
 
@@ -130,6 +132,32 @@ fn test_convert_target_with_dependencies() {
     assert_eq!(task.before.len(), 2);
     assert!(task.before.iter().any(|e| e.task == "test"));
     assert!(task.before.iter().any(|e| e.task == "clean"));
+}
+
+/// A prerequisite with no rule in this Makefile is warned about and left out.
+///
+/// It used to be emitted, and otto rejects a dangling edge for the whole file,
+/// so one of these made every task in the converted ottofile fail to run, not
+/// just the task carrying it. This test used to assert the opposite, by
+/// depending on two targets it never added to the AST.
+#[test]
+fn a_dependency_with_no_rule_is_dropped_and_named() {
+    let mut ast = MakefileAst::new();
+    let mut build = target("build", &["echo Building"]);
+    build.dependencies = vec!["test".to_string(), "nowhere".to_string()];
+    ast.targets.push(build);
+    ast.targets.push(target("test", &["echo Testing"]));
+
+    let (config, diagnostics) = convert(ast);
+
+    let task = config.tasks.get("build").unwrap();
+    assert_eq!(task.before.len(), 1, "only the edge that resolves survives");
+    assert_eq!(task.before[0].task, "test");
+    assert!(
+        messages(&diagnostics).contains("`nowhere` of `build` has no rule"),
+        "the dropped edge must be named: {}",
+        messages(&diagnostics)
+    );
 }
 
 #[test]
