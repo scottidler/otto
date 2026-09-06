@@ -109,13 +109,20 @@ mod hangup_tests {
         let mut master = -1;
         let mut slave = -1;
         // SAFETY: both out-params are valid; the three optional args are null.
+        //
+        // `null_mut()` for all three, not `null()`: Apple's libc declares the
+        // `termios` and `winsize` parameters `*mut` where Linux declares them
+        // `*const`, so `null()` is a type error on macOS and compiles fine
+        // here. `*mut T` coerces to `*const T`, so one spelling satisfies both.
+        // Caught by the macOS bash-3.2 CI job, which is the only place in this
+        // repo that compiles the test tree against Apple's headers.
         let rc = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         };
         assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
