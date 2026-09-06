@@ -10,6 +10,49 @@ use crate::executor::pruning::ensure_deletable_under_root;
 use crate::executor::state::{Retention, RunAge, RunMetadata, StateManager};
 use crate::ports::StateStore;
 
+/// How many per-run delete errors are printed before they are summarised.
+///
+/// The errors are one per run that could not be deleted, and a prune that keeps
+/// failing is a prune whose backlog grows every interval, so the unbounded form
+/// got longer every time it ran.
+const MAX_DELETE_ERRORS_SHOWN: usize = 3;
+
+/// The stderr line for a run that could not be deleted: the error itself for
+/// the first few, one summary line at the cap, then nothing.
+///
+/// Capped rather than gated on `quiet`, because a refused delete is worth
+/// interrupting for. But there is one per run that could not be removed, and a
+/// prune that keeps failing is a prune whose backlog grows every interval, so
+/// the uncapped form got one line longer every time it ran. The total is in the
+/// failure message the command returns.
+fn delete_error_notice(shown: usize, timestamp: u64, error: &str) -> Option<String> {
+    match shown.cmp(&MAX_DELETE_ERRORS_SHOWN) {
+        std::cmp::Ordering::Less => Some(format!("  Error deleting run {timestamp}: {error}")),
+        std::cmp::Ordering::Equal => {
+            Some("  ... further delete errors not shown; the count is in the failure below".to_string())
+        }
+        std::cmp::Ordering::Greater => None,
+    }
+}
+
+/// The stderr line for a run another pruner deleted first, or `None` under
+/// `quiet`.
+///
+/// A row someone else deleted first is the expected outcome of a race, and
+/// `auto_prune` runs with `quiet: true` on the way out of an ordinary `otto
+/// <task>`. Ungated, a racing prune wrote one of these per selected run into
+/// the middle of the user's build output, about something that went right.
+///
+/// Pure, and returned rather than printed, so the gate itself is testable:
+/// stderr cannot be captured from a unit test, and the race that produces this
+/// arm cannot be staged deterministically through the binary.
+fn already_gone_notice(quiet: bool, timestamp: u64) -> Option<String> {
+    if quiet {
+        return None;
+    }
+    Some(format!("  Warning: Run {timestamp} not found in database"))
+}
+
 /// Clean old otto run directories
 #[derive(Debug, clap::Parser)]
 #[command(name = "Clean")]
@@ -204,21 +247,15 @@ impl CleanCommand {
                         }
                     }
                     Ok(None) => {
-                        // Gated on `quiet`, unlike the `Err` arm below: a row
-                        // someone else deleted first is the expected outcome of
-                        // a race, and `auto_prune` runs with `quiet: true` on
-                        // the way out of an ordinary `otto <task>`. Ungated, a
-                        // racing prune wrote one of these per selected run onto
-                        // the user's stderr, in the middle of their build
-                        // output, about something that went right. A real
-                        // failure still prints either way.
-                        if !self.quiet {
-                            eprintln!("  Warning: Run {} not found in database", run.timestamp);
+                        if let Some(line) = already_gone_notice(self.quiet, run.timestamp) {
+                            eprintln!("{line}");
                         }
                         already_gone += 1;
                     }
                     Err(e) => {
-                        eprintln!("  Error deleting run {}: {}", run.timestamp, e);
+                        if let Some(line) = delete_error_notice(failed, run.timestamp, &e.to_string()) {
+                            eprintln!("{line}");
+                        }
                         failed += 1;
                     }
                 }

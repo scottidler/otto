@@ -937,6 +937,43 @@ async fn a_db_path_clean_with_one_refused_directory_exits_non_zero() -> Result<(
     Ok(())
 }
 
+/// The `quiet` gate on the already-gone notice, pinned where it can be.
+///
+/// `auto_prune` builds its `CleanCommand` with `quiet: true` and runs after
+/// every task, so an ungated notice landed in the middle of the user's build
+/// output. The race that produces this arm cannot be staged deterministically
+/// through the binary and stderr cannot be captured from a unit test, so the
+/// decision is a pure function and this asserts the decision.
+#[test]
+fn the_already_gone_notice_is_silent_under_quiet() {
+    assert_eq!(already_gone_notice(true, 1_788_665_760), None);
+    assert_eq!(
+        already_gone_notice(false, 1_788_665_760).as_deref(),
+        Some("  Warning: Run 1788665760 not found in database")
+    );
+}
+
+/// The per-run delete errors are capped, so a prune that keeps failing does not
+/// print a longer report every interval as its backlog grows.
+#[test]
+fn delete_errors_are_capped_at_a_summary_line() {
+    let line = |shown| delete_error_notice(shown, 1_788_665_760, "Refusing to delete run directory");
+
+    for shown in 0..MAX_DELETE_ERRORS_SHOWN {
+        assert_eq!(
+            line(shown).as_deref(),
+            Some("  Error deleting run 1788665760: Refusing to delete run directory"),
+            "the first {MAX_DELETE_ERRORS_SHOWN} errors print in full"
+        );
+    }
+    assert_eq!(
+        line(MAX_DELETE_ERRORS_SHOWN).as_deref(),
+        Some("  ... further delete errors not shown; the count is in the failure below")
+    );
+    assert_eq!(line(MAX_DELETE_ERRORS_SHOWN + 1), None);
+    assert_eq!(line(MAX_DELETE_ERRORS_SHOWN + 500), None);
+}
+
 /// A row someone else deleted first is not a failed delete: `Clean` exits 0, so
 /// a script driving it beside a run whose own `auto_prune` fires does not see a
 /// spurious failure.
