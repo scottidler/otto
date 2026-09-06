@@ -75,6 +75,8 @@ Top 10 Tasks by Execution Count
 ╰─────────┴───────┴───────┴─────────┴────────┴──────────────┴──────────────╯
 ```
 
+Every Success Rate on this page is the share of runs that reached a terminal state: `successful / (successful + failed)`. Runs still `Running` are counted in `Total Runs` and in the `Running` row, but never in the denominator, because they can never reach the numerator. When nothing has reached a terminal state the rate reads `n/a`, not `0.0%`.
+
 There is no "Average Run Duration" row — "Total Execution Time" is the last row of the first table, and it is a sum, not a mean. The Top-N table is only printed when there is at least one task stats row; `-n`/`--limit` caps how many rows it shows (10 by default), heading text included ("Top 10 Tasks by Execution Count").
 
 ### Task-specific statistics
@@ -108,7 +110,7 @@ Statistics for task 'hello'
 ╰──────────────────┴─────────────────────╯
 ```
 
-A task that has run under more than one project instead gets a per-project table: columns `Project, Total, Success, Failed, Success Rate, Avg Duration` — no `--limit` applies here.
+A task that has run under more than one project instead gets a per-project table: columns `Project, Total, Success, Failed, Success Rate, Avg Duration`, with `Success Rate` again over the executions that reached a terminal state. No `--limit` applies here.
 
 ## JSON Output Schema
 

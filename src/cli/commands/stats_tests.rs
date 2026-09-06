@@ -291,3 +291,108 @@ fn test_show_task_stats_deploy() {
     let result = cmd.show_task_stats(store.as_ref(), "deploy");
     assert!(result.is_ok());
 }
+
+/// AC7: one denominator. A store carrying eight runs that are still `Running`
+/// must not drag the overall rate below the per-task rate computed from the same
+/// rows: 1 success + 1 failure is 50.0% in both tables, not 10.0% in one of them.
+fn create_store_with_running_runs() -> Arc<MemoryStateStore> {
+    let store = MemoryStateStore::new();
+    let ottofile = PathBuf::from("/test/inflight/otto.yml");
+
+    let succeeded = store
+        .record_run_start(&RunMetadata::minimal(
+            Some(ottofile.clone()),
+            "inflight".to_string(),
+            1700000000,
+        ))
+        .unwrap();
+    store
+        .record_run_complete(succeeded, RunStatus::Success, Some(1024))
+        .unwrap();
+    let task_id = store
+        .record_task_start(succeeded, "build", Some("hash1"), None, None, None)
+        .unwrap();
+    store.record_task_complete(task_id, 0, TaskStatus::Completed).unwrap();
+
+    let failed = store
+        .record_run_start(&RunMetadata::minimal(
+            Some(ottofile.clone()),
+            "inflight".to_string(),
+            1700000100,
+        ))
+        .unwrap();
+    store
+        .record_run_complete(failed, RunStatus::Failed, Some(1024))
+        .unwrap();
+    let task_id = store
+        .record_task_start(failed, "build", Some("hash1"), None, None, None)
+        .unwrap();
+    store.record_task_complete(task_id, 1, TaskStatus::Failed).unwrap();
+
+    // Eight runs left mid-flight, the shape SIGKILL leaves behind.
+    for offset in 0..8 {
+        let run_id = store
+            .record_run_start(&RunMetadata::minimal(
+                Some(ottofile.clone()),
+                "inflight".to_string(),
+                1700000200 + offset,
+            ))
+            .unwrap();
+        store
+            .record_task_start(run_id, "build", Some("hash1"), None, None, None)
+            .unwrap();
+    }
+
+    Arc::new(store)
+}
+
+#[test]
+fn overall_success_rate_ignores_running_runs() {
+    let store = create_store_with_running_runs();
+    let stats = store.get_overall_stats().unwrap();
+
+    assert_eq!(stats.total_runs, 10);
+    assert_eq!(stats.running_runs, 8);
+
+    let rendered = render_overall_table(&stats).to_string();
+    assert!(
+        rendered.contains("1 (50.0%)"),
+        "overall table must divide by terminal runs, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("10.0%"),
+        "overall table must not divide by total runs, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Running"),
+        "the in-flight population stays visible, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn per_task_table_shares_the_overall_denominator() {
+    let store = create_store_with_running_runs();
+    let overall = render_overall_table(&store.get_overall_stats().unwrap()).to_string();
+    let per_task = render_task_stats_table(&store.get_all_task_stats(Some(10)).unwrap()).to_string();
+
+    assert!(
+        per_task.contains("50.0%"),
+        "per-task table must render 50.0% for 1 success and 1 failure, got:\n{per_task}"
+    );
+    assert!(
+        overall.contains("50.0%") && per_task.contains("50.0%"),
+        "both tables render the same rate off the same rows:\noverall:\n{overall}\nper task:\n{per_task}"
+    );
+}
+
+#[test]
+fn test_format_success_rate() {
+    assert_eq!(format_success_rate(1, 1), "50.0%");
+    assert_eq!(format_success_rate(3, 0), "100.0%");
+    assert_eq!(format_success_rate(0, 2), "0.0%");
+}
+
+#[test]
+fn format_success_rate_with_nothing_terminal_is_not_zero_percent() {
+    assert_eq!(format_success_rate(0, 0), "n/a");
+}
