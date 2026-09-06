@@ -18,7 +18,7 @@ otto Stats [OPTIONS] [TASK]
 $ otto Stats --help
 Show execution statistics
 
-Usage: Stats [OPTIONS] [TASK]
+Usage: otto Stats [OPTIONS] [TASK]
 
 Arguments:
   [TASK]  Show stats for a specific task
@@ -29,7 +29,7 @@ Options:
   -h, --help           Print help
 ```
 
-There is no dedicated task-selection flag: the task name is a bare positional argument. `-n/--limit` only affects the "Top N Tasks" table below overall stats — it does not limit the run count `otto History` uses `-n` for.
+There is no dedicated task-selection flag: the task name is a bare positional argument. `-n/--limit` caps the per-task rows under overall stats, in both the "Top N Tasks" table and the `tasks` array of `--json`. It does not limit the run count `otto History` uses `-n` for.
 
 ## Examples
 
@@ -60,7 +60,7 @@ Overall Statistics
 ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
 │ Total Tasks Executed ┆         2 │
 ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
-│ Total Disk Usage     ┆   20.7 KB │
+│ Total Disk Usage     ┆   20.9 KB │
 ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
 │ Total Execution Time ┆       0ms │
 ╰──────────────────────┴───────────╯
@@ -75,7 +75,11 @@ Top 10 Tasks by Execution Count
 ╰─────────┴───────┴───────┴─────────┴────────┴──────────────┴──────────────╯
 ```
 
-There is no "Average Run Duration" row — "Total Execution Time" is the last row of the first table, and it is a sum, not a mean. The Top-N table is only printed when there is at least one task stats row; `-n`/`--limit` caps how many rows it shows (10 by default), heading text included ("Top 10 Tasks by Execution Count").
+`Total Disk Usage` (`total_disk_usage` in JSON) sums the size each run recorded when it finished, and that size counts only what the run directory itself holds. Symlinks are neither followed nor counted, so a link into the project's shared `.cache/` charges the cached blob to nobody rather than to every run that referenced it. The number is therefore smaller than earlier versions of otto reported, where the recorded size followed symlinks and the same blob was counted once per referencing run. `otto Clean` sizes run directories through the same function, so the two numbers agree.
+
+Every Success Rate on this page is the share of runs that reached a terminal state: `successful / (successful + failed)`. Runs still `Running` are counted in `Total Runs` and in the `Running` row, but never in the denominator, because they can never reach the numerator. When nothing has reached a terminal state the rate reads `n/a`, not `0.0%`.
+
+There is no "Average Run Duration" row: "Total Execution Time" is the last row of the first table, and it is a sum, not a mean. The Top-N table is only printed when there is at least one task stats row; `-n`/`--limit` caps how many rows it shows (10 by default), heading text included ("Top 10 Tasks by Execution Count").
 
 ### Task-specific statistics
 
@@ -102,13 +106,13 @@ Statistics for task 'hello'
 ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
 │ Max Duration     ┆                 0ms │
 ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
-│ Last Executed    ┆ 2026-09-03 05:23:53 │
+│ Last Executed    ┆ 2026-09-06 07:15:45 │
 ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
 │ Last Status      ┆         ✓ Completed │
 ╰──────────────────┴─────────────────────╯
 ```
 
-A task that has run under more than one project instead gets a per-project table: columns `Project, Total, Success, Failed, Success Rate, Avg Duration` — no `--limit` applies here.
+A task that has run under more than one project instead gets a per-project table: columns `Project, Total, Success, Failed, Success Rate, Avg Duration`, with `Success Rate` again over the executions that reached a terminal state. No `--limit` applies here.
 
 ## JSON Output Schema
 
@@ -121,12 +125,44 @@ A task that has run under more than one project instead gets a per-project table
   "failed_runs": 1,
   "running_runs": 0,
   "total_tasks": 2,
-  "total_disk_usage": 21162,
-  "total_duration_seconds": 0.0
+  "total_disk_usage": 21443,
+  "total_duration_seconds": 0.0,
+  "tasks": [
+    {
+      "project_id": 1,
+      "project_hash": "a208048f",
+      "project_name": "proj",
+      "task_name": "fail",
+      "total_executions": 1,
+      "successful_executions": 0,
+      "failed_executions": 1,
+      "skipped_executions": 0,
+      "avg_duration_seconds": 0.0,
+      "min_duration_seconds": 0.0,
+      "max_duration_seconds": 0.0,
+      "last_executed": 1788704145,
+      "last_status": "Failed"
+    },
+    {
+      "project_id": 1,
+      "project_hash": "a208048f",
+      "project_name": "proj",
+      "task_name": "hello",
+      "total_executions": 1,
+      "successful_executions": 1,
+      "failed_executions": 0,
+      "skipped_executions": 0,
+      "avg_duration_seconds": 0.0,
+      "min_duration_seconds": 0.0,
+      "max_duration_seconds": 0.0,
+      "last_executed": 1788704145,
+      "last_status": "Completed"
+    }
+  ]
 }
 ```
 
-There are no `successful_executions`/`failed_executions`/`skipped_executions` keys here — those only exist in the per-task array below.
+`tasks` holds the same rows the "Top N Tasks" table prints, so `-n`/`--limit` caps its length too. The seven aggregate keys stay at the top level, which is why `jq '.total_runs'` still resolves; the per-task `successful_executions`/`failed_executions`/`skipped_executions` keys appear only inside `tasks[]`, never beside the aggregates.
 
 ### Task stats (`otto Stats <task> --json`)
 
@@ -136,7 +172,7 @@ This is always a JSON **array**, one entry per project the task has run under, e
 [
   {
     "project_id": 1,
-    "project_hash": "94a760b8",
+    "project_hash": "a208048f",
     "project_name": "proj",
     "task_name": "hello",
     "total_executions": 1,
@@ -146,18 +182,18 @@ This is always a JSON **array**, one entry per project the task has run under, e
     "avg_duration_seconds": 0.0,
     "min_duration_seconds": 0.0,
     "max_duration_seconds": 0.0,
-    "last_executed": 1788438233,
+    "last_executed": 1788704145,
     "last_status": "Completed"
   }
 ]
 ```
 
-`last_status` uses the task-status vocabulary (`Pending`/`Running`/`Completed`/`Failed`/`Skipped`), not the run-status one.
+`last_status` uses the task-status vocabulary (`Pending`/`Running`/`Completed`/`Failed`/`Skipped`), not the run-status one. Entries under the overall payload's `tasks` key have this same shape.
 
 ## Notes
 
-- **Database requirement**: same as `History` — needs `$OTTO_HOME/otto.db`. Missing database prints `No statistics database found. Run otto to create it.` to stderr and exits 0.
-- **`-n`/`--limit` scope**: it caps the Top-N table under the overall-stats view only; it has no effect on `otto Stats <task>`.
+- **Database requirement**: same as `History`, it needs `$OTTO_HOME/otto.db`. Missing database prints `No statistics database found. Run otto to create it.` to stderr and exits 0.
+- **`-n`/`--limit` scope**: it caps the per-task rows under the overall-stats view, in the Top-N table and in `--json`'s `tasks` array; it has no effect on `otto Stats <task>`.
 
 ## Related Commands
 

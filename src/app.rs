@@ -309,6 +309,9 @@ pub struct RuntimeConfig {
     /// See docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md Phase 8.
     pub no_prefix: bool,
     pub retention: RetentionSpec,
+    /// The task and subtask names literally requested, for the run record.
+    /// See `RunPlan::requested_tasks` and `ExecutionContext::record_requested`.
+    pub requested_tasks: Vec<String>,
 }
 
 /// What `main` should do once the command line has been parsed.
@@ -336,6 +339,7 @@ impl RuntimeConfig {
             tui_mode: plan.tui_mode,
             no_prefix: plan.no_prefix,
             retention,
+            requested_tasks: plan.requested_tasks,
         })))
     }
 }
@@ -352,6 +356,7 @@ pub async fn run(config: RuntimeConfig) -> Result<()> {
         config.tui_mode,
         config.no_prefix,
         config.retention,
+        config.requested_tasks,
     )
     .await
 }
@@ -366,6 +371,7 @@ pub async fn execute_tasks(
     tui_mode: bool,
     no_prefix: bool,
     retention: RetentionSpec,
+    requested_tasks: Vec<String>,
 ) -> Result<(), Report> {
     if tui_mode {
         // Checked before the TTY fallback and before any task runs: the TUI owns
@@ -383,19 +389,29 @@ pub async fn execute_tasks(
 
         if !std::io::stdout().is_terminal() {
             eprintln!("Warning: --tui requires a TTY, falling back to standard output");
-            return execute_with_terminal_output(tasks, hash, ottofile_path, jobs, no_prefix, retention).await;
+            return execute_with_terminal_output(
+                tasks,
+                hash,
+                ottofile_path,
+                jobs,
+                no_prefix,
+                retention,
+                requested_tasks,
+            )
+            .await;
         }
 
         // TUI mode already suppresses all terminal output (suppress_terminal
         // is derived from tui_mode in the scheduler), so no_prefix has nothing
         // to act on here: no prefix is ever printed to a terminal the TUI owns.
-        execute_with_tui(tasks, hash, ottofile_path, jobs, retention).await
+        execute_with_tui(tasks, hash, ottofile_path, jobs, retention, requested_tasks).await
     } else {
-        execute_with_terminal_output(tasks, hash, ottofile_path, jobs, no_prefix, retention).await
+        execute_with_terminal_output(tasks, hash, ottofile_path, jobs, no_prefix, retention, requested_tasks).await
     }
 }
 
 /// Execute tasks with terminal output (non-TUI mode).
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_with_terminal_output(
     tasks: Vec<Task>,
     hash: String,
@@ -403,6 +419,7 @@ pub async fn execute_with_terminal_output(
     jobs: usize,
     no_prefix: bool,
     retention: RetentionSpec,
+    requested_tasks: Vec<String>,
 ) -> Result<(), Report> {
     if tasks.is_empty() {
         println!("No tasks to execute");
@@ -422,6 +439,7 @@ pub async fn execute_with_terminal_output(
     let mut execution_context = crate::executor::workspace::ExecutionContext::new();
     execution_context.ottofile = ottofile_path;
     execution_context.hash = hash;
+    execution_context.record_requested(&requested_tasks);
 
     // Save execution context to run directory
     workspace.save_execution_context(execution_context.clone()).await?;
@@ -549,12 +567,14 @@ fn install_stop_handler(
 }
 
 /// Execute tasks with TUI mode.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_with_tui(
     tasks: Vec<Task>,
     hash: String,
     ottofile_path: Option<PathBuf>,
     jobs: usize,
     retention: RetentionSpec,
+    requested_tasks: Vec<String>,
 ) -> Result<(), Report> {
     use crate::tui::{TaskPane, TuiApp};
 
@@ -578,6 +598,7 @@ pub async fn execute_with_tui(
     let mut execution_context = crate::executor::workspace::ExecutionContext::new();
     execution_context.ottofile = ottofile_path;
     execution_context.hash = hash;
+    execution_context.record_requested(&requested_tasks);
 
     // Save execution context to run directory
     workspace.save_execution_context(execution_context.clone()).await?;
@@ -743,9 +764,11 @@ pub async fn execute_clean_from_task(task: &Task) -> Result<(), Report> {
         dry_run: params.dry_run,
         project_filter: params.project_filter,
         no_db: params.no_db,
-        // Not a CLI flag: `#[arg(skip)]` on the field, so it has no meta param
-        // either. Only auto-prune sets it.
+        // Neither of these is a CLI flag: `#[arg(skip)]` on both fields, so
+        // neither has a meta param either. Only auto-prune sets them, and a
+        // user-driven `otto Clean` cleans `$OTTO_HOME`.
         quiet: false,
+        otto_home: None,
     };
     clean_cmd.execute().await?;
 

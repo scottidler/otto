@@ -203,6 +203,67 @@ tasks:
     assert_eq!(json["orphan"]["subtasks"].as_array().unwrap().len(), 0);
 }
 
+/// (F7 / Phase 6) `--format` with no `--tasks` has nothing to format and must
+/// be a usage error, not a silent run of the ottofile's default tasks.
+/// `96951d5` exited 0 and ran `up`'s body; the sentinel proves that no
+/// longer happens.
+#[test]
+fn format_without_tasks_is_a_usage_error_and_runs_nothing() {
+    let temp = TempDir::new().unwrap();
+    let ottofile = write_ottofile(temp.path(), FIXTURE);
+    let sentinel = temp.path().join("sentinel");
+
+    let output = common::otto_cmd(temp.path())
+        .arg("--format")
+        .arg("yaml")
+        .arg("-o")
+        .arg(&ottofile)
+        .env("OTTO_SENTINEL", &sentinel)
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "otto --format yaml with no --tasks must exit non-zero, got: {:?}",
+        output.status
+    );
+    assert!(
+        !sentinel.exists(),
+        "otto --format yaml with no --tasks must not run any task"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--tasks") || stderr.contains("tasks"),
+        "usage error should name --tasks, got: {stderr}"
+    );
+}
+
+/// The paired form stays exactly as it was: `--tasks --format yaml` still
+/// exits 0 and still runs no task.
+#[test]
+fn tasks_and_format_together_is_unchanged() {
+    let temp = TempDir::new().unwrap();
+    let ottofile = write_ottofile(temp.path(), FIXTURE);
+    let sentinel = temp.path().join("sentinel");
+
+    let output = common::otto_cmd(temp.path())
+        .arg("--tasks")
+        .arg("--format")
+        .arg("yaml")
+        .arg("-o")
+        .arg(&ottofile)
+        .env("OTTO_SENTINEL", &sentinel)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!sentinel.exists(), "--tasks --format yaml must not run any task");
+}
+
 /// TTY-branch verification: under a real pty, `--tasks` with no `--format`
 /// override defaults to YAML, not JSON. Runs `otto` under `script -qec` so
 /// stdout is genuinely a tty from the process's point of view.

@@ -128,14 +128,19 @@ fn delete_run_removes_the_recorded_run_directory() -> Result<()> {
     Ok(())
 }
 
-/// Rows written before schema v5 carry no run directory, so the path is
-/// derived - from `OTTO_HOME` and the project's own name, not from `$HOME`
-/// and a hardcoded `otto-` prefix. The derivation can only work when the
-/// recorded project hash is also the one in the directory name, which is
-/// what this fixture arranges.
+/// Rows that carry no run directory get no derived one.
+///
+/// This test used to assert the opposite, and the fixture it needed says why
+/// the derivation had to go: it only worked when the recorded project hash
+/// happened to be the one in the directory name, and those are two different
+/// hashes (the ottofile's contents against the project's path). It also could
+/// not name a `<timestamp>-<seq>` directory or survive a moved ottofile. A guess
+/// that misses deletes the row and orphans the directory with nothing left
+/// pointing at it, so no guess is made: the row goes, and `Clean`'s orphan sweep
+/// reclaims the directory by path.
 #[test]
 #[serial]
-fn delete_run_derives_the_directory_for_a_pre_v5_row() -> Result<()> {
+fn delete_run_does_not_guess_a_directory_for_a_pre_v5_row() -> Result<()> {
     let (manager, temp_dir) = create_test_manager()?;
 
     let otto_home = temp_dir.path().join("otto-home");
@@ -153,9 +158,13 @@ fn delete_run_derives_the_directory_for_a_pre_v5_row() -> Result<()> {
         .db
         .with_connection(|conn| Ok(conn.execute("UPDATE runs SET run_dir = NULL", [])?))?;
 
-    with_otto_home(&otto_home, || manager.delete_run(run_id, true))?;
+    let deleted = with_otto_home(&otto_home, || manager.delete_run(run_id, true))?;
 
-    assert!(!run_dir.exists(), "the derived path finds the real directory");
+    assert!(deleted.is_some(), "the row is deleted");
+    assert!(
+        run_dir.exists(),
+        "and the directory is left for the sweep rather than guessed at"
+    );
     Ok(())
 }
 

@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::executor::state::RunStatus;
-use crate::ports::MemoryStateStore;
+use crate::executor::workspace::{ExecutionContext, Workspace};
+use crate::ports::{MemoryStateStore, RealFs};
 use std::fs;
 use tempfile::TempDir;
 
@@ -33,6 +34,7 @@ async fn test_scan_empty_directory() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: false,
+        otto_home: None,
     };
 
     let runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
@@ -63,6 +65,7 @@ async fn clean_never_deletes_through_a_symlinked_project_directory() -> Result<(
         project_filter: None,
         no_db: true,
         quiet: true,
+        otto_home: None,
     };
 
     cmd.execute_with_filesystem(&otto_home).await?;
@@ -101,6 +104,7 @@ async fn clean_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: true,
+        otto_home: None,
     };
 
     cmd.execute_with_filesystem(&otto_home).await?;
@@ -128,6 +132,7 @@ async fn test_scan_with_old_runs() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: false,
+        otto_home: None,
     };
     // The scan reports every run; retention decides which ones expire, so
     // `--keep-last` can see the recent runs it is supposed to protect.
@@ -141,16 +146,104 @@ async fn test_scan_with_old_runs() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_calculate_dir_size() -> Result<()> {
+async fn test_directory_size_of_a_run() -> Result<()> {
     let temp_dir = TempDir::new()?;
     create_test_run(temp_dir.path(), "testhash", 1234567890, 100)?;
 
     let run_dir = temp_dir.path().join("widget-testhash").join("1234567890");
-    let size = CleanCommand::calculate_dir_size(&run_dir)?;
+    let size = directory_size(&run_dir)?;
 
     // Should be approximately 100KB (may vary slightly due to filesystem overhead)
     assert!(size >= 100 * 1024);
     assert!(size < 110 * 1024);
+    Ok(())
+}
+
+/// AC8: the `Clean` caller and the `Workspace` caller report the **same** size
+/// for the same run directory, and that size excludes the 1 MB file a symlink
+/// inside the run points at.
+///
+/// This drives both production callers, not the shared function twice: `Clean`
+/// through `scan_runs`, `Workspace` through the size it records at run
+/// completion. They used to carry separate implementations that disagreed on
+/// symlinks, so the same directory had two sizes depending on who asked.
+#[tokio::test]
+#[serial_test::serial]
+async fn both_callers_report_one_size_that_excludes_a_symlink_target() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let otto_home = temp_dir.path().join("otto-home");
+    let outside = temp_dir.path().join("outside");
+    fs::create_dir_all(&outside)?;
+    fs::write(outside.join("blob"), vec![0u8; 1024 * 1024])?;
+
+    unsafe {
+        std::env::set_var("OTTO_HOME", &otto_home);
+    }
+
+    let store = Arc::new(MemoryStateStore::new()) as Arc<dyn StateStore>;
+    let workspace = Workspace::new_with_hash_and_fs(
+        temp_dir.path().join("widget"),
+        "widget".to_string(),
+        "abc12345".to_string(),
+        Arc::new(RealFs),
+    )
+    .await?
+    .with_state_store(Arc::clone(&store));
+    workspace.init().await?;
+
+    // Everything the run owns is in place before either caller measures, so a
+    // difference between them can only come from how they measure.
+    workspace.save_execution_context(ExecutionContext::new()).await?;
+    fs::write(workspace.run().join("tasks").join("stdout.log"), vec![0u8; 100 * 1024])?;
+    // Two links to the same 1 MB byte: one straight at the file, and one at the
+    // directory holding it, which is the shape a run's `.cache` link actually
+    // has. A size function that follows either one charges the shared blob to
+    // this run.
+    std::os::unix::fs::symlink(outside.join("blob"), workspace.run().join("blob"))?;
+    std::os::unix::fs::symlink(&outside, workspace.run().join("cache"))?;
+
+    workspace.record_run_complete_in_db(true).await;
+    let rows = store.get_runs_with_filters(None, None, 10)?;
+    assert_eq!(rows.len(), 1, "the run was recorded once");
+    let workspace_size = rows[0].size_bytes.expect("run completion records a size");
+
+    // The run is over, so it lets go of its directory. Dropping the workspace
+    // is what a finished otto process does, and the scan below skips any
+    // directory whose run lock is still held.
+    let run_dir = workspace.run().clone();
+    drop(workspace);
+
+    let cmd = CleanCommand {
+        keep_days: 30,
+        keep_last: None,
+        keep_failed: None,
+        dry_run: true,
+        project_filter: None,
+        no_db: true,
+        quiet: true,
+        otto_home: None,
+    };
+    let runs = cmd.scan_runs(&otto_home, now_timestamp())?;
+    unsafe {
+        std::env::remove_var("OTTO_HOME");
+    }
+    let scanned = runs
+        .iter()
+        .find(|r| r.path == run_dir)
+        .expect("Clean's scan finds the run directory");
+
+    assert_eq!(
+        scanned.size_bytes, workspace_size,
+        "one implementation, so one number for one directory"
+    );
+    assert!(
+        workspace_size >= 100 * 1024,
+        "the run's own 100 KB is counted: {workspace_size}"
+    );
+    assert!(
+        workspace_size < 1024 * 1024,
+        "the 1 MB symlink target is not counted: {workspace_size}"
+    );
     Ok(())
 }
 
@@ -171,6 +264,7 @@ async fn test_project_filter() -> Result<()> {
         project_filter: Some("abc12345".to_string()),
         no_db: true,
         quiet: false,
+        otto_home: None,
     };
     let runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
 
@@ -202,6 +296,7 @@ async fn test_read_ottofile_path_with_metadata() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: false,
+        otto_home: None,
     };
     let ottofile_path = cmd.read_ottofile_path(&run_dir);
 
@@ -223,6 +318,7 @@ async fn test_read_ottofile_path_missing_file() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: false,
+        otto_home: None,
     };
     let ottofile_path = cmd.read_ottofile_path(&run_dir);
 
@@ -248,6 +344,7 @@ async fn test_read_ottofile_path_no_ottofile_field() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: false,
+        otto_home: None,
     };
     let ottofile_path = cmd.read_ottofile_path(&run_dir);
 
@@ -271,6 +368,7 @@ async fn test_read_ottofile_path_malformed_yaml() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: false,
+        otto_home: None,
     };
     let ottofile_path = cmd.read_ottofile_path(&run_dir);
 
@@ -299,6 +397,7 @@ async fn test_runs_sorted_by_timestamp() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: false,
+        otto_home: None,
     };
     let mut runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
 
@@ -344,6 +443,7 @@ async fn test_scan_with_ottofile_metadata() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: false,
+        otto_home: None,
     };
     let runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
 
@@ -371,6 +471,7 @@ async fn test_scan_without_ottofile_metadata() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: false,
+        otto_home: None,
     };
     let runs = cmd.scan_runs(temp_dir.path(), now_timestamp())?;
 
@@ -407,6 +508,7 @@ async fn keep_last_in_filesystem_mode_keeps_the_newest_runs() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: true,
+        otto_home: None,
     };
     cmd.execute_with_filesystem(&otto_home).await?;
 
@@ -448,6 +550,7 @@ async fn keep_last_larger_than_the_run_count_deletes_nothing() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: true,
+        otto_home: None,
     };
     cmd.execute_with_filesystem(&otto_home).await?;
 
@@ -477,6 +580,7 @@ async fn filesystem_scan_finds_projects_not_named_otto() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: true,
+        otto_home: None,
     };
     let runs = cmd.scan_runs(temp_dir.path(), now)?;
 
@@ -505,6 +609,7 @@ async fn filesystem_project_filter_matches_the_hash_exactly() -> Result<()> {
         project_filter: Some("abc1234".to_string()),
         no_db: true,
         quiet: true,
+        otto_home: None,
     };
     let runs = cmd.scan_runs(temp_dir.path(), now)?;
 
@@ -576,6 +681,7 @@ fn create_store_with_runs() -> Arc<MemoryStateStore> {
 
 #[tokio::test]
 async fn test_execute_with_database_empty_store() -> Result<()> {
+    let home = TempDir::new()?;
     let store = Arc::new(MemoryStateStore::new());
     let cmd = CleanCommand {
         keep_days: 30,
@@ -585,6 +691,7 @@ async fn test_execute_with_database_empty_store() -> Result<()> {
         project_filter: None,
         no_db: false,
         quiet: false,
+        otto_home: Some(home.path().to_path_buf()),
     };
 
     let result = cmd.execute_with_store(Some(store)).await;
@@ -594,6 +701,9 @@ async fn test_execute_with_database_empty_store() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_with_database_dry_run() -> Result<()> {
+    // An empty home of this test's own: the sweep walks whatever tree it is
+    // given, and the default is the developer's real `~/.otto`.
+    let home = TempDir::new()?;
     let store = create_store_with_runs();
 
     // Verify initial state
@@ -608,6 +718,7 @@ async fn test_execute_with_database_dry_run() -> Result<()> {
         project_filter: None,
         no_db: false,
         quiet: false,
+        otto_home: Some(home.path().to_path_buf()),
     };
 
     let result = cmd.execute_with_store(Some(store.clone())).await;
@@ -621,6 +732,9 @@ async fn test_execute_with_database_dry_run() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_with_database_actual_delete() -> Result<()> {
+    // An empty home of this test's own: the sweep walks whatever tree it is
+    // given, and the default is the developer's real `~/.otto`.
+    let home = TempDir::new()?;
     let store = create_store_with_runs();
 
     // Verify initial state
@@ -635,6 +749,7 @@ async fn test_execute_with_database_actual_delete() -> Result<()> {
         project_filter: None,
         no_db: false,
         quiet: false,
+        otto_home: Some(home.path().to_path_buf()),
     };
 
     let result = cmd.execute_with_store(Some(store.clone())).await;
@@ -648,6 +763,9 @@ async fn test_execute_with_database_actual_delete() -> Result<()> {
 
 #[tokio::test]
 async fn test_execute_with_database_project_filter() -> Result<()> {
+    // An empty home of this test's own: the sweep walks whatever tree it is
+    // given, and the default is the developer's real `~/.otto`.
+    let home = TempDir::new()?;
     let store = create_store_with_runs();
 
     let cmd = CleanCommand {
@@ -658,6 +776,7 @@ async fn test_execute_with_database_project_filter() -> Result<()> {
         project_filter: Some("abc12345".to_string()),
         no_db: false,
         quiet: false,
+        otto_home: Some(home.path().to_path_buf()),
     };
 
     let result = cmd.execute_with_store(Some(store.clone())).await;
@@ -670,31 +789,118 @@ async fn test_execute_with_database_project_filter() -> Result<()> {
     Ok(())
 }
 
+/// `--keep-last` keeps the N newest **run directories**, and a row with no
+/// directory has none to keep.
+///
+/// This test used to assert the opposite - four directoryless rows, `--keep-last
+/// 2`, two survivors - and that is the behaviour the sweep had to give up.
+/// `--keep-last` is applied once, over the directories, because applying it to
+/// the rows as well keeps N of each population, up to 2N, where `--no-db` keeps
+/// N in total. Directoryless rows are still deleted by `--keep-days` and
+/// `--keep-failed`, which is what stops the 388 of them on the author's machine
+/// from growing without bound.
 #[tokio::test]
-async fn test_execute_with_database_keep_last() -> Result<()> {
+async fn keep_last_does_not_hold_back_rows_with_no_run_directory() -> Result<()> {
+    // An empty home of this test's own: the sweep walks whatever tree it is
+    // given, and the default is the developer's real `~/.otto`.
+    let home = TempDir::new()?;
     let store = create_store_with_runs();
 
     let cmd = CleanCommand {
-        keep_days: 0, // Would delete everything
+        keep_days: 0,
         keep_last: Some(2),
         keep_failed: None,
         dry_run: false,
         project_filter: None,
         no_db: false,
         quiet: false,
+        otto_home: Some(home.path().to_path_buf()),
     };
 
-    let result = cmd.execute_with_store(Some(store.clone())).await;
-    assert!(result.is_ok());
+    cmd.execute_with_store(Some(store.clone())).await?;
 
-    // Should keep the 2 most recent runs
     let final_runs = store.get_runs_with_filters(None, None, 100)?;
-    assert_eq!(final_runs.len(), 2);
+    assert!(
+        final_runs.is_empty(),
+        "every row named no directory, so nothing was in the population --keep-last keeps from: {} left",
+        final_runs.len()
+    );
+    Ok(())
+}
+
+/// The other half of the rule above: `--keep-last` does hold back the newest
+/// directories, and it counts them once across both populations.
+///
+/// Four run directories past the cutoff, two of them named by rows and two not,
+/// with `--keep-last 2`. A `--keep-last` applied per population would keep two
+/// of each and delete two; applied once over the union it keeps the two newest
+/// overall - one row-backed and one orphan - and deletes the other two.
+#[tokio::test]
+async fn keep_last_counts_rows_and_orphaned_directories_as_one_population() -> Result<()> {
+    let home = TempDir::new()?;
+    let now = now_timestamp();
+    let store = MemoryStateStore::new();
+
+    // Newest first: orphan, row, orphan, row.
+    let timestamps: Vec<u64> = (1..=4).map(|days| now - (days * 86400)).collect();
+    for (position, &timestamp) in timestamps.iter().enumerate() {
+        create_test_run(home.path(), "abc12345", timestamp, 1)?;
+        if position % 2 == 1 {
+            let metadata =
+                RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc12345".to_string(), timestamp)
+                    .with_run_dir(
+                        home.path()
+                            .join(crate::executor::layout::project_dir_name("widget", "abc12345"))
+                            .join(timestamp.to_string()),
+                    );
+            let id = store.record_run_start(&metadata)?;
+            store.record_run_complete(id, RunStatus::Success, Some(1024))?;
+        }
+    }
+
+    let cmd = CleanCommand {
+        keep_days: 0,
+        keep_last: Some(2),
+        keep_failed: None,
+        dry_run: false,
+        project_filter: None,
+        no_db: false,
+        quiet: false,
+        otto_home: Some(home.path().to_path_buf()),
+    };
+    let store: Arc<dyn StateStore> = Arc::new(store);
+    cmd.execute_with_store(Some(store.clone())).await?;
+
+    let surviving: Vec<u64> = store
+        .get_runs_with_filters(None, None, 100)?
+        .iter()
+        .map(|run| run.timestamp)
+        .collect();
+    assert_eq!(
+        surviving,
+        vec![timestamps[1]],
+        "only the row inside the two newest directories survives"
+    );
+
+    let project = home
+        .path()
+        .join(crate::executor::layout::project_dir_name("widget", "abc12345"));
+    // `MemoryStateStore::delete_run` has no filesystem to touch, so the
+    // row-backed directories are still there; the sweep's own two are the
+    // observable part.
+    assert!(project.join(timestamps[0].to_string()).exists(), "newest orphan kept");
+    assert!(
+        !project.join(timestamps[2].to_string()).exists(),
+        "the third-newest directory is an orphan past the cutoff and outside --keep-last"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn test_execute_with_database_keep_failed_longer() -> Result<()> {
+    // An empty home of this test's own: the sweep walks whatever tree it is
+    // given, and the default is the developer's real `~/.otto`.
+    let home = TempDir::new()?;
     let store = create_store_with_runs();
 
     let cmd = CleanCommand {
@@ -705,6 +911,7 @@ async fn test_execute_with_database_keep_failed_longer() -> Result<()> {
         project_filter: None,
         no_db: false,
         quiet: false,
+        otto_home: Some(home.path().to_path_buf()),
     };
 
     let result = cmd.execute_with_store(Some(store.clone())).await;
@@ -826,6 +1033,7 @@ async fn test_execute_with_database_ignores_missing_otto_home() -> Result<()> {
         project_filter: None,
         no_db: false,
         quiet: true,
+        otto_home: None,
     };
 
     let result = cmd.execute_with_store(Some(store.clone())).await;
@@ -861,6 +1069,7 @@ async fn test_get_otto_home_honors_otto_home_env() -> Result<()> {
         project_filter: None,
         no_db: true,
         quiet: true,
+        otto_home: None,
     };
     let resolved = cmd.get_otto_home();
     unsafe {
@@ -914,6 +1123,7 @@ async fn a_db_path_clean_with_one_refused_directory_exits_non_zero() -> Result<(
         project_filter: None,
         no_db: false,
         quiet: true,
+        otto_home: None,
     };
 
     let previous = std::env::var("OTTO_HOME").ok();
@@ -990,6 +1200,9 @@ fn delete_errors_are_capped_at_a_summary_line() {
 /// `executor::pruning_tests`, not here.
 #[tokio::test]
 async fn a_run_deleted_by_someone_else_first_is_not_a_failed_delete() -> Result<()> {
+    // An empty home of this test's own: the sweep walks whatever tree it is
+    // given, and the default is the developer's real `~/.otto`.
+    let home = TempDir::new()?;
     let memory = create_store_with_runs();
     memory.lose_every_delete_race();
     let store: Arc<dyn StateStore> = memory;
@@ -1002,9 +1215,375 @@ async fn a_run_deleted_by_someone_else_first_is_not_a_failed_delete() -> Result<
         project_filter: None,
         no_db: false,
         quiet: true,
+        otto_home: Some(home.path().to_path_buf()),
     };
 
     let result = cmd.execute_with_store(Some(store)).await;
     assert!(result.is_ok(), "rows already gone must exit 0: {}", result.unwrap_err());
+    Ok(())
+}
+
+// ========================================
+// The orphan sweep: run directories the database cannot name.
+// ========================================
+
+/// `$OTTO_HOME` pinned for the length of a test, and restored on the way out.
+///
+/// Needed wherever a test reaches `StateManager::delete_run`, which resolves the
+/// home it fences against from the environment rather than taking it as an
+/// argument.
+struct PinnedOttoHome {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl PinnedOttoHome {
+    fn at(home: &Path) -> Self {
+        let previous = std::env::var_os("OTTO_HOME");
+        unsafe {
+            std::env::set_var("OTTO_HOME", home);
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for PinnedOttoHome {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(home) => std::env::set_var("OTTO_HOME", home),
+                None => std::env::remove_var("OTTO_HOME"),
+            }
+        }
+    }
+}
+
+/// A run directory with a row that records it, aged `days_old`.
+fn row_backed_run(store: &MemoryStateStore, otto_home: &Path, timestamp: u64) -> Result<PathBuf> {
+    create_test_run(otto_home, "abc12345", timestamp, 1)?;
+    let run_dir = otto_home
+        .join(crate::executor::layout::project_dir_name("widget", "abc12345"))
+        .join(timestamp.to_string());
+    let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc12345".to_string(), timestamp)
+        .with_run_dir(run_dir.clone());
+    let id = store.record_run_start(&metadata)?;
+    store.record_run_complete(id, RunStatus::Success, Some(1024))?;
+    Ok(run_dir)
+}
+
+/// AC1, at the level a unit test can reach: the two modes select the same set
+/// of run directories.
+///
+/// The fixture is the shape the criterion exists for - one run the database
+/// knows about, one it does not, both past retention - and the selections are
+/// compared as sets of directories rather than as counts, because a row that
+/// records no directory contributes a row deletion with no directory analogue.
+#[tokio::test]
+async fn both_modes_select_the_same_set_of_run_directories() -> Result<()> {
+    let home = TempDir::new()?;
+    let now = now_timestamp();
+    let store = MemoryStateStore::new();
+
+    let row_backed = row_backed_run(&store, home.path(), now - (40 * 86400))?;
+    // Nothing records this one: the shape of all 1993 orphans on the author's
+    // machine, and invisible to the default path before the sweep.
+    create_test_run(home.path(), "abc12345", now - (45 * 86400), 1)?;
+    let orphan = home
+        .path()
+        .join(crate::executor::layout::project_dir_name("widget", "abc12345"))
+        .join((now - (45 * 86400)).to_string());
+    // Recent, so retention keeps it in both modes.
+    create_test_run(home.path(), "abc12345", now - 3600, 1)?;
+
+    let store: Arc<dyn StateStore> = Arc::new(store);
+    let selected = |no_db: bool| CleanCommand {
+        keep_days: 30,
+        keep_last: None,
+        keep_failed: None,
+        dry_run: true,
+        project_filter: None,
+        no_db,
+        quiet: false,
+        otto_home: Some(home.path().to_path_buf()),
+    };
+
+    let database_mode = selected(false).select_for_test(Some(Arc::clone(&store)), now)?;
+    let filesystem_mode = selected(true).select_for_test(None, now)?;
+
+    let mut expected = vec![row_backed.display().to_string(), orphan.display().to_string()];
+    expected.sort();
+    assert_eq!(database_mode, expected, "the database path must see both directories");
+    assert_eq!(filesystem_mode, expected, "so must the filesystem path");
+    assert_eq!(database_mode, filesystem_mode);
+    Ok(())
+}
+
+/// A row that records no run directory: the row goes, and the directory it left
+/// behind is reclaimed by path rather than guessed at.
+///
+/// The guess that used to be made here rebuilt `<name>-<hash>/<timestamp>` from
+/// the project's *content* hash, which is not the hash the directory name
+/// carries, so it missed, deleted the row, and left the directory with nothing
+/// pointing at it. 388 rows on the author's machine were armed this way.
+#[tokio::test]
+async fn a_row_with_no_run_directory_leaves_no_orphan_behind() -> Result<()> {
+    let home = TempDir::new()?;
+    let now = now_timestamp();
+    let timestamp = now - (40 * 86400);
+
+    let store = MemoryStateStore::new();
+    create_test_run(home.path(), "abc12345", timestamp, 1)?;
+    let orphaned = home
+        .path()
+        .join(crate::executor::layout::project_dir_name("widget", "abc12345"))
+        .join(timestamp.to_string());
+    // `minimal` records no run directory, exactly like a pre-v5 row.
+    let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc12345".to_string(), timestamp);
+    let id = store.record_run_start(&metadata)?;
+    store.record_run_complete(id, RunStatus::Success, Some(1024))?;
+
+    let store: Arc<dyn StateStore> = Arc::new(store);
+    let cmd = CleanCommand {
+        keep_days: 30,
+        keep_last: None,
+        keep_failed: None,
+        dry_run: false,
+        project_filter: None,
+        no_db: false,
+        quiet: true,
+        otto_home: Some(home.path().to_path_buf()),
+    };
+    cmd.execute_with_store(Some(Arc::clone(&store))).await?;
+
+    assert!(
+        store.get_runs_with_filters(None, None, 100)?.is_empty(),
+        "the row is deleted rather than resolved to a guessed path"
+    );
+    assert!(
+        !orphaned.exists(),
+        "and the directory it never named is reclaimed by path"
+    );
+    Ok(())
+}
+
+/// The regression the phase exists for: one row-backed run and one
+/// directory-only run, both past retention, both removed by the default path.
+///
+/// `OTTO_HOME` is pinned as well as passed, because the two deletions are fenced
+/// from different places: the sweep against the home this command was given, and
+/// the row pass against the one `StateManager` resolves for itself. In
+/// production they are the same directory.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_default_path_removes_both_a_row_backed_run_and_a_directory_only_run() -> Result<()> {
+    let home = TempDir::new()?;
+    let _pinned = PinnedOttoHome::at(home.path());
+    let now = now_timestamp();
+    let db_path = home.path().join("otto.db");
+    let manager = StateManager::with_db_path(db_path)?;
+
+    let row_backed = row_backed_run_in_manager(&manager, home.path(), now - (40 * 86400))?;
+    create_test_run(home.path(), "abc12345", now - (45 * 86400), 1)?;
+    let directory_only = home
+        .path()
+        .join(crate::executor::layout::project_dir_name("widget", "abc12345"))
+        .join((now - (45 * 86400)).to_string());
+
+    let cmd = CleanCommand {
+        keep_days: 30,
+        keep_last: None,
+        keep_failed: None,
+        dry_run: false,
+        project_filter: None,
+        no_db: false,
+        quiet: true,
+        otto_home: Some(home.path().to_path_buf()),
+    };
+    let store: Arc<dyn StateStore> = Arc::new(manager);
+    cmd.execute_with_store(Some(Arc::clone(&store))).await?;
+
+    assert!(!row_backed.exists(), "the row-backed directory is gone");
+    assert!(!directory_only.exists(), "and so is the one no row named");
+    assert!(
+        store.get_runs_with_filters(None, None, 100)?.is_empty(),
+        "the row went with its directory"
+    );
+    Ok(())
+}
+
+/// A run directory with a row, in a real `StateManager` so `delete_run` reaches
+/// the filesystem.
+fn row_backed_run_in_manager(manager: &StateManager, otto_home: &Path, timestamp: u64) -> Result<PathBuf> {
+    row_backed_run_with_status(manager, otto_home, timestamp, RunStatus::Success)
+}
+
+fn row_backed_run_with_status(
+    manager: &StateManager,
+    otto_home: &Path,
+    timestamp: u64,
+    status: RunStatus,
+) -> Result<PathBuf> {
+    create_test_run(otto_home, "abc12345", timestamp, 1)?;
+    let run_dir = otto_home
+        .join(crate::executor::layout::project_dir_name("widget", "abc12345"))
+        .join(timestamp.to_string());
+    let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc12345".to_string(), timestamp)
+        .with_run_dir(run_dir.clone());
+    let id = manager.record_run_start(&metadata)?;
+    manager.record_run_complete(id, status, Some(1024))?;
+    Ok(run_dir)
+}
+
+/// `--keep-failed` needs a status, so a directory with no row takes the longer
+/// of the two cutoffs while a row-backed run takes the one its status earns.
+///
+/// The filesystem path widens `keep_days` for everything it scans, because it
+/// has no statuses at all. Widening the whole selection here would throw away
+/// the status the database does have, and keep every successful run for the
+/// failed-run retention. This is the one place the two modes differ by design,
+/// and it is why the parity criterion is scoped to invocations without the flag.
+#[tokio::test]
+#[serial_test::serial]
+async fn keep_failed_widens_the_cutoff_only_for_directories_with_no_row() -> Result<()> {
+    let home = TempDir::new()?;
+    let _pinned = PinnedOttoHome::at(home.path());
+    let now = now_timestamp();
+    let manager = StateManager::with_db_path(home.path().join("otto.db"))?;
+
+    let succeeded = row_backed_run_with_status(&manager, home.path(), now - (40 * 86400), RunStatus::Success)?;
+    let failed = row_backed_run_with_status(&manager, home.path(), now - (41 * 86400), RunStatus::Failed)?;
+    create_test_run(home.path(), "abc12345", now - (42 * 86400), 1)?;
+    let orphan = home
+        .path()
+        .join(crate::executor::layout::project_dir_name("widget", "abc12345"))
+        .join((now - (42 * 86400)).to_string());
+
+    let cmd = CleanCommand {
+        keep_days: 30,
+        keep_last: None,
+        keep_failed: Some(60),
+        dry_run: false,
+        project_filter: None,
+        no_db: false,
+        quiet: true,
+        otto_home: Some(home.path().to_path_buf()),
+    };
+    cmd.execute_with_store(Some(Arc::new(manager) as Arc<dyn StateStore>))
+        .await?;
+
+    assert!(!succeeded.exists(), "a successful run past --keep-days goes");
+    assert!(failed.exists(), "a failed run inside --keep-failed stays");
+    assert!(
+        orphan.exists(),
+        "and a directory with no row is kept for the longer cutoff rather than deleted by a flag meant to protect it"
+    );
+    Ok(())
+}
+
+/// The sweep never deletes through a symlinked run directory, on either path.
+///
+/// The risk this phase carries is that it deletes something it should not, and a
+/// symlinked run directory is the shape that turns one deletion into somebody
+/// else's data: `remove_dir_all` through a link empties the target and leaves
+/// the link. The scan refuses the link outright, so it never reaches a
+/// selection, and `ensure_deletable_under_root` fences the delete besides.
+#[tokio::test]
+async fn the_sweep_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
+    let home = TempDir::new()?;
+    let now = now_timestamp();
+    let outside = home.path().join("outside");
+    fs::create_dir_all(&outside)?;
+    fs::write(outside.join("precious.txt"), "keep me")?;
+
+    let project = home
+        .path()
+        .join(crate::executor::layout::project_dir_name("widget", "abc12345"));
+    fs::create_dir_all(&project)?;
+    // Named like a run directory, aged well past any cutoff, and a link.
+    let link = project.join((now - (400 * 86400)).to_string());
+    std::os::unix::fs::symlink(&outside, &link)?;
+
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStateStore::new());
+    let cmd = CleanCommand {
+        keep_days: 0,
+        keep_last: None,
+        keep_failed: None,
+        dry_run: false,
+        project_filter: None,
+        no_db: false,
+        quiet: true,
+        otto_home: Some(home.path().to_path_buf()),
+    };
+    cmd.execute_with_store(Some(store)).await?;
+
+    assert!(
+        outside.join("precious.txt").exists(),
+        "the symlink target must survive a sweep at --keep-days 0"
+    );
+    assert!(link.exists(), "and the link itself is left alone");
+    Ok(())
+}
+
+/// A run that is still going holds the lock on its own directory, and neither
+/// mode selects it - not even at `--keep-days 0`, and not even in `--dry-run`,
+/// which has to select what a real invocation would delete.
+#[tokio::test]
+async fn a_directory_a_run_still_holds_is_not_selected_by_either_mode() -> Result<()> {
+    let home = TempDir::new()?;
+    let now = now_timestamp();
+    let timestamp = now - (40 * 86400);
+    create_test_run(home.path(), "abc12345", timestamp, 1)?;
+    let run_dir = home
+        .path()
+        .join(crate::executor::layout::project_dir_name("widget", "abc12345"))
+        .join(timestamp.to_string());
+
+    let live = crate::executor::runlock::hold(&run_dir)?;
+
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStateStore::new());
+    let cmd = |no_db: bool| CleanCommand {
+        keep_days: 0,
+        keep_last: None,
+        keep_failed: None,
+        dry_run: true,
+        project_filter: None,
+        no_db,
+        quiet: false,
+        otto_home: Some(home.path().to_path_buf()),
+    };
+
+    assert!(
+        cmd(false).select_for_test(Some(Arc::clone(&store)), now)?.is_empty(),
+        "the database path must not select a directory a run is using"
+    );
+    assert!(
+        cmd(true).select_for_test(None, now)?.is_empty(),
+        "and neither must the filesystem path"
+    );
+
+    // The run ends, and the same directory becomes selectable again.
+    //
+    // Retried rather than asserted once, and the reason is a property of `flock`
+    // worth knowing: the lock lives on the open file description, and a `fork`
+    // anywhere in this process duplicates the descriptor, so the release waits
+    // for that copy to close. Otto's own task children close theirs at `exec`
+    // (the descriptor is close-on-exec), but this suite runs tests in threads
+    // that spawn processes, so an unrelated test forking between `hold` and
+    // `drop` here holds the lock open for the microseconds until its child
+    // execs. Measured: a forked child that has not yet exec'd keeps the lock,
+    // and it is free the moment that child is gone.
+    drop(live);
+    let mut selected = cmd(true).select_for_test(None, now)?;
+    for _ in 0..100 {
+        if !selected.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        selected = cmd(true).select_for_test(None, now)?;
+    }
+    assert_eq!(
+        selected,
+        vec![run_dir.display().to_string()],
+        "a released lock leaves nothing unreclaimable"
+    );
     Ok(())
 }

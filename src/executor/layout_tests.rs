@@ -112,3 +112,36 @@ fn expand_tilde_leaves_non_tilde_and_other_user_paths_alone() {
         PathBuf::from("~otheruser/otto.yml")
     );
 }
+
+#[test]
+fn directory_size_sums_files_across_nested_directories() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let nested = temp.path().join("tasks").join("lint");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(temp.path().join("run.yaml"), vec![0u8; 100]).unwrap();
+    std::fs::write(nested.join("stdout.log"), vec![0u8; 900]).unwrap();
+
+    assert_eq!(directory_size(temp.path()).unwrap(), 1000);
+}
+
+#[test]
+fn directory_size_does_not_count_a_symlink_or_its_target() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let outside = temp.path().join("outside");
+    let run = temp.path().join("run");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+
+    std::fs::write(outside.join("blob"), vec![0u8; 4096]).unwrap();
+    std::fs::write(run.join("run.yaml"), vec![0u8; 100]).unwrap();
+    std::os::unix::fs::symlink(outside.join("blob"), run.join("cache")).unwrap();
+
+    // The 4096-byte target belongs to whoever owns `outside`, not to this run.
+    assert_eq!(directory_size(&run).unwrap(), 100);
+}
+
+#[test]
+fn directory_size_of_a_missing_path_is_zero() {
+    let temp = tempfile::TempDir::new().unwrap();
+    assert_eq!(directory_size(&temp.path().join("never-created")).unwrap(), 0);
+}

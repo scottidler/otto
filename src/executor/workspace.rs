@@ -1,4 +1,4 @@
-use crate::executor::layout::{expand_tilde, resolve_otto_home, run_dir_name, run_root};
+use crate::executor::layout::{directory_size, expand_tilde, resolve_otto_home, run_dir_name, run_root};
 use crate::ports::{FileSystem, RealFs, StateStore, record_blocking};
 use eyre::{Result, eyre};
 use log::warn;
@@ -24,6 +24,15 @@ pub struct ExecutionContext {
     pub timestamp: u64,
     pub hash: String,
     pub ottofile: Option<PathBuf>,
+    /// `argv[0]` followed by the task and subtask names the run was asked
+    /// for, nothing else.
+    ///
+    /// Not `std::env::args()`. Task params are ordinary command line flags
+    /// (`otto deploy --token abc`), and this field is persisted twice, into
+    /// `runs.args` in the database and into `run.yaml` on disk: recording raw
+    /// argv would turn every run directory into a credential sink. It is also
+    /// not the resolved DAG (`tasks` on `RunPlan`), which pulls in every
+    /// dependency and is not what the user asked for. See `record_requested`.
     pub args: Vec<String>,
 }
 
@@ -78,6 +87,20 @@ impl ExecutionContext {
             args: vec!["otto".to_string()],
         }
     }
+
+    /// Record `argv[0]` plus the requested task and subtask names, and
+    /// nothing else.
+    ///
+    /// `requested_tasks` is `RunPlan::requested_tasks`: what was literally
+    /// named on the command line, or the ottofile's `otto.tasks:` default
+    /// list when nothing was named. Never the resolved DAG, and never a flag
+    /// value, since a flag can carry a secret and this is persisted into both
+    /// the database and `run.yaml`.
+    pub fn record_requested(&mut self, requested_tasks: &[String]) {
+        self.args = std::iter::once(self.prog.clone())
+            .chain(requested_tasks.iter().cloned())
+            .collect();
+    }
 }
 
 /// Handles Otto's directory structure and storage paths
@@ -92,6 +115,17 @@ pub struct Workspace<F: FileSystem = RealFs> {
     project: PathBuf, // <name>-<hash>
     cache: PathBuf,   // <name>-<hash>/.cache
     run: PathBuf,     // <name>-<hash>/<timestamp>
+
+    // Liveness
+    //
+    // The advisory lock on this run's own directory, and the reason the field
+    // exists at all: `flock` releases when the last descriptor closes, which in
+    // Rust means when the `File` drops. Taken as a local inside the reservation
+    // loop below it would drop before the first task started, and the
+    // protection would be silently absent - the lock taken, nothing guarded.
+    // Held here, it lasts as long as the `Workspace`, which both entry paths
+    // keep alive through `record_run_complete_in_db`.
+    run_lock: crate::executor::runlock::RunLock,
 
     // Database integration
     db_run_id: std::sync::Mutex<Option<i64>>, // Run ID from database
@@ -176,20 +210,29 @@ impl<F: FileSystem> Workspace<F> {
         fs.create_dir_all(&project)
             .await
             .map_err(|e| eyre!("Failed to create project directory {}: {}", project.display(), e))?;
-        let mut run = project.join(run_dir_name(time, 0));
+        let mut reserved = None;
         for seq in 0..RUN_DIR_ATTEMPTS {
             let candidate = project.join(run_dir_name(time, seq));
             if fs.create_dir_exclusive(&candidate).await? {
-                run = candidate;
+                // Locked in the same step that reserved the name, because the
+                // directory is a deletion candidate from the moment it exists
+                // and its row is not written until later - or, when the store
+                // will not open, never. Failing here aborts the run: proceeding
+                // unprotected is the exact failure the lock exists to prevent,
+                // and it would be invisible.
+                let lock = fs
+                    .lock_run_dir_sync(&candidate)
+                    .map_err(|e| eyre!("Failed to lock run directory {}: {}", candidate.display(), e))?;
+                reserved = Some((candidate, lock));
                 break;
             }
-            if seq + 1 == RUN_DIR_ATTEMPTS {
-                return Err(eyre!(
-                    "Failed to reserve a run directory under {} after {RUN_DIR_ATTEMPTS} attempts",
-                    project.display()
-                ));
-            }
         }
+        let (run, run_lock) = reserved.ok_or_else(|| {
+            eyre!(
+                "Failed to reserve a run directory under {} after {RUN_DIR_ATTEMPTS} attempts",
+                project.display()
+            )
+        })?;
 
         // Try to create default StateManager for production use
         let state_store: Option<Arc<dyn StateStore>> =
@@ -206,6 +249,7 @@ impl<F: FileSystem> Workspace<F> {
             project,
             cache,
             run,
+            run_lock,
             db_run_id: std::sync::Mutex::new(None),
             state_store,
             fs,
@@ -227,6 +271,11 @@ impl<F: FileSystem> Workspace<F> {
     /// Get a reference to the state store (for task recording in scheduler)
     pub fn state_store(&self) -> Option<&Arc<dyn StateStore>> {
         self.state_store.as_ref()
+    }
+
+    /// The lock this run holds on its own directory, which cleanup honours.
+    pub fn run_lock(&self) -> &crate::executor::runlock::RunLock {
+        &self.run_lock
     }
 
     /// Initialize workspace directories
@@ -420,8 +469,10 @@ impl<F: FileSystem> Workspace<F> {
             super::state::RunStatus::Failed
         };
 
-        // Try to calculate directory size
-        let size_bytes = Self::calculate_directory_size(&self.run).ok();
+        // The size the run directory owns, from the one function that computes
+        // it. This used to follow symlinks while `Clean` skipped them, so the
+        // two reported different sizes for the same directory.
+        let size_bytes = directory_size(&self.run).ok();
 
         // Try to record - log error but don't fail
         if let Err(e) = record_blocking(store, move |store| {
@@ -431,22 +482,6 @@ impl<F: FileSystem> Workspace<F> {
         {
             log::warn!("Failed to record run completion in database: {}", e);
         }
-    }
-
-    fn calculate_directory_size(path: &Path) -> Result<u64> {
-        let mut total = 0u64;
-        if path.is_dir() {
-            for entry in std::fs::read_dir(path)? {
-                let entry = entry?;
-                let entry_path = entry.path();
-                if entry_path.is_dir() {
-                    total += Self::calculate_directory_size(&entry_path)?;
-                } else {
-                    total += entry.metadata()?.len();
-                }
-            }
-        }
-        Ok(total)
     }
 
     pub async fn save_task_context(&self, task_name: &str, context: &ExecutionContext) -> Result<()> {

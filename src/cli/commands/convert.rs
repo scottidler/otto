@@ -7,7 +7,7 @@ use crate::makefile::{Diagnostic, MakefileParser, OttoConverter};
 
 /// Convert a Makefile on stdin to an ottofile
 #[derive(Parser, Debug)]
-#[command(name = "Convert")]
+#[command(name = "Convert", bin_name = "otto Convert")]
 #[command(about = "Convert a Makefile on stdin to an ottofile")]
 pub struct ConvertCommand {
     /// Treat warnings as errors

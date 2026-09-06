@@ -1,3 +1,4 @@
+use crate::executor::runlock::{self, RunLock};
 use async_trait::async_trait;
 use eyre::Result;
 use std::collections::HashMap;
@@ -21,6 +22,16 @@ pub trait FileSystem: Send + Sync {
     /// tell a caller whether it won the name.
     async fn create_dir_exclusive(&self, path: &Path) -> Result<bool>;
     async fn canonicalize(&self, path: &Path) -> Result<PathBuf>;
+
+    /// Take the advisory lock that marks `run_dir` as belonging to a run that
+    /// is still going, held until the returned handle drops.
+    ///
+    /// On this side of the port rather than in `Workspace` because the run
+    /// directory itself is: a workspace built on the in-memory filesystem has
+    /// no directory on disk to lock, and locking one anyway would fail every
+    /// test that uses it. See [`crate::executor::runlock`] for what the lock is
+    /// for and why cleanup honours it.
+    fn lock_run_dir_sync(&self, run_dir: &Path) -> Result<RunLock>;
 
     // Sync methods (for use in sync contexts like ActionProcessor)
     fn exists_sync(&self, path: &Path) -> bool;
@@ -93,6 +104,10 @@ impl FileSystem for RealFs {
 
     async fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
         Ok(tokio::fs::canonicalize(path).await?)
+    }
+
+    fn lock_run_dir_sync(&self, run_dir: &Path) -> Result<RunLock> {
+        runlock::hold(run_dir)
     }
 
     // Sync methods
@@ -242,6 +257,14 @@ impl FileSystem for MemFs {
         } else {
             Err(eyre::eyre!("Path not found: {}", path.display()))
         }
+    }
+
+    fn lock_run_dir_sync(&self, _run_dir: &Path) -> Result<RunLock> {
+        // Nothing to lock and nobody to lock out: these directories exist only
+        // inside this process, and `Clean` never sees them. Returning a handle
+        // that holds nothing keeps the caller on one code path instead of
+        // making the lock conditional on which filesystem it got.
+        Ok(RunLock::unheld())
     }
 
     // Sync methods

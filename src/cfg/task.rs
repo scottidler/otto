@@ -694,7 +694,8 @@ pub struct TaskSpec {
     /// True for foreach-created virtual parent tasks (no action, just dependency tracking)
     pub virtual_parent: bool,
     /// Tasks named here fire when this task fails (parse-time sugar that desugars
-    /// into `after:` edges with `when: failure` on the named target tasks).
+    /// into `after:` edges with `when: failure`, pushed onto this task's own
+    /// `after:` list and pointing at the named tasks).
     /// Preserved verbatim for round-trip serialization.
     pub on_failure: Vec<String>,
     /// Give this task the terminal: inherit stdout/stderr instead of capturing

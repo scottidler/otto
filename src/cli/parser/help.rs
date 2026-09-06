@@ -35,7 +35,16 @@ impl Parser {
                 .value_name("FORMAT")
                 .help("Output format for --tasks (yaml or json); default: yaml on a tty, json when piped")
                 .value_parser(["yaml", "json"])
-                .ignore_case(true),
+                .ignore_case(true)
+                // Without --tasks this flag has nothing to format, and silently
+                // fell through to running the ottofile's default tasks instead
+                // of erroring (docs/design/2026-09-06-shakedown-remediation.md
+                // Phase 6, F7). global_args() is also consumed by the two help
+                // builders in command.rs, which only render a Command for
+                // --help and never call try_get_matches_from, so `requires` is
+                // inert there and only bites the real parse path in
+                // Parser::parse() (parser.rs).
+                .requires("tasks"),
             Arg::new("jobs")
                 .short('j')
                 .long("jobs")
@@ -189,7 +198,7 @@ impl Parser {
 
     fn show_task_help(&self, task_name: &str) -> Result<()> {
         if let Some(task) = self.config_spec.tasks.get(task_name) {
-            let mut task_cmd = self.task_to_command_for_help(task);
+            let mut task_cmd = self.task_to_command_for_help(task).bin_name(format!("otto {task_name}"));
             task_cmd.print_help()?;
         } else {
             return Err(match nearest_task_name(task_name, &self.known_task_names()) {

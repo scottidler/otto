@@ -4,12 +4,12 @@ use comfy_table::{Cell, CellAlignment, Table, presets::UTF8_FULL};
 use eyre::Result;
 use std::sync::Arc;
 
-use crate::executor::StateManager;
+use crate::executor::{OverallStats, StateManager, TaskStats};
 use crate::ports::StateStore;
 
 /// Show execution statistics
 #[derive(Debug, clap::Parser)]
-#[command(name = "Stats")]
+#[command(name = "Stats", bin_name = "otto Stats")]
 pub struct StatsCommand {
     /// Show stats for a specific task
     #[arg(value_name = "TASK")]
@@ -52,105 +52,20 @@ impl StatsCommand {
 
     fn show_overall_stats(&self, store: &dyn StateStore) -> Result<()> {
         let stats = store.get_overall_stats()?;
+        let task_stats = store.get_all_task_stats(Some(self.limit))?;
 
         if self.json {
-            println!("{}", serde_json::to_string_pretty(&stats)?);
+            println!("{}", render_overall_json(&stats, &task_stats)?);
             return Ok(());
         }
 
         // Show overall statistics
         println!("\n{}", "Overall Statistics".bold());
-
-        let success_rate = if stats.total_runs > 0 {
-            (stats.successful_runs as f64 / stats.total_runs as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let mut table = Table::new();
-        table.load_style(UTF8_FULL.with_rounded_corners()).set_header(vec![
-            Cell::new("Metric").set_alignment(CellAlignment::Left),
-            Cell::new("Value").set_alignment(CellAlignment::Right),
-        ]);
-
-        table.add_row(vec![
-            Cell::new("Total Runs").set_alignment(CellAlignment::Left),
-            Cell::new(stats.total_runs.to_string()).set_alignment(CellAlignment::Right),
-        ]);
-        table.add_row(vec![
-            Cell::new("Successful").set_alignment(CellAlignment::Left),
-            Cell::new(format!(
-                "{} ({})",
-                stats.successful_runs,
-                format_percentage(success_rate)
-            ))
-            .set_alignment(CellAlignment::Right),
-        ]);
-        table.add_row(vec![
-            Cell::new("Failed").set_alignment(CellAlignment::Left),
-            Cell::new(stats.failed_runs.to_string()).set_alignment(CellAlignment::Right),
-        ]);
-        table.add_row(vec![
-            Cell::new("Running").set_alignment(CellAlignment::Left),
-            Cell::new(stats.running_runs.to_string()).set_alignment(CellAlignment::Right),
-        ]);
-        table.add_row(vec![
-            Cell::new("Total Tasks Executed").set_alignment(CellAlignment::Left),
-            Cell::new(stats.total_tasks.to_string()).set_alignment(CellAlignment::Right),
-        ]);
-        table.add_row(vec![
-            Cell::new("Total Disk Usage").set_alignment(CellAlignment::Left),
-            Cell::new(format_size(stats.total_disk_usage)).set_alignment(CellAlignment::Right),
-        ]);
-        table.add_row(vec![
-            Cell::new("Total Execution Time").set_alignment(CellAlignment::Left),
-            Cell::new(format_duration(stats.total_duration_seconds)).set_alignment(CellAlignment::Right),
-        ]);
-
-        println!("{}", table);
-
-        // Show top tasks
-        let task_stats = store.get_all_task_stats(Some(self.limit))?;
+        println!("{}", render_overall_table(&stats));
 
         if !task_stats.is_empty() {
             println!("\n{}", format!("Top {} Tasks by Execution Count", self.limit).bold());
-
-            let mut task_table = Table::new();
-            task_table.load_style(UTF8_FULL.with_rounded_corners()).set_header(vec![
-                Cell::new("Project").set_alignment(CellAlignment::Left),
-                Cell::new("Task").set_alignment(CellAlignment::Left),
-                Cell::new("Total").set_alignment(CellAlignment::Right),
-                Cell::new("Success").set_alignment(CellAlignment::Right),
-                Cell::new("Failed").set_alignment(CellAlignment::Right),
-                Cell::new("Success Rate").set_alignment(CellAlignment::Right),
-                Cell::new("Avg Duration").set_alignment(CellAlignment::Right),
-            ]);
-
-            for task in &task_stats {
-                let total_attempted = task.successful_executions + task.failed_executions;
-                let success_rate = if total_attempted > 0 {
-                    (task.successful_executions as f64 / total_attempted as f64) * 100.0
-                } else {
-                    0.0
-                };
-
-                task_table.add_row(vec![
-                    Cell::new(&task.project_name).set_alignment(CellAlignment::Left),
-                    Cell::new(&task.task_name).set_alignment(CellAlignment::Left),
-                    Cell::new(task.total_executions.to_string()).set_alignment(CellAlignment::Right),
-                    Cell::new(task.successful_executions.to_string()).set_alignment(CellAlignment::Right),
-                    Cell::new(task.failed_executions.to_string()).set_alignment(CellAlignment::Right),
-                    Cell::new(format_percentage(success_rate)).set_alignment(CellAlignment::Right),
-                    Cell::new(
-                        task.avg_duration_seconds
-                            .map(format_duration)
-                            .unwrap_or_else(|| "-".to_string()),
-                    )
-                    .set_alignment(CellAlignment::Right),
-                ]);
-            }
-
-            println!("{}", task_table);
+            println!("{}", render_task_stats_table(&task_stats));
         }
 
         Ok(())
@@ -174,12 +89,6 @@ impl StatsCommand {
         // If there's only one project, show simplified view
         if stats.len() == 1 {
             let stat = &stats[0];
-            let total_attempted = stat.successful_executions + stat.failed_executions;
-            let success_rate = if total_attempted > 0 {
-                (stat.successful_executions as f64 / total_attempted as f64) * 100.0
-            } else {
-                0.0
-            };
 
             let mut table = Table::new();
             table.load_style(UTF8_FULL.with_rounded_corners()).set_header(vec![
@@ -200,7 +109,7 @@ impl StatsCommand {
                 Cell::new(format!(
                     "{} ({})",
                     stat.successful_executions,
-                    format_percentage(success_rate)
+                    format_success_rate(stat.successful_executions, stat.failed_executions)
                 ))
                 .set_alignment(CellAlignment::Right),
             ]);
@@ -273,19 +182,13 @@ impl StatsCommand {
             ]);
 
             for stat in &stats {
-                let total_attempted = stat.successful_executions + stat.failed_executions;
-                let success_rate = if total_attempted > 0 {
-                    (stat.successful_executions as f64 / total_attempted as f64) * 100.0
-                } else {
-                    0.0
-                };
-
                 table.add_row(vec![
                     Cell::new(&stat.project_name).set_alignment(CellAlignment::Left),
                     Cell::new(stat.total_executions.to_string()).set_alignment(CellAlignment::Right),
                     Cell::new(stat.successful_executions.to_string()).set_alignment(CellAlignment::Right),
                     Cell::new(stat.failed_executions.to_string()).set_alignment(CellAlignment::Right),
-                    Cell::new(format_percentage(success_rate)).set_alignment(CellAlignment::Right),
+                    Cell::new(format_success_rate(stat.successful_executions, stat.failed_executions))
+                        .set_alignment(CellAlignment::Right),
                     Cell::new(
                         stat.avg_duration_seconds
                             .map(format_duration)
@@ -300,6 +203,119 @@ impl StatsCommand {
 
         Ok(())
     }
+}
+
+/// Serialize-only view: the same two payloads the text output prints.
+///
+/// `OverallStats` is a port-level type constructed by every store
+/// implementation, so the per-task rows are attached here instead of being
+/// added to it as a field. `flatten` keeps the seven overall keys at the top
+/// level, in declaration order, where `jq '.total_runs'` already finds them; an
+/// `{overall, tasks}` envelope would move all seven down a level.
+#[derive(serde::Serialize)]
+struct OverallStatsJson<'a> {
+    #[serde(flatten)]
+    overall: &'a OverallStats,
+    tasks: &'a [TaskStats],
+}
+
+fn render_overall_json(stats: &OverallStats, task_stats: &[TaskStats]) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&OverallStatsJson {
+        overall: stats,
+        tasks: task_stats,
+    })?)
+}
+
+fn render_overall_table(stats: &OverallStats) -> Table {
+    let mut table = Table::new();
+    table.load_style(UTF8_FULL.with_rounded_corners()).set_header(vec![
+        Cell::new("Metric").set_alignment(CellAlignment::Left),
+        Cell::new("Value").set_alignment(CellAlignment::Right),
+    ]);
+
+    table.add_row(vec![
+        Cell::new("Total Runs").set_alignment(CellAlignment::Left),
+        Cell::new(stats.total_runs.to_string()).set_alignment(CellAlignment::Right),
+    ]);
+    table.add_row(vec![
+        Cell::new("Successful").set_alignment(CellAlignment::Left),
+        Cell::new(format!(
+            "{} ({})",
+            stats.successful_runs,
+            format_success_rate(stats.successful_runs, stats.failed_runs)
+        ))
+        .set_alignment(CellAlignment::Right),
+    ]);
+    table.add_row(vec![
+        Cell::new("Failed").set_alignment(CellAlignment::Left),
+        Cell::new(stats.failed_runs.to_string()).set_alignment(CellAlignment::Right),
+    ]);
+    table.add_row(vec![
+        Cell::new("Running").set_alignment(CellAlignment::Left),
+        Cell::new(stats.running_runs.to_string()).set_alignment(CellAlignment::Right),
+    ]);
+    table.add_row(vec![
+        Cell::new("Total Tasks Executed").set_alignment(CellAlignment::Left),
+        Cell::new(stats.total_tasks.to_string()).set_alignment(CellAlignment::Right),
+    ]);
+    table.add_row(vec![
+        Cell::new("Total Disk Usage").set_alignment(CellAlignment::Left),
+        Cell::new(format_size(stats.total_disk_usage)).set_alignment(CellAlignment::Right),
+    ]);
+    table.add_row(vec![
+        Cell::new("Total Execution Time").set_alignment(CellAlignment::Left),
+        Cell::new(format_duration(stats.total_duration_seconds)).set_alignment(CellAlignment::Right),
+    ]);
+
+    table
+}
+
+fn render_task_stats_table(task_stats: &[TaskStats]) -> Table {
+    let mut table = Table::new();
+    table.load_style(UTF8_FULL.with_rounded_corners()).set_header(vec![
+        Cell::new("Project").set_alignment(CellAlignment::Left),
+        Cell::new("Task").set_alignment(CellAlignment::Left),
+        Cell::new("Total").set_alignment(CellAlignment::Right),
+        Cell::new("Success").set_alignment(CellAlignment::Right),
+        Cell::new("Failed").set_alignment(CellAlignment::Right),
+        Cell::new("Success Rate").set_alignment(CellAlignment::Right),
+        Cell::new("Avg Duration").set_alignment(CellAlignment::Right),
+    ]);
+
+    for task in task_stats {
+        table.add_row(vec![
+            Cell::new(&task.project_name).set_alignment(CellAlignment::Left),
+            Cell::new(&task.task_name).set_alignment(CellAlignment::Left),
+            Cell::new(task.total_executions.to_string()).set_alignment(CellAlignment::Right),
+            Cell::new(task.successful_executions.to_string()).set_alignment(CellAlignment::Right),
+            Cell::new(task.failed_executions.to_string()).set_alignment(CellAlignment::Right),
+            Cell::new(format_success_rate(task.successful_executions, task.failed_executions))
+                .set_alignment(CellAlignment::Right),
+            Cell::new(
+                task.avg_duration_seconds
+                    .map(format_duration)
+                    .unwrap_or_else(|| "-".to_string()),
+            )
+            .set_alignment(CellAlignment::Right),
+        ]);
+    }
+
+    table
+}
+
+/// The one denominator every Success Rate in this command divides by.
+///
+/// Runs and executions still `Running` can never reach the numerator, so counting
+/// them drags the rate toward zero for as long as they sit there: the live store
+/// reported 42.7% overall against 100.0% per task off the same rows. With nothing
+/// terminal to divide by, the rate is unknown rather than `0.0%`, which reads as
+/// "everything failed".
+fn format_success_rate(successful: u64, failed: u64) -> String {
+    let terminal = successful + failed;
+    if terminal == 0 {
+        return "n/a".to_string();
+    }
+    format_percentage((successful as f64 / terminal as f64) * 100.0)
 }
 
 fn format_percentage(rate: f64) -> String {

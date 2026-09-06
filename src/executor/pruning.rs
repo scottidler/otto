@@ -85,6 +85,11 @@ pub async fn auto_prune(otto_home: &Path, retention: &RetentionSpec) {
         project_filter: None,
         no_db: false,
         quiet: true,
+        // The home this function was GIVEN, for the same reason the database
+        // path below is anchored to it: cleanup now walks the filesystem on
+        // both paths, and resolving `$OTTO_HOME` here would sweep run
+        // directories out of a tree this call was never pointed at.
+        otto_home: Some(otto_home.to_path_buf()),
     };
 
     // Prune the store belonging to the home this function was GIVEN.

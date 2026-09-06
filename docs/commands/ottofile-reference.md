@@ -88,8 +88,8 @@ value is a task, whose own keys are fixed and listed here.
 | key | type | default | notes |
 |---|---|---|---|
 | `tasks.<name>.help` | string | none | Help text shown for this task. |
-| `tasks.<name>.after` | list of edges | `[]` | Tasks this one runs after. Each edge is either a bare task-name string (sugar, implies `when: success`) or a map `{task: <name>, when: success\|failure\|always}`. See **Edge object** below. |
-| `tasks.<name>.before` | list of edges | `[]` | Tasks this one runs before. Same edge shape as `after`. See **Edge object** below. |
+| `tasks.<name>.after` | list of edges | `[]` | Tasks that run after this one (this task becomes their dependency). Each edge is either a bare task-name string (sugar, implies `when: success`) or a map `{task: <name>, when: success\|failure\|always}`. See **Edge object** below. |
+| `tasks.<name>.before` | list of edges | `[]` | Tasks that run before this one (they become this task's dependencies). Same edge shape as `after`. See **Edge object** below. |
 | `tasks.<name>.input` | list of strings | `[]` | File glob(s) this task reads; drives up-to-date skipping. |
 | `tasks.<name>.output` | list of strings | `[]` | File glob(s) this task writes; drives up-to-date skipping. |
 | `tasks.<name>.envs` | map: string -> string | `{}` | Task-scoped environment variables, layered over `otto.envs`. Free-form key site, same as `otto.envs`. |
@@ -98,7 +98,7 @@ value is a task, whose own keys are fixed and listed here.
 | `tasks.<name>.python` | string | none | Python script body to run. |
 | `tasks.<name>.action` | string | none | Legacy path to an executable action. Deprecated in favor of `bash`/`python`. |
 | `tasks.<name>.foreach` | map | none | Dynamic subtask generation. See **`tasks.<name>.foreach:`** below. |
-| `tasks.<name>.on-failure` | list of strings | `[]` | **Kebab key.** Task names to run when this task fails; parse-time sugar that desugars into `after:` edges with `when: failure` on the named tasks. |
+| `tasks.<name>.on-failure` | list of strings | `[]` | **Kebab key.** Task names to run when this task fails; parse-time sugar that desugars into `after:` edges with `when: failure`, pushed onto this task's own `after:` list and pointing at the named tasks. |
 | `tasks.<name>.tty` | boolean | none (absent = false) | Give this task the terminal: inherit stdout/stderr instead of capturing them, drop the `[task]` output prefix, and run it exclusively (no other task runs alongside it). A non-`tty` task cannot read the terminal: stdin is `/dev/null` when otto's is a terminal, and it has no controlling terminal, so `/dev/tty` cannot be opened. Set `tty: true` for anything that prompts. |
 
 **`parallel:` is not a task-level key.** It belongs under `foreach:` — see
@@ -120,6 +120,36 @@ here too.
 |---|---|---|---|
 | `tasks.<name>.after[].task` | string | none (**required**) | Name of the task this edge refers to. Same key at `tasks.<name>.before[].task`. |
 | `tasks.<name>.after[].when` | string: `success`\|`failure`\|`always` | `success` | Condition under which this edge fires. Same key at `tasks.<name>.before[].when`. |
+
+### Worked example: which task runs first
+
+```yaml
+tasks:
+  first:
+    help: "the task invoked directly"
+    bash: "sleep 1 && echo first-done"
+  later:
+    help: "declares after: [first]"
+    after: [first]
+    bash: "echo later"
+```
+
+Invoked as `otto first`. `later`'s `after: [first]` makes `later` a
+dependency of `first` (its own entry says so: "Tasks that run after this
+one, this task becomes their dependency"), so `later` runs first, then
+`first` starts. Measured with wall-clock timestamps:
+
+```
+later      1788676252.533636807
+first      1788676252.578740988
+first-done 1788676253.590615515
+```
+
+`later` ran 45ms before `first`, while `first` was still sleeping. To make
+`later` run after `first` finishes, either declare `after:` on `first`
+pointing at `later` (`first: {after: [later]}`), or declare `before:` on
+`later` pointing at `first` (`later: {before: [first]}`); both make
+`later` depend on `first`.
 
 ## `tasks.<name>.foreach:` (`ForeachSpec`) — 9 keys
 

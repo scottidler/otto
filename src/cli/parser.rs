@@ -138,6 +138,12 @@ pub struct RunPlan {
     pub tui_mode: bool,
     /// `--no-prefix`: suppress the `[task]` prefix on terminal output.
     pub no_prefix: bool,
+    /// The task and subtask names literally asked for: what the user named on
+    /// the command line, or the ottofile's `otto.tasks:` default list when
+    /// nothing was named. This is **not** `tasks` above, which is the
+    /// resolved DAG including every pulled-in dependency, and it carries no
+    /// flag values, since those can be secrets. See `ExecutionContext::args`.
+    pub requested_tasks: Vec<String>,
 }
 
 impl RunPlan {
@@ -1081,6 +1087,7 @@ impl Parser {
             jobs: self.jobs,
             tui_mode,
             no_prefix,
+            requested_tasks: tasks_to_run,
         }))
     }
 

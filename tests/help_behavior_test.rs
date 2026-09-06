@@ -299,7 +299,7 @@ tasks:
         .code(0)
         // Should show task-specific help
         .stdout(predicate::str::contains("Build the project"))
-        .stdout(predicate::str::contains("Usage: build"))
+        .stdout(predicate::str::contains("Usage: otto build"))
         // Should NOT run the task
         .stdout(predicate::str::contains("building").not());
 }
@@ -330,7 +330,7 @@ tasks:
         .code(0)
         // Should show task-specific help
         .stdout(predicate::str::contains("Build the project"))
-        .stdout(predicate::str::contains("Usage: build"))
+        .stdout(predicate::str::contains("Usage: otto build"))
         // Should NOT run the task
         .stdout(predicate::str::contains("building").not());
 }
@@ -365,7 +365,7 @@ tasks:
         .code(0)
         // Should show task-specific help
         .stdout(predicate::str::contains("Run all examples"))
-        .stdout(predicate::str::contains("Usage: examples"))
+        .stdout(predicate::str::contains("Usage: otto examples"))
         // Should NOT run the task (no example output)
         .stdout(predicate::str::contains("Running example").not());
 }
@@ -400,7 +400,7 @@ tasks:
         .code(0)
         // Should show task-specific help
         .stdout(predicate::str::contains("Run all examples"))
-        .stdout(predicate::str::contains("Usage: examples"))
+        .stdout(predicate::str::contains("Usage: otto examples"))
         // Should NOT run the task
         .stdout(predicate::str::contains("Running example").not());
 }

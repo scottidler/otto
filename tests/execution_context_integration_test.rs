@@ -209,3 +209,195 @@ async fn test_workspace_metadata_structure() -> Result<()> {
     temp_dir.close()?;
     Ok(())
 }
+
+// =============================================================================
+// Phase 9: the run record says what was asked for, and nothing else
+// =============================================================================
+//
+// design doc: docs/design/2026-09-06-shakedown-remediation.md, Phase 9
+
+/// `otto lint` (a task named on the command line, no flags) records
+/// `args: ["otto", "lint"]` in both `run.yaml` and the `runs` row, not the
+/// hardcoded `["otto"]` `ExecutionContext::new()` used to leave in place.
+#[tokio::test]
+#[serial]
+async fn test_execution_context_records_the_requested_task_name() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+    let db_path = setup_test_db(temp_path);
+
+    let ottofile_content = r#"
+tasks:
+  lint:
+    help: "Lint the project"
+    action: |
+      echo "linting"
+"#;
+    let ottofile_path = temp_path.join("otto.yml");
+    fs::write(&ottofile_path, ottofile_content)?;
+
+    let args = vec![
+        "otto".to_string(),
+        "--ottofile".to_string(),
+        ottofile_path.to_string_lossy().to_string(),
+        "lint".to_string(),
+    ];
+    let mut parser = otto::cli::parser::Parser::new(args)?;
+    let plan = parser.parse()?.into_run()?;
+    assert_eq!(
+        plan.requested_tasks,
+        vec!["lint".to_string()],
+        "the requested set is the task literally named, not the resolved closure"
+    );
+
+    let workspace = otto::executor::workspace::Workspace::new(temp_path.to_path_buf()).await?;
+    workspace.init().await?;
+
+    let mut execution_context = otto::executor::workspace::ExecutionContext::new();
+    execution_context.ottofile = plan.ottofile.clone();
+    execution_context.hash = plan.hash.clone();
+    execution_context.record_requested(&plan.requested_tasks);
+    assert_eq!(execution_context.args, vec!["otto".to_string(), "lint".to_string()]);
+
+    workspace.save_execution_context(execution_context).await?;
+
+    let run_yaml_content = fs::read_to_string(workspace.run().join("run.yaml"))?;
+    let saved: otto::executor::workspace::ExecutionContext = yaml_serde::from_str(&run_yaml_content)?;
+    assert_eq!(saved.args, vec!["otto".to_string(), "lint".to_string()]);
+
+    let manager = otto::executor::state::StateManager::with_db_path(db_path)?;
+    let runs = manager.get_runs_with_filters(None, None, 10)?;
+    assert_eq!(runs.len(), 1, "exactly one run row should have been recorded");
+    assert_eq!(runs[0].args, Some(vec!["otto".to_string(), "lint".to_string()]));
+
+    temp_dir.close()?;
+    Ok(())
+}
+
+/// A run with no task named on the command line records the ottofile's
+/// `otto.tasks:` default list, since asking for nothing is asking for the
+/// default - not the empty set and not the resolved closure.
+#[tokio::test]
+#[serial]
+async fn test_execution_context_bare_otto_records_the_default_task_list() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+    setup_test_db(temp_path);
+
+    let ottofile_content = r#"
+otto:
+  tasks: [build]
+
+tasks:
+  build:
+    help: "Build the project"
+    action: |
+      echo "building"
+"#;
+    let ottofile_path = temp_path.join("otto.yml");
+    fs::write(&ottofile_path, ottofile_content)?;
+
+    let args = vec![
+        "otto".to_string(),
+        "--ottofile".to_string(),
+        ottofile_path.to_string_lossy().to_string(),
+    ];
+    let mut parser = otto::cli::parser::Parser::new(args)?;
+    let plan = parser.parse()?.into_run()?;
+
+    assert_eq!(
+        plan.requested_tasks,
+        vec!["build".to_string()],
+        "a bare invocation requests the ottofile's default task list"
+    );
+
+    let mut execution_context = otto::executor::workspace::ExecutionContext::new();
+    execution_context.record_requested(&plan.requested_tasks);
+    assert_eq!(execution_context.args, vec!["otto".to_string(), "build".to_string()]);
+
+    temp_dir.close()?;
+    Ok(())
+}
+
+/// Negative assertion: a param value is an ordinary command line flag and can
+/// be a secret. Recording `std::env::args()` verbatim would put it in both the
+/// database and `run.yaml`; this proves the requested-names-only design does
+/// not, even when the invocation carries one.
+#[tokio::test]
+#[serial]
+async fn test_execution_context_never_records_a_param_value() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let temp_path = temp_dir.path();
+    let db_path = setup_test_db(temp_path);
+
+    let ottofile_content = r#"
+tasks:
+  deploy:
+    help: "Deploy"
+    params:
+      --token:
+        default: none
+        help: "Auth token"
+    action: |
+      echo "deploying with ${token}"
+"#;
+    let ottofile_path = temp_path.join("otto.yml");
+    fs::write(&ottofile_path, ottofile_content)?;
+
+    const SECRET: &str = "SHOULD-NOT-APPEAR";
+
+    let args = vec![
+        "otto".to_string(),
+        "--ottofile".to_string(),
+        ottofile_path.to_string_lossy().to_string(),
+        "deploy".to_string(),
+        "--token".to_string(),
+        SECRET.to_string(),
+    ];
+    let mut parser = otto::cli::parser::Parser::new(args)?;
+    let plan = parser.parse()?.into_run()?;
+
+    // The param value reached the resolved task's own env, proving the
+    // fixture actually carries the secret this test looks for.
+    let deploy = plan
+        .tasks
+        .iter()
+        .find(|t| t.name == "deploy")
+        .expect("deploy task resolved");
+    assert_eq!(deploy.envs.get("token").map(String::as_str), Some(SECRET));
+
+    // But the requested-names list carries only the task name.
+    assert_eq!(plan.requested_tasks, vec!["deploy".to_string()]);
+    assert!(!plan.requested_tasks.iter().any(|t| t.contains(SECRET)));
+
+    let workspace = otto::executor::workspace::Workspace::new(temp_path.to_path_buf()).await?;
+    workspace.init().await?;
+
+    let mut execution_context = otto::executor::workspace::ExecutionContext::new();
+    execution_context.ottofile = plan.ottofile.clone();
+    execution_context.hash = plan.hash.clone();
+    execution_context.record_requested(&plan.requested_tasks);
+    assert!(!execution_context.args.iter().any(|a| a.contains(SECRET)));
+
+    workspace.save_execution_context(execution_context).await?;
+
+    // Neither store the run record touches contains the secret.
+    let run_yaml_content = fs::read_to_string(workspace.run().join("run.yaml"))?;
+    assert!(
+        !run_yaml_content.contains(SECRET),
+        "run.yaml must never carry a param value: {run_yaml_content}"
+    );
+
+    let manager = otto::executor::state::StateManager::with_db_path(db_path)?;
+    let runs = manager.get_runs_with_filters(None, None, 10)?;
+    assert_eq!(runs.len(), 1);
+    let args = runs[0].args.clone().expect("args recorded");
+    assert!(
+        !args.iter().any(|a| a.contains(SECRET)),
+        "the runs.args DB column must never carry a param value: {args:?}"
+    );
+    assert_eq!(args, vec!["otto".to_string(), "deploy".to_string()]);
+
+    temp_dir.close()?;
+    Ok(())
+}

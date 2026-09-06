@@ -89,6 +89,7 @@ fn test_parse_outcome_into_run_returns_the_plan() {
         jobs: 4,
         tui_mode: false,
         no_prefix: true,
+        requested_tasks: vec![],
     })
     .into_run()
     .expect("Run carries a plan");

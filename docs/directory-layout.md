@@ -11,6 +11,7 @@ $OTTO_HOME/                             # default $HOME/.otto
       <hash>.sh                         # e.g. 734d509e.sh
       <hash>.sh
     <timestamp>/                        # run directory, named by Unix start time; e.g. 1788438233
+      .lock                             # advisory lock the run holds while it is going, so cleanup does not delete a live run
       run.yaml                          # serialized ExecutionContext: prog, cwd, user, timestamp, hash, ottofile, args
       tasks/
         <task-name>/

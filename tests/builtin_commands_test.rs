@@ -81,6 +81,10 @@ tasks:
         stdout.contains("Graph") || stdout.contains("Visualize"),
         "Graph help should mention Graph/visualize"
     );
+    assert!(
+        stdout.contains("Usage: otto Graph"),
+        "Graph help should print a pasteable Usage line, got: {stdout}"
+    );
 
     Ok(())
 }
@@ -98,6 +102,10 @@ fn test_clean_command_exists() -> Result<(), Box<dyn std::error::Error>> {
     assert!(output.status.success(), "Clean --help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Clean"), "Clean help should mention Clean");
+    assert!(
+        stdout.contains("Usage: otto Clean"),
+        "Clean help should print a pasteable Usage line, got: {stdout}"
+    );
 
     Ok(())
 }
@@ -118,6 +126,10 @@ fn test_history_command_exists() -> Result<(), Box<dyn std::error::Error>> {
         stdout.contains("History") || stdout.contains("execution history"),
         "History help should mention History"
     );
+    assert!(
+        stdout.contains("Usage: otto History"),
+        "History help should print a pasteable Usage line, got: {stdout}"
+    );
 
     Ok(())
 }
@@ -137,6 +149,10 @@ fn test_stats_command_exists() -> Result<(), Box<dyn std::error::Error>> {
     assert!(
         stdout.contains("Stats") || stdout.contains("statistics"),
         "Stats help should mention Stats"
+    );
+    assert!(
+        stdout.contains("Usage: otto Stats"),
+        "Stats help should print a pasteable Usage line, got: {stdout}"
     );
 
     Ok(())

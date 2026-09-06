@@ -39,7 +39,7 @@ impl From<GraphFormatArg> for GraphFormat {
 /// built from (`cli/parser/meta_tasks.rs`) - the flags in `otto help Graph`
 /// are these flags, not a hand-written copy of them.
 #[derive(Debug, clap::Parser)]
-#[command(name = "Graph")]
+#[command(name = "Graph", bin_name = "otto Graph")]
 pub struct GraphCommand {
     /// Output format
     ///

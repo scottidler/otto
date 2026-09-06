@@ -68,8 +68,10 @@ tasks:
         help: "service name"
   down:
     help: "Stop each service"
-    after: [up]
+    before: [up]
 ```
+
+`down` declares `before: [up]`, meaning `up` becomes `down`'s dependency: `down` runs after `up`. Declaring `after: [up]` on `down` would do the opposite: it would make `down` a dependency of `up`, so `down` would run *before* `up` starts.
 
 ```bash
 $ otto --tasks | jq .
@@ -80,7 +82,7 @@ $ otto --tasks | jq .
   "down": {
     "help": "Stop each service",
     "params": [],
-    "edges": { "before": [], "after": ["up"] },
+    "edges": { "before": ["up"], "after": [] },
     "subtasks": []
   },
   "up": {
@@ -103,9 +105,9 @@ down:
   help: Stop each service
   params: []
   edges:
-    before: []
-    after:
+    before:
     - up
+    after: []
   subtasks: []
 up:
   help: Build + start each service in scope
