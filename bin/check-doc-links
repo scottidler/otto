@@ -19,9 +19,14 @@
 # BSD grep does not have, so on macOS the read loop got nothing, `fail` stayed
 # 0, and the script printed its success banner having checked no links at all.
 # The repo targets macOS (release artifacts, a bash-3.2 job), so a check that
-# silently passes there is not a check. The `checked` counter below closes the
-# same hole from the other side: no links found at all is now a failure, not a
-# pass.
+# silently passes there is not a check.
+#
+# The extractor is also checked for having WORKED, which is the general form of
+# that bug: grep exits 0 when it matches, 1 when it does not, and 2 or more when
+# it fails (a bad option, an unreadable file). Only the last is a broken check,
+# and it is now fatal and named. An earlier cut inferred breakage from a zero
+# link count instead, which fails a docs tree that legitimately has no relative
+# .md links -- a guard that has to be deleted to get green is not a guard.
 #
 # Usage:
 #   bin/check-doc-links
@@ -37,6 +42,19 @@ check_file() {
     local file="$1"
     local dir
     dir="$(dirname "$file")"
+
+    # Run the extractor first and keep its exit status: inside the `done < <(
+    # ... )` process substitution it used to hide in, a grep that failed
+    # outright was indistinguishable from a file with no links.
+    local matches status
+    matches="$(grep -noE '\]\([^)]*\)' "$file")"
+    status=$?
+    if [ "$status" -ge 2 ]; then
+        echo "$file: link extraction FAILED (grep exited $status); this check is not checking anything" >&2
+        fail=1
+        return
+    fi
+    [ -z "$matches" ] && return
 
     while IFS=: read -r line target; do
         # `grep -oE` matches the whole `](target)`; peel the delimiters off
@@ -63,7 +81,9 @@ check_file() {
             echo "$file:$line: broken link -> $target (resolved: $resolved)"
             fail=1
         fi
-    done < <(grep -noE '\]\([^)]*\)' "$file")
+    done <<EOF
+$matches
+EOF
 }
 
 files=()
@@ -75,11 +95,6 @@ files+=("README.md")
 for f in "${files[@]}"; do
     [ -f "$f" ] && check_file "$f"
 done
-
-if [ "$checked" -eq 0 ]; then
-    echo "check-doc-links: extracted no links at all; the extractor is broken on this grep" >&2
-    exit 1
-fi
 
 if [ "$fail" -eq 0 ]; then
     echo "✅ check-doc-links: $checked relative .md links, every one resolves"
