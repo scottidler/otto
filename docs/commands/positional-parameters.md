@@ -80,7 +80,7 @@ in the param declaration.
 
 ## See also
 
-- [Flag support](../flag-support.md) - the full `ParamType` (`FLG`/`OPT`/`POS`)
+- [Flag support](../archive/flag-support.md) - the full `ParamType` (`FLG`/`OPT`/`POS`)
   detection rules and flag-style param examples.
 - [`otto --tasks`](tasks.md) - each param's `positional` field in the
   machine-readable task list.

@@ -223,7 +223,7 @@ tasks:
     help: "Package application and test results"
 "#;
 
-    let config_spec: ConfigSpec = serde_yaml::from_str(yaml_content)?;
+    let config_spec: ConfigSpec = yaml_serde::from_str(yaml_content)?;
 
     // Convert tasks to TaskSpecs
     let mut task_specs = Vec::new();
@@ -362,7 +362,7 @@ async fn test_file_dependencies_error_handling() -> Result<()> {
     .await?;
 
     // Task should need to run when input file doesn't exist (conservative approach)
-    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild = scheduler.needs_rebuild(&task).await;
     assert!(needs_rebuild, "Task should need to run when input file is missing");
 
     // Create task with read-only directory output (should handle permission errors gracefully)
@@ -400,7 +400,7 @@ async fn test_file_dependencies_error_handling() -> Result<()> {
     .expect("test fixture envs resolve");
 
     // Should handle permission issues gracefully
-    let needs_rebuild_readonly = scheduler.needs_rebuild(&task_readonly).await?;
+    let needs_rebuild_readonly = scheduler.needs_rebuild(&task_readonly).await;
     // Should need to run since output doesn't exist
     assert!(needs_rebuild_readonly);
 
@@ -437,7 +437,7 @@ async fn test_file_dependencies_performance() -> Result<()> {
 
     // Measure file dependency checking performance
     let start = std::time::Instant::now();
-    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild = scheduler.needs_rebuild(&task).await;
     let duration = start.elapsed();
 
     assert!(needs_rebuild, "Task should need to run initially");
@@ -545,8 +545,8 @@ async fn test_mixed_task_and_file_dependencies() -> Result<()> {
     .await?;
 
     // Both tasks should need to run initially
-    assert!(scheduler.needs_rebuild(&preprocess_task).await?);
-    assert!(scheduler.needs_rebuild(&analyze_task).await?);
+    assert!(scheduler.needs_rebuild(&preprocess_task).await);
+    assert!(scheduler.needs_rebuild(&analyze_task).await);
 
     // Execute all tasks
     timeout(Duration::from_secs(10), scheduler.execute_all()).await??;
@@ -558,15 +558,15 @@ async fn test_mixed_task_and_file_dependencies() -> Result<()> {
     assert!(report_file.exists());
 
     // Neither task should need to rebuild
-    assert!(!scheduler.needs_rebuild(&preprocess_task).await?);
-    assert!(!scheduler.needs_rebuild(&analyze_task).await?);
+    assert!(!scheduler.needs_rebuild(&preprocess_task).await);
+    assert!(!scheduler.needs_rebuild(&analyze_task).await);
 
     // Modify input file
     std::thread::sleep(std::time::Duration::from_millis(100));
     std::fs::write(&data_file, "id,name,value\n1,test,150\n2,example,250\n3,new,300\n")?;
 
     // Preprocess should need rebuild due to file dependency
-    assert!(scheduler.needs_rebuild(&preprocess_task).await?);
+    assert!(scheduler.needs_rebuild(&preprocess_task).await);
     // Analyze might or might not need rebuild depending on when we check
     // (it depends on preprocess completing and updating the processed file)
 
@@ -629,7 +629,7 @@ async fn test_file_dependencies_incremental_detection() -> Result<()> {
 
     // Test 1: No output file exists - should need rebuild
     assert!(
-        scheduler.needs_rebuild(&task).await?,
+        scheduler.needs_rebuild(&task).await,
         "Should need rebuild when output missing"
     );
 
@@ -637,7 +637,7 @@ async fn test_file_dependencies_incremental_detection() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(10)); // Ensure time difference
     std::fs::write(&output, "compiled object")?;
     assert!(
-        !scheduler.needs_rebuild(&task).await?,
+        !scheduler.needs_rebuild(&task).await,
         "Should NOT need rebuild when output newer than inputs"
     );
 
@@ -645,7 +645,7 @@ async fn test_file_dependencies_incremental_detection() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(10)); // Ensure time difference
     std::fs::write(&input1, "int main() { return 1; }")?; // Modify input
     assert!(
-        scheduler.needs_rebuild(&task).await?,
+        scheduler.needs_rebuild(&task).await,
         "Should need rebuild when input newer than output"
     );
 
@@ -653,7 +653,7 @@ async fn test_file_dependencies_incremental_detection() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(10)); // Ensure time difference
     std::fs::write(&output, "recompiled object")?;
     assert!(
-        !scheduler.needs_rebuild(&task).await?,
+        !scheduler.needs_rebuild(&task).await,
         "Should NOT need rebuild when output updated"
     );
 
@@ -683,7 +683,7 @@ async fn test_file_dependencies_with_real_execution() -> Result<()> {
 
     // Task should need to run initially (output doesn't exist)
     assert!(
-        scheduler.needs_rebuild(&task).await?,
+        scheduler.needs_rebuild(&task).await,
         "Should need rebuild when output missing"
     );
 
@@ -702,7 +702,7 @@ async fn test_file_dependencies_with_real_execution() -> Result<()> {
 
     // Task should NOT need to run again (outputs are up-to-date)
     assert!(
-        !scheduler.needs_rebuild(&task).await?,
+        !scheduler.needs_rebuild(&task).await,
         "Should not need rebuild after successful execution"
     );
 
@@ -778,7 +778,7 @@ async fn test_file_dependencies_multiple_files() -> Result<()> {
 
     // Should need to run - no outputs exist
     assert!(
-        scheduler.needs_rebuild(&task).await?,
+        scheduler.needs_rebuild(&task).await,
         "Should need rebuild with missing outputs"
     );
 
@@ -793,7 +793,7 @@ async fn test_file_dependencies_multiple_files() -> Result<()> {
 
     // Should NOT need rebuild - outputs are newer than inputs
     assert!(
-        !scheduler.needs_rebuild(&task).await?,
+        !scheduler.needs_rebuild(&task).await,
         "Should not need rebuild after execution"
     );
 
@@ -803,7 +803,7 @@ async fn test_file_dependencies_multiple_files() -> Result<()> {
 
     // Should need rebuild - input is newer than output
     assert!(
-        scheduler.needs_rebuild(&task).await?,
+        scheduler.needs_rebuild(&task).await,
         "Should need rebuild when input is modified"
     );
 
@@ -851,11 +851,11 @@ async fn test_file_dependencies_task_chain() -> Result<()> {
 
     // Both tasks should need to run initially
     assert!(
-        scheduler.needs_rebuild(&process_task).await?,
+        scheduler.needs_rebuild(&process_task).await,
         "Process task should need rebuild"
     );
     assert!(
-        scheduler.needs_rebuild(&convert_task).await?,
+        scheduler.needs_rebuild(&convert_task).await,
         "Convert task should need rebuild"
     );
 
@@ -882,11 +882,11 @@ async fn test_file_dependencies_task_chain() -> Result<()> {
 
     // Neither task should need rebuild now
     assert!(
-        !scheduler.needs_rebuild(&process_task).await?,
+        !scheduler.needs_rebuild(&process_task).await,
         "Process task should not need rebuild after completion"
     );
     assert!(
-        !scheduler.needs_rebuild(&convert_task).await?,
+        !scheduler.needs_rebuild(&convert_task).await,
         "Convert task should not need rebuild after completion"
     );
 
@@ -952,7 +952,7 @@ async fn test_file_dependencies_task_skipping() -> Result<()> {
 
     // Task should NOT need to run - output is newer than input
     assert!(
-        !scheduler.needs_rebuild(&task).await?,
+        !scheduler.needs_rebuild(&task).await,
         "Task should not need rebuild when output is newer"
     );
 
@@ -967,7 +967,7 @@ async fn test_file_dependencies_task_skipping() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(10));
     std::fs::write(&input_file, "setting=new_value")?;
     assert!(
-        scheduler.needs_rebuild(&task).await?,
+        scheduler.needs_rebuild(&task).await,
         "Task should need rebuild when input is modified"
     );
 
@@ -1013,7 +1013,7 @@ async fn test_file_dependencies_modification_detection() -> Result<()> {
 
     // Should need rebuild because new_file is newer than output
     assert!(
-        scheduler.needs_rebuild(&task).await?,
+        scheduler.needs_rebuild(&task).await,
         "Should need rebuild when any input is newer than output"
     );
 
@@ -1023,7 +1023,7 @@ async fn test_file_dependencies_modification_detection() -> Result<()> {
 
     // Should NOT need rebuild now
     assert!(
-        !scheduler.needs_rebuild(&task).await?,
+        !scheduler.needs_rebuild(&task).await,
         "Should not need rebuild when output is newer than all inputs"
     );
 
@@ -1033,7 +1033,7 @@ async fn test_file_dependencies_modification_detection() -> Result<()> {
 
     // Should need rebuild again
     assert!(
-        scheduler.needs_rebuild(&task).await?,
+        scheduler.needs_rebuild(&task).await,
         "Should need rebuild when any input file is touched"
     );
 

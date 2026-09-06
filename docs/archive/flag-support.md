@@ -29,7 +29,7 @@ The detection logic works as follows:
 2. If the parameter has no short/long form, it becomes a **positional argument** (`ParamType::POS`)
 3. Otherwise, it defaults to an **optional argument** (`ParamType::OPT`) that requires a value
 
-See [`docs/commands/positional-parameters.md`](commands/positional-parameters.md)
+See [`docs/commands/positional-parameters.md`](../commands/positional-parameters.md)
 for the positional declaration shape, a worked example, and the one sharp
 edge (a positional value colliding with another task's name).
 

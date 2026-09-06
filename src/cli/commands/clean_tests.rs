@@ -191,7 +191,7 @@ async fn test_read_ottofile_path_with_metadata() -> Result<()> {
         "abc12345".to_string(),
         1234567890,
     );
-    let yaml_content = serde_yaml::to_string(&metadata)?;
+    let yaml_content = yaml_serde::to_string(&metadata)?;
     fs::write(run_dir.join("run.yaml"), yaml_content)?;
 
     let cmd = CleanCommand {
@@ -237,7 +237,7 @@ async fn test_read_ottofile_path_no_ottofile_field() -> Result<()> {
     fs::create_dir_all(&run_dir)?;
 
     let metadata = RunMetadata::minimal(None, "abc12345".to_string(), 1234567890);
-    let yaml_content = serde_yaml::to_string(&metadata)?;
+    let yaml_content = yaml_serde::to_string(&metadata)?;
     fs::write(run_dir.join("run.yaml"), yaml_content)?;
 
     let cmd = CleanCommand {
@@ -275,100 +275,6 @@ async fn test_read_ottofile_path_malformed_yaml() -> Result<()> {
     let ottofile_path = cmd.read_ottofile_path(&run_dir);
 
     assert_eq!(ottofile_path, None);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_format_timestamp() -> Result<()> {
-    let cmd = CleanCommand {
-        keep_days: 30,
-        keep_last: None,
-        keep_failed: None,
-        dry_run: true,
-        project_filter: None,
-        no_db: true,
-        quiet: false,
-    };
-
-    // Test a known timestamp
-    let timestamp = 1609459200; // 2021-01-01 00:00:00 UTC
-    let formatted = cmd.format_timestamp(timestamp);
-
-    assert_eq!(formatted, "2021-01-01 00:00:00");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_format_size_bytes() -> Result<()> {
-    let cmd = CleanCommand {
-        keep_days: 30,
-        keep_last: None,
-        keep_failed: None,
-        dry_run: true,
-        project_filter: None,
-        no_db: true,
-        quiet: false,
-    };
-
-    assert_eq!(cmd.format_size(0), "0 B");
-    assert_eq!(cmd.format_size(512), "512 B");
-    assert_eq!(cmd.format_size(1023), "1023 B");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_format_size_kilobytes() -> Result<()> {
-    let cmd = CleanCommand {
-        keep_days: 30,
-        keep_last: None,
-        keep_failed: None,
-        dry_run: true,
-        project_filter: None,
-        no_db: true,
-        quiet: false,
-    };
-
-    assert_eq!(cmd.format_size(1024), "1.0 KB");
-    assert_eq!(cmd.format_size(2048), "2.0 KB");
-    assert_eq!(cmd.format_size(1536), "1.5 KB");
-    assert_eq!(cmd.format_size(100 * 1024), "100.0 KB");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_format_size_megabytes() -> Result<()> {
-    let cmd = CleanCommand {
-        keep_days: 30,
-        keep_last: None,
-        keep_failed: None,
-        dry_run: true,
-        project_filter: None,
-        no_db: true,
-        quiet: false,
-    };
-
-    assert_eq!(cmd.format_size(1024 * 1024), "1.0 MB");
-    assert_eq!(cmd.format_size(5 * 1024 * 1024), "5.0 MB");
-    assert_eq!(cmd.format_size(1536 * 1024), "1.5 MB");
-    assert_eq!(cmd.format_size(100 * 1024 * 1024), "100.0 MB");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_format_size_gigabytes() -> Result<()> {
-    let cmd = CleanCommand {
-        keep_days: 30,
-        keep_last: None,
-        keep_failed: None,
-        dry_run: true,
-        project_filter: None,
-        no_db: true,
-        quiet: false,
-    };
-
-    assert_eq!(cmd.format_size(1024 * 1024 * 1024), "1.0 GB");
-    assert_eq!(cmd.format_size(5 * 1024 * 1024 * 1024), "5.0 GB");
-    assert_eq!(cmd.format_size(1536 * 1024 * 1024), "1.5 GB");
     Ok(())
 }
 
@@ -427,7 +333,7 @@ async fn test_scan_with_ottofile_metadata() -> Result<()> {
         "abc12345".to_string(),
         old_timestamp,
     );
-    let yaml_content = serde_yaml::to_string(&metadata)?;
+    let yaml_content = yaml_serde::to_string(&metadata)?;
     fs::write(run_dir.join("run.yaml"), yaml_content)?;
 
     let cmd = CleanCommand {
@@ -691,7 +597,7 @@ async fn test_execute_with_database_dry_run() -> Result<()> {
     let store = create_store_with_runs();
 
     // Verify initial state
-    let initial_runs = store.get_recent_runs(100, None)?;
+    let initial_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(initial_runs.len(), 4);
 
     let cmd = CleanCommand {
@@ -708,7 +614,7 @@ async fn test_execute_with_database_dry_run() -> Result<()> {
     assert!(result.is_ok());
 
     // Dry run should not delete anything
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(final_runs.len(), 4);
     Ok(())
 }
@@ -718,7 +624,7 @@ async fn test_execute_with_database_actual_delete() -> Result<()> {
     let store = create_store_with_runs();
 
     // Verify initial state
-    let initial_runs = store.get_recent_runs(100, None)?;
+    let initial_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(initial_runs.len(), 4);
 
     let cmd = CleanCommand {
@@ -735,7 +641,7 @@ async fn test_execute_with_database_actual_delete() -> Result<()> {
     assert!(result.is_ok());
 
     // Should have deleted 3 old runs (40 day, 35 day, 45 day)
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(final_runs.len(), 1);
     Ok(())
 }
@@ -758,7 +664,7 @@ async fn test_execute_with_database_project_filter() -> Result<()> {
     assert!(result.is_ok());
 
     // Should have deleted 2 old runs from abc123, kept def456's old run
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     // Remaining: recent abc123 + old def456
     assert_eq!(final_runs.len(), 2);
     Ok(())
@@ -782,7 +688,7 @@ async fn test_execute_with_database_keep_last() -> Result<()> {
     assert!(result.is_ok());
 
     // Should keep the 2 most recent runs
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(final_runs.len(), 2);
     Ok(())
 }
@@ -806,7 +712,7 @@ async fn test_execute_with_database_keep_failed_longer() -> Result<()> {
 
     // Should have deleted 2 old successful runs (40 day, 45 day)
     // but kept the 35-day failed run (within 60-day retention)
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(final_runs.len(), 2);
     Ok(())
 }
@@ -863,7 +769,7 @@ async fn test_delete_run_from_store() -> Result<()> {
     let old_timestamp = now - (40 * 86400);
 
     // Verify run exists
-    let initial_runs = store.get_recent_runs(100, None)?;
+    let initial_runs = store.get_runs_with_filters(None, None, 100)?;
     let target = initial_runs
         .iter()
         .find(|r| r.timestamp == old_timestamp)
@@ -874,7 +780,7 @@ async fn test_delete_run_from_store() -> Result<()> {
     assert!(deleted.is_some());
 
     // Verify it's gone
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert!(!final_runs.iter().any(|r| r.timestamp == old_timestamp));
     Ok(())
 }
@@ -930,7 +836,7 @@ async fn test_execute_with_database_ignores_missing_otto_home() -> Result<()> {
 
     // The 3 old runs (40, 35, 45 days) should have been deleted via the
     // injected store despite `OTTO_HOME` not existing on disk.
-    let final_runs = store.get_recent_runs(100, None)?;
+    let final_runs = store.get_runs_with_filters(None, None, 100)?;
     assert_eq!(final_runs.len(), 1);
     assert!(
         !missing_otto_home.exists(),
@@ -962,5 +868,143 @@ async fn test_get_otto_home_honors_otto_home_env() -> Result<()> {
     }
 
     assert_eq!(resolved?, temp_dir.path());
+    Ok(())
+}
+
+/// Phase 7 success criterion: a DB-path `Clean` with one refused directory
+/// exits non-zero. `MemoryStateStore` never refuses a delete (it has no
+/// filesystem to protect), so this drives the real `StateManager`, whose
+/// `delete_run` calls `ensure_deletable_under_root` and returns `Err` for a
+/// run directory that has been replaced by a symlink - the same defect
+/// `delete_run_never_deletes_through_a_symlinked_run_directory`
+/// (`manager_tests.rs`) covers one layer down. Before this phase,
+/// `execute_with_database` printed that `Err` to stderr and returned `Ok(())`
+/// anyway, so a script driving `Clean` could not see the refusal.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_db_path_clean_with_one_refused_directory_exits_non_zero() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let db_path = temp_dir.path().join("test.db");
+    let manager = StateManager::with_db_path(db_path)?;
+
+    let otto_home = temp_dir.path().join("otto-home");
+    let project = otto_home.join("widget-abc12345");
+    fs::create_dir_all(&project)?;
+
+    let victim = temp_dir.path().join("victim");
+    fs::create_dir_all(&victim)?;
+    fs::write(victim.join("precious.txt"), "keep me")?;
+    let run_dir = project.join("1000000000");
+    std::os::unix::fs::symlink(&victim, &run_dir)?;
+
+    let metadata = RunMetadata::minimal(
+        Some(PathBuf::from("/test/otto.yml")),
+        "abc12345".to_string(),
+        1_000_000_000,
+    )
+    .with_run_dir(run_dir);
+    manager.record_run_start(&metadata)?;
+
+    let store: Arc<dyn StateStore> = Arc::new(manager);
+    let cmd = CleanCommand {
+        keep_days: 0,
+        keep_last: None,
+        keep_failed: None,
+        dry_run: false,
+        project_filter: None,
+        no_db: false,
+        quiet: true,
+    };
+
+    let previous = std::env::var("OTTO_HOME").ok();
+    unsafe {
+        std::env::set_var("OTTO_HOME", &otto_home);
+    }
+    let result = cmd.execute_with_store(Some(store)).await;
+    unsafe {
+        match &previous {
+            Some(home) => std::env::set_var("OTTO_HOME", home),
+            None => std::env::remove_var("OTTO_HOME"),
+        }
+    }
+
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("failed"), "{err}");
+    assert!(
+        victim.join("precious.txt").exists(),
+        "the symlink target must survive the refused delete"
+    );
+    Ok(())
+}
+
+/// The `quiet` gate on the already-gone notice, pinned where it can be.
+///
+/// `auto_prune` builds its `CleanCommand` with `quiet: true` and runs after
+/// every task, so an ungated notice landed in the middle of the user's build
+/// output. The race that produces this arm cannot be staged deterministically
+/// through the binary and stderr cannot be captured from a unit test, so the
+/// decision is a pure function and this asserts the decision.
+#[test]
+fn the_already_gone_notice_is_silent_under_quiet() {
+    assert_eq!(already_gone_notice(true, 1_788_665_760), None);
+    assert_eq!(
+        already_gone_notice(false, 1_788_665_760).as_deref(),
+        Some("  Warning: Run 1788665760 not found in database")
+    );
+}
+
+/// The per-run delete errors are capped, so a prune that keeps failing does not
+/// print a longer report every interval as its backlog grows.
+#[test]
+fn delete_errors_are_capped_at_a_summary_line() {
+    let line = |shown| delete_error_notice(shown, 1_788_665_760, "Refusing to delete run directory");
+
+    for shown in 0..MAX_DELETE_ERRORS_SHOWN {
+        assert_eq!(
+            line(shown).as_deref(),
+            Some("  Error deleting run 1788665760: Refusing to delete run directory"),
+            "the first {MAX_DELETE_ERRORS_SHOWN} errors print in full"
+        );
+    }
+    assert_eq!(
+        line(MAX_DELETE_ERRORS_SHOWN).as_deref(),
+        Some("  ... further delete errors not shown; the count is in the failure below")
+    );
+    assert_eq!(line(MAX_DELETE_ERRORS_SHOWN + 1), None);
+    assert_eq!(line(MAX_DELETE_ERRORS_SHOWN + 500), None);
+}
+
+/// A row someone else deleted first is not a failed delete: `Clean` exits 0, so
+/// a script driving it beside a run whose own `auto_prune` fires does not see a
+/// spurious failure.
+///
+/// The store is a real `MemoryStateStore` told to lose every delete race
+/// (`lose_every_delete_race`), which is what the losing pruner sees:
+/// `find_old_runs` reported rows and every `delete_run` then answered
+/// `Ok(None)`. That switch replaced a 14-method delegating double in this file,
+/// which churned every time `StateStore` grew a method.
+///
+/// Scope: this asserts the exit code and nothing else. The `quiet` gate on the
+/// per-run warning is not asserted here (stderr is not capturable from a unit
+/// test), and `auto_prune`'s fall-through past a `Clean` error is pinned in
+/// `executor::pruning_tests`, not here.
+#[tokio::test]
+async fn a_run_deleted_by_someone_else_first_is_not_a_failed_delete() -> Result<()> {
+    let memory = create_store_with_runs();
+    memory.lose_every_delete_race();
+    let store: Arc<dyn StateStore> = memory;
+
+    let cmd = CleanCommand {
+        keep_days: 30,
+        keep_last: None,
+        keep_failed: None,
+        dry_run: false,
+        project_filter: None,
+        no_db: false,
+        quiet: true,
+    };
+
+    let result = cmd.execute_with_store(Some(store)).await;
+    assert!(result.is_ok(), "rows already gone must exit 0: {}", result.unwrap_err());
     Ok(())
 }

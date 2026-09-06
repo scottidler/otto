@@ -1,551 +1,168 @@
 impl Parser {
-    fn inject_graph_meta_task(&mut self) {
-        use crate::cfg::param::{Nargs, ParamType};
-
-        let graph_task = TaskSpec {
-            name: "Graph".to_string(),
-            help: Some("[built-in] Visualize the task dependency graph".to_string()),
-            after: vec![],
-            before: vec![],
-            input: vec![],
-            output: vec![],
-            envs: HashMap::new(),
-            params: {
-                let mut params = crate::cfg::param::ParamSpecs::new();
-
-                params.insert(
-                    "format".to_string(),
-                    ParamSpec {
-                        name: "format".to_string(),
-                        short: Some('f'),
-                        long: Some("format".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: None,
-                        default: Some("ascii".to_string()),
-                        choices_command: None,
-                        choices: vec![
-                            "ascii".to_string(),
-                            "dot".to_string(),
-                            "svg".to_string(),
-                            "png".to_string(),
-                            "pdf".to_string(),
-                        ],
-                        nargs: Nargs::One,
-                        help: Some("Output format".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "output".to_string(),
-                    ParamSpec {
-                        name: "output".to_string(),
-                        short: None,
-                        long: Some("output".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: None,
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::One,
-                        help: Some("Output file path".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params
-            },
-            action: "# Built-in graph command".to_string(),
-            foreach: None,
-            virtual_parent: false,
-            tty: None,
-            on_failure: vec![],
-        };
-
-        self.config_spec.tasks.insert("Graph".to_string(), graph_task);
-    }
-
-    fn inject_clean_meta_task(&mut self) {
-        use crate::cfg::param::{Nargs, ParamType};
-
-        let clean_task = TaskSpec {
-            name: "Clean".to_string(),
-            help: Some("[built-in] Clean old runs from ~/.otto/".to_string()),
-            after: vec![],
-            before: vec![],
-            input: vec![],
-            output: vec![],
-            envs: HashMap::new(),
-            params: {
-                let mut params = crate::cfg::param::ParamSpecs::new();
-
-                params.insert(
-                    "keep".to_string(),
-                    ParamSpec {
-                        name: "keep".to_string(),
-                        short: None,
-                        long: Some("keep".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: Some("DAYS".to_string()),
-                        default: Some("30".to_string()),
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::One,
-                        help: Some("Keep runs from the last N days".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "dry-run".to_string(),
-                    ParamSpec {
-                        name: "dry-run".to_string(),
-                        short: None,
-                        long: Some("dry-run".to_string()),
-                        param_type: ParamType::FLG,
-                        metavar: None,
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::Zero,
-                        help: Some("Show what would be deleted without actually deleting".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "project".to_string(),
-                    ParamSpec {
-                        name: "project".to_string(),
-                        short: None,
-                        long: Some("project".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: Some("HASH".to_string()),
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::One,
-                        help: Some("Only clean runs for a specific project".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params
-            },
-            action: "# Built-in clean command".to_string(),
-            foreach: None,
-            virtual_parent: false,
-            tty: None,
-            on_failure: vec![],
-        };
-
-        self.config_spec.tasks.insert("Clean".to_string(), clean_task);
-    }
-
-    fn inject_history_meta_task(&mut self) {
-        use crate::cfg::param::{Nargs, ParamType};
-
-        let history_task = TaskSpec {
-            name: "History".to_string(),
-            help: Some("[built-in] View execution history".to_string()),
-            after: vec![],
-            before: vec![],
-            input: vec![],
-            output: vec![],
-            envs: HashMap::new(),
-            params: {
-                let mut params = crate::cfg::param::ParamSpecs::new();
-
-                params.insert(
-                    "task".to_string(),
-                    ParamSpec {
-                        name: "task".to_string(),
-                        short: Some('t'),
-                        long: Some("task".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: Some("TASK".to_string()),
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::One,
-                        help: Some("Show history for a specific task".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "limit".to_string(),
-                    ParamSpec {
-                        name: "limit".to_string(),
-                        short: Some('n'),
-                        long: Some("limit".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: Some("N".to_string()),
-                        default: Some("20".to_string()),
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::One,
-                        help: Some("Limit number of results".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "status".to_string(),
-                    ParamSpec {
-                        name: "status".to_string(),
-                        short: Some('s'),
-                        long: Some("status".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: Some("STATUS".to_string()),
-                        default: None,
-                        choices_command: None,
-                        choices: vec!["success".to_string(), "failed".to_string(), "running".to_string()],
-                        nargs: Nargs::One,
-                        help: Some("Filter by status".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "project".to_string(),
-                    ParamSpec {
-                        name: "project".to_string(),
-                        short: Some('p'),
-                        long: Some("project".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: Some("HASH".to_string()),
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::One,
-                        help: Some("Filter by project hash".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "json".to_string(),
-                    ParamSpec {
-                        name: "json".to_string(),
-                        short: None,
-                        long: Some("json".to_string()),
-                        param_type: ParamType::FLG,
-                        metavar: None,
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::Zero,
-                        help: Some("Output as JSON".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params
-            },
-            action: "# Built-in history command".to_string(),
-            foreach: None,
-            virtual_parent: false,
-            tty: None,
-            on_failure: vec![],
-        };
-
-        self.config_spec.tasks.insert("History".to_string(), history_task);
-    }
-
-    fn inject_stats_meta_task(&mut self) {
-        use crate::cfg::param::{Nargs, ParamType};
-
-        let stats_task = TaskSpec {
-            name: "Stats".to_string(),
-            help: Some("[built-in] View execution statistics".to_string()),
-            after: vec![],
-            before: vec![],
-            input: vec![],
-            output: vec![],
-            envs: HashMap::new(),
-            params: {
-                let mut params = crate::cfg::param::ParamSpecs::new();
-
-                params.insert(
-                    "task".to_string(),
-                    ParamSpec {
-                        name: "task".to_string(),
-                        short: Some('t'),
-                        long: Some("task".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: Some("TASK".to_string()),
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::One,
-                        help: Some("Show stats for a specific task".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "limit".to_string(),
-                    ParamSpec {
-                        name: "limit".to_string(),
-                        short: Some('n'),
-                        long: Some("limit".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: Some("N".to_string()),
-                        default: Some("10".to_string()),
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::One,
-                        help: Some("Limit number of tasks shown".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "json".to_string(),
-                    ParamSpec {
-                        name: "json".to_string(),
-                        short: None,
-                        long: Some("json".to_string()),
-                        param_type: ParamType::FLG,
-                        metavar: None,
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::Zero,
-                        help: Some("Output as JSON".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params
-            },
-            action: "# Built-in stats command".to_string(),
-            foreach: None,
-            virtual_parent: false,
-            tty: None,
-            on_failure: vec![],
-        };
-
-        self.config_spec.tasks.insert("Stats".to_string(), stats_task);
-    }
-
-    fn inject_convert_meta_task(&mut self) {
-        use crate::cfg::param::{Nargs, ParamType};
-
-        let convert_task = TaskSpec {
-            name: "Convert".to_string(),
-            help: Some("[built-in] Convert Makefile to Otto YAML format".to_string()),
-            after: vec![],
-            before: vec![],
-            input: vec![],
-            output: vec![],
-            envs: HashMap::new(),
-            params: {
-                let mut params = crate::cfg::param::ParamSpecs::new();
-
-                params.insert(
-                    "strict".to_string(),
-                    ParamSpec {
-                        name: "strict".to_string(),
-                        short: None,
-                        long: Some("strict".to_string()),
-                        param_type: ParamType::FLG,
-                        metavar: None,
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::Zero,
-                        help: Some("Treat warnings as errors".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "output".to_string(),
-                    ParamSpec {
-                        name: "output".to_string(),
-                        short: Some('o'),
-                        long: Some("output".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: Some("FILE".to_string()),
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::One,
-                        help: Some("Output file (default: stdout)".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params
-            },
-            action: "# Built-in convert command".to_string(),
-            foreach: None,
-            virtual_parent: false,
-            tty: None,
-            on_failure: vec![],
-        };
-
-        self.config_spec.tasks.insert("Convert".to_string(), convert_task);
-    }
-
-    fn inject_upgrade_meta_task(&mut self) {
-        use crate::cfg::param::{Nargs, ParamType};
-
-        let upgrade_task = TaskSpec {
-            name: "Upgrade".to_string(),
-            help: Some("[built-in] Upgrade Otto to a newer version".to_string()),
-            after: vec![],
-            before: vec![],
-            input: vec![],
-            output: vec![],
-            envs: HashMap::new(),
-            params: {
-                let mut params = crate::cfg::param::ParamSpecs::new();
-
-                params.insert(
-                    "dry-run".to_string(),
-                    ParamSpec {
-                        name: "dry-run".to_string(),
-                        short: None,
-                        long: Some("dry-run".to_string()),
-                        param_type: ParamType::FLG,
-                        metavar: None,
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::Zero,
-                        help: Some("Show what would be done without doing it".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "version".to_string(),
-                    ParamSpec {
-                        name: "version".to_string(),
-                        short: Some('v'),
-                        long: Some("version".to_string()),
-                        param_type: ParamType::OPT,
-                        metavar: Some("VERSION".to_string()),
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::One,
-                        help: Some("Specific version to upgrade to".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "list-versions".to_string(),
-                    ParamSpec {
-                        name: "list-versions".to_string(),
-                        short: None,
-                        long: Some("list-versions".to_string()),
-                        param_type: ParamType::FLG,
-                        metavar: None,
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::Zero,
-                        help: Some("List available versions".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "rollback".to_string(),
-                    ParamSpec {
-                        name: "rollback".to_string(),
-                        short: None,
-                        long: Some("rollback".to_string()),
-                        param_type: ParamType::FLG,
-                        metavar: None,
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::Zero,
-                        help: Some("Rollback to previous version".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "force".to_string(),
-                    ParamSpec {
-                        name: "force".to_string(),
-                        short: None,
-                        long: Some("force".to_string()),
-                        param_type: ParamType::FLG,
-                        metavar: None,
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::Zero,
-                        help: Some("Force upgrade even if already on target version".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params.insert(
-                    "no-backup".to_string(),
-                    ParamSpec {
-                        name: "no-backup".to_string(),
-                        short: None,
-                        long: Some("no-backup".to_string()),
-                        param_type: ParamType::FLG,
-                        metavar: None,
-                        default: None,
-                        choices_command: None,
-                        choices: vec![],
-                        nargs: Nargs::Zero,
-                        help: Some("Skip creating backup".to_string()),
-                        value: Value::Empty,
-                        required: false,
-                    },
-                );
-
-                params
-            },
-            action: "# Built-in upgrade command".to_string(),
-            foreach: None,
-            virtual_parent: false,
-            tty: None,
-            on_failure: vec![],
-        };
-
-        self.config_spec.tasks.insert("Upgrade".to_string(), upgrade_task);
-    }
-
+    /// Give every builtin a `TaskSpec`, so its name is reserved, `otto --help`
+    /// lists it, and `otto help <NAME>` can render its flags.
     fn inject_builtin_commands(&mut self) {
-        self.inject_clean_meta_task();
-        self.inject_convert_meta_task();
-        self.inject_graph_meta_task();
-        self.inject_history_meta_task();
-        self.inject_stats_meta_task();
-        self.inject_upgrade_meta_task();
+        for command in builtin_clap_commands() {
+            let task = builtin_task(&command);
+            self.config_spec.tasks.insert(task.name.clone(), task);
+        }
     }
+}
 
+/// Every builtin, as the clap `Command` its own parser uses.
+///
+/// This is the whole point of the derivation below: the `Command` here is the
+/// same one `main`'s early route parses the invocation with, so a flag exists
+/// in exactly one place. `otto help Clean` and `otto Clean --help` describe
+/// the same command because they are the same declaration. The hand-written
+/// `TaskSpec` literals this replaced had drifted: meta said `--keep DAYS`
+/// while clap said `--keep-days` and also took `--keep-last`, `--keep-failed`
+/// and `--no-db`; `History`/`Stats` meta declared `-t|--task TASK` while clap
+/// took `TASK` positionally; `Upgrade` meta was missing `--backup-dir` and
+/// `--github-token`.
+///
+/// Each `#[command(name = ...)]` is the builtin's task name (`Clean`, not
+/// `clean`), because that name is what the derived `TaskSpec` is keyed by and
+/// what `BUILTIN_COMMANDS` reserves.
+fn builtin_clap_commands() -> Vec<Command> {
+    use crate::cli::commands::{
+        CleanCommand, ConvertCommand, GraphCommand, HistoryCommand, StatsCommand, UpgradeCommand,
+    };
+    use clap::CommandFactory;
+
+    vec![
+        CleanCommand::command(),
+        ConvertCommand::command(),
+        GraphCommand::command(),
+        HistoryCommand::command(),
+        StatsCommand::command(),
+        UpgradeCommand::command(),
+    ]
+}
+
+/// The `TaskSpec` for a builtin, derived from its clap `Command`.
+///
+/// `help` is that `Command`'s own `about` with the `[built-in]` marker in
+/// front, the marker being what tells a reader the name is otto's and not
+/// their ottofile's. It used to be a second, hand-written sentence per
+/// builtin, and three of the six had drifted from the `about` clap renders:
+/// `otto --help` said "Clean old runs from ~/.otto/" where `otto Clean --help`
+/// said "Clean old otto run directories". One declaration, two renderings.
+///
+/// The fields clap has no way to express are identical for all six and live
+/// here: a builtin is dispatched by name (`app::dispatch_builtin`), so its
+/// `action` is never executed and exists only to be printed by a serialized
+/// spec; and none of them is a foreach parent, a virtual parent, a tty task,
+/// or an `on-failure:` target.
+fn builtin_task(cmd: &Command) -> TaskSpec {
+    let name = cmd.get_name().to_string();
+    let params = cmd
+        .get_arguments()
+        // A hidden arg is one help does not show and the meta task must not
+        // advertise either.
+        .filter(|arg| !arg.is_hide_set())
+        .map(|arg| {
+            let param = builtin_param(arg);
+            (param.name.clone(), param)
+        })
+        .collect();
+
+    TaskSpec {
+        help: Some(format!("[built-in] {}", cmd.get_about().map(|about| about.to_string()).unwrap_or_default())),
+        after: vec![],
+        before: vec![],
+        input: vec![],
+        output: vec![],
+        envs: HashMap::new(),
+        params,
+        action: format!("# Built-in {name} command"),
+        foreach: None,
+        virtual_parent: false,
+        tty: None,
+        on_failure: vec![],
+        name,
+    }
+}
+
+/// One clap `Arg` as the `ParamSpec` otto's own parser and help renderer read.
+fn builtin_param(arg: &Arg) -> ParamSpec {
+    // A flag is the action, not the type: `SetTrue` is what clap's derive
+    // gives a `bool` field, and it is the one shape that consumes no value.
+    let is_flag = matches!(arg.get_action(), clap::ArgAction::SetTrue | clap::ArgAction::SetFalse);
+
+    let long = arg.get_long().map(str::to_string);
+    // The name is what a user types, so a long option is named by its long.
+    // A positional has neither long nor short, so it falls back to clap's id,
+    // which is the Rust field name (`task_name` -> `task-name`) - otto's param
+    // names are kebab-case and the env var it exports is derived from them.
+    let name = long
+        .clone()
+        .unwrap_or_else(|| arg.get_id().as_str().replace('_', "-"));
+
+    let param_type = if arg.is_positional() {
+        ParamType::POS
+    } else if is_flag {
+        ParamType::FLG
+    } else {
+        ParamType::OPT
+    };
+
+    // `get_num_args()` is `None` until clap builds the command, and building
+    // it would also inject clap's own `--help` as an arg to derive a param
+    // from. So the count comes from the action, with an explicit `num_args`
+    // honored when the derive set one (a `Vec` field does).
+    let nargs = match arg.get_num_args() {
+        Some(range) => num_args_to_nargs(range),
+        None if is_flag => Nargs::Zero,
+        None => Nargs::One,
+    };
+
+    ParamSpec {
+        name,
+        short: arg.get_short(),
+        long,
+        param_type,
+        metavar: arg
+            .get_value_names()
+            .and_then(|names| names.first())
+            .map(ToString::to_string),
+        default: arg
+            .get_default_values()
+            .first()
+            .map(|value| value.to_string_lossy().to_string()),
+        // No builtin has a dynamic value set: `choices-command:` is an
+        // ottofile-only feature with no clap equivalent, so it is the one
+        // `ParamSpec` field this derivation always leaves empty.
+        choices_command: None,
+        choices: if is_flag {
+            // A flag consumes no value, so it has no value set. clap reports
+            // `true`/`false` for one here only because `get_possible_values()`
+            // asks the arg's value parser, and an unbuilt `SetTrue` arg still
+            // carries the `bool` parser; after `Command::build` the same call
+            // returns nothing.
+            vec![]
+        } else {
+            arg.get_possible_values()
+                .iter()
+                .filter(|value| !value.is_hide_set())
+                .map(|value| value.get_name().to_string())
+                .collect()
+        },
+        nargs,
+        help: arg.get_help().map(ToString::to_string),
+        value: Value::Empty,
+        required: arg.is_required_set(),
+    }
+}
+
+/// The `nargs:` a clap value count means. Inverse of [`nargs_to_num_args`].
+fn num_args_to_nargs(range: clap::builder::ValueRange) -> Nargs {
+    match (range.min_values(), range.max_values()) {
+        (0, 0) => Nargs::Zero,
+        (1, 1) => Nargs::One,
+        (0, 1) => Nargs::OneOrZero,
+        (1, usize::MAX) => Nargs::OneOrMore,
+        (0, usize::MAX) => Nargs::ZeroOrMore,
+        (min, max) => Nargs::Range(min, max),
+    }
 }

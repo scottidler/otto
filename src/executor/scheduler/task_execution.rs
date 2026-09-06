@@ -6,7 +6,23 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     /// the action processor - lands in the same place, and that place is the
     /// only sender. Before this, a `?` on any of those abandoned the task with
     /// nothing sent, and the scheduler waited on it forever.
-    async fn execute_task(&self, task: Task, tx: mpsc::Sender<TaskReport>, active: &mut ActiveTasks) -> Result<()> {
+    ///
+    /// `suppress_terminal` says the task's bytes reach only its two logs. A
+    /// buffered foreach subtask's sole path to the terminal is ordered replay
+    /// (2026-08-31 design doc, Phase 4), so it is suppressed here - but whether
+    /// that path exists is the replay *cursor's* answer, not the parser flag's,
+    /// which is why the caller computes it. `otto say:alpha` on a
+    /// `buffer: true` foreach runs a task still carrying `buffered: true` while
+    /// the cursor has no group that owns it: nothing ever replayed its logs and
+    /// the run printed only `[say:alpha] finished successfully`. The flag stays
+    /// as the cursor's input; it is no longer the suppression decision.
+    async fn execute_task(
+        &self,
+        task: Task,
+        tx: mpsc::Sender<TaskReport>,
+        active: &mut ActiveTasks,
+        suppress_terminal: bool,
+    ) -> Result<()> {
         let class = admission_for(&task);
         debug!(
             "execute_task: task={} tty={} admission={class:?}",
@@ -21,9 +37,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         let envs = task.envs.clone();
         let tasks_dir = self.workspace.run().join("tasks");
         let execution_context = self.execution_context.clone();
-        // A buffered foreach subtask's bytes reach only its two logs; ordered
-        // replay is the sole path to the terminal for them (design doc Phase 4).
-        let suppress_terminal = self.tui_mode || task.buffered;
         let no_prefix = self.no_prefix;
         let task_streams = self.task_streams.clone();
         let is_virtual_parent = task.is_virtual_parent;
@@ -160,10 +173,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 let action_processor = ActionProcessor::new(workspace.clone(), &task_name)?;
                 let processed_action = action_processor.process(&task.action, &task)?;
 
-                // Extract script path and determine interpreter
-                let (script_path, interpreter) = match processed_action {
-                    ProcessedAction::Bash { path, .. } => (path, "bash"),
-                    ProcessedAction::Python3 { path, .. } => (path, "python3"),
+                // Extract script path, interpreter, and the hash the processor
+                // already computed over the rendered script - which is what the
+                // `tasks.script_hash` column is for.
+                let (script_path, interpreter, script_hash) = match processed_action {
+                    ProcessedAction::Bash { path, hash, .. } => (path, "bash", hash),
+                    ProcessedAction::Python3 { path, hash, .. } => (path, "python3", hash),
                 };
 
                 // Record task start in database with paths (graceful degradation)
@@ -172,6 +187,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     let stderr_path = tasks_dir.join(&task_name).join("stderr.log");
                     let name = task_name.clone();
                     let script = script_path.clone();
+                    let hash = script_hash.clone();
 
                     // rusqlite is synchronous and holds a mutex across the
                     // write, so it runs on the blocking pool rather than
@@ -180,7 +196,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         store.record_task_start(
                             run_id,
                             &name,
-                            None, // TODO: Compute script hash in future phase
+                            Some(&hash),
                             Some(&stdout_path),
                             Some(&stderr_path),
                             Some(&script),
@@ -215,28 +231,67 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     // workspace open.
                     .kill_on_drop(true);
 
-                // Its own process group, so a signal aimed at otto does not race
-                // ahead of otto's own teardown, and so the child's own children are
-                // reachable as a group: `abandon_run` signals this pgid, which is
-                // the only thing that reaches a grandchild. Until that reaping
-                // existed, this line created a group nothing ever signalled and
-                // the reachability the sentence above claims was never used.
-                // NOT for a `tty: true` task: that task owns the terminal, and a
-                // background process group reading from it gets SIGTTIN and stops.
-                // Its registry entry records that (`own_group: false`), so
-                // cancellation signals its pid alone - otto is in that group.
-                #[cfg(unix)]
+                // A non-`tty` task cannot read the terminal, by either route.
+                // `tty: true` is how a task gets one. A prompt in a non-`tty`
+                // body is a task failure carrying the program's own error text,
+                // not a silent hang. The two halves below are one rule and must
+                // stay together: `setsid` alone does not hold for a bash body,
+                // because a session leader with a terminal on fd 0 acquires that
+                // terminal as its controlling terminal at startup.
                 if !tty {
-                    cmd.process_group(0);
+                    // Route one, fd 0. Only when otto's own stdin IS a terminal:
+                    // a pipe or a file is still inherited, so `echo x | otto t`
+                    // keeps working, and a pipe never produces SIGTTIN anyway.
+                    // A pty fd inherited into another session is not that
+                    // child's controlling terminal, so reading it neither stops
+                    // nor fails - it blocks forever waiting for keystrokes
+                    // nobody is routing there. `/dev/null` turns that into EOF.
+                    if std::io::stdin().is_terminal() {
+                        cmd.stdin(std::process::Stdio::null());
+                    }
+
+                    // Route two, `/dev/tty`. Its own SESSION, which is also its
+                    // own process group: a signal aimed at otto does not race
+                    // ahead of otto's own teardown, the child's own children are
+                    // reachable as a group (`abandon_run` signals this pgid,
+                    // which is the only thing that reaches a grandchild), AND
+                    // the child has no controlling terminal, so `open("/dev/tty")`
+                    // fails with ENXIO for every program in the body whatever it
+                    // does with its signal dispositions. This replaces a plain
+                    // `process_group(0)`: `setsid` returns EPERM if the caller is
+                    // already a group leader, so the two cannot be stacked, and
+                    // it yields `pgid == pid` either way. Ignoring SIGTTIN
+                    // instead is defeatable by the child - an interactive shell
+                    // resets the disposition and still stops, and `sudo`
+                    // reinstalls its own handler and spins.
+                    // NOT for a `tty: true` task: that task owns the terminal, so
+                    // it stays in otto's session and group. Its registry entry
+                    // records that (`own_group: false`), so cancellation signals
+                    // its pid alone - otto is in that group.
+                    #[cfg(unix)]
+                    // SAFETY: `pre_exec` runs between fork and exec, where only
+                    // async-signal-safe calls are legal. `setsid` is one, it
+                    // takes no arguments and touches no memory this process
+                    // shares, and the closure allocates nothing.
+                    unsafe {
+                        cmd.pre_exec(|| {
+                            if libc::setsid() == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            Ok(())
+                        });
+                    }
                 }
 
                 // Execute without timeout - runs until completion or failure
                 let result = async {
                     if tty {
-                        // The task owns the terminal: inherit stdout/stderr (stdin is
-                        // already inherited - otto never redirects it) and skip
-                        // TaskStreams entirely, so there is no capture and no [task]
-                        // prefix. The logs still exist, carrying the marker line.
+                        // The task owns the terminal: inherit stdout/stderr and
+                        // skip TaskStreams entirely, so there is no capture and no
+                        // [task] prefix. stdin stays inherited too - this is the
+                        // one path that is allowed to read the terminal, which is
+                        // the whole point of the flag. The logs still exist,
+                        // carrying the marker line.
                         write_tty_log_markers(&tasks_dir, &task_name).await?;
                         let mut child = cmd
                             .stdout(std::process::Stdio::inherit())
@@ -271,9 +326,10 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         .stderr(std::process::Stdio::piped())
                         .spawn()
                         .map_err(|e| eyre!("Task {task_name} could not start {interpreter}: {e}"))?;
-                    // `own_group` mirrors the `process_group(0)` above exactly,
-                    // including its `cfg`: claiming a group otto never created
-                    // would send cancellation at a pgid that is not one.
+                    // `own_group` mirrors the `setsid` above exactly, including
+                    // its `cfg`: claiming a group otto never created would send
+                    // cancellation at a pgid that is not one. A session leader is
+                    // always a group leader, so `pgid == pid` holds here.
                     register_child(&live_children, &task_name, child.id(), cfg!(unix)).await;
 
                     // Setup output streams
@@ -462,17 +518,17 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
 
                     TaskReport::success(task_name.clone()).with_drain(drain_issues)
                 }
-                Err(TaskFailure { error, exit_code: code }) => {
+                Err(TaskFailure { error }) => {
                     error!("Task {task_name} failed: {error}");
-                    // The body's own observation wins; `code` only carries a
-                    // value on paths that set it before failing.
-                    let recorded = code.or(exit_code);
 
                     // Record task failure in database (graceful degradation)
                     if let Some(task_id) = db_task_id
                         && let Some(store) = workspace.state_store()
                     {
-                        let code = recorded.unwrap_or(1);
+                        // `exit_code` is set by the run block when a process
+                        // actually exited, and is `None` on every path that
+                        // failed before or without one; 1 stands in for those.
+                        let code = exit_code.unwrap_or(1);
                         // Degrading gracefully is not the same as saying
                         // nothing: this used to be `let _ =`, so a failure to
                         // record a failure vanished entirely.
@@ -489,7 +545,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                         let mut statuses = task_statuses.lock().await;
                         statuses.insert(task_name.clone(), TaskStatus::Failed(error.to_string()));
                     }
-                    TaskReport::failure(task_name.clone(), error, recorded).with_drain(drain_issues)
+                    TaskReport::failure(task_name.clone(), error).with_drain(drain_issues)
                 }
             };
 

@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{self, BufRead, Write},
+    io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -44,7 +44,7 @@ const OUTPUT_PROCESSING_TIMEOUT_SECS: u64 = 5;
 /// blocks are flushed by otto, so nothing downstream is waiting on the child.
 /// Long enough for a trap handler, short enough that Ctrl+C does not feel
 /// wedged, and a teardown that still will not end has the second Ctrl+C
-/// (`install_interrupt_handler`, exit 130) as its escape hatch.
+/// (`install_stop_handler`, exit 130) as its escape hatch.
 const CANCEL_GRACE: Duration = Duration::from_millis(500);
 
 /// Capacity of the task-completion channel. Each started task sends exactly one
@@ -105,14 +105,10 @@ pub struct DrainIssue {
 /// name out with `error_str.split_whitespace().nth(1)`; for a spawn failure
 /// ("No such file or directory (os error 2)") that yielded "such", so the real
 /// task was never removed from the active set and the run hung until killed.
-/// `exit_code` is carried for the same reason: the database used to re-parse it
-/// out of the message and fall back to 1, so `exit 7` was recorded as 1.
 #[derive(Debug)]
 pub struct TaskReport {
     /// The task this report is about.
     pub name: String,
-    /// The process exit code, when a process ran and exited with one.
-    pub exit_code: Option<i32>,
     /// `None` when the task succeeded.
     pub error: Option<eyre::Report>,
     /// Streams whose drain did not complete. Empty means the logs are whole.
@@ -125,16 +121,14 @@ impl TaskReport {
     fn success(name: String) -> Self {
         Self {
             name,
-            exit_code: Some(0),
             error: None,
             drain: Vec::new(),
         }
     }
 
-    fn failure(name: String, error: eyre::Report, exit_code: Option<i32>) -> Self {
+    fn failure(name: String, error: eyre::Report) -> Self {
         Self {
             name,
-            exit_code,
             error: Some(error),
             drain: Vec::new(),
         }
@@ -160,37 +154,32 @@ enum Wakeup {
     Cancelled,
 }
 
-/// Failure of a task body, carrying the process exit code when there was one.
+/// Failure of a task body.
 ///
 /// Every `?` inside the body used to abandon the task without sending anything;
 /// this type is what lets the whole body be one fallible expression whose single
-/// exit path reports.
+/// exit path reports. The exit code is not carried here: the body's own
+/// `exit_code` local is in scope on that single report path, so a second copy
+/// travelling through this type could only ever agree with it or be wrong.
 struct TaskFailure {
     error: eyre::Report,
-    exit_code: Option<i32>,
 }
 
 impl From<eyre::Report> for TaskFailure {
     fn from(error: eyre::Report) -> Self {
-        Self { error, exit_code: None }
+        Self { error }
     }
 }
 
 impl From<std::io::Error> for TaskFailure {
     fn from(error: std::io::Error) -> Self {
-        Self {
-            error: error.into(),
-            exit_code: None,
-        }
+        Self { error: error.into() }
     }
 }
 
 impl From<tokio::sync::AcquireError> for TaskFailure {
     fn from(error: tokio::sync::AcquireError) -> Self {
-        Self {
-            error: error.into(),
-            exit_code: None,
-        }
+        Self { error: error.into() }
     }
 }
 
@@ -243,7 +232,8 @@ impl CancelSignal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ChildHandle {
     /// The child's pid. When `own_group` is true this is also its pgid, since
-    /// `process_group(0)` makes the child its own group leader.
+    /// `setsid()` makes the child a session leader, and a session leader always
+    /// leads its own process group.
     pid: u32,
     /// Whether the child leads its own process group, which is what makes the
     /// whole subtree it started reachable with one `killpg`. False for a
@@ -606,8 +596,8 @@ fn signal_child(handle: ChildHandle, signal: libc::c_int) -> Result<(), SignalFa
         .ok_or(SignalFailure::NotAPid(handle.pid))?;
     // SAFETY: `kill` and `killpg` take integers and return one, so there is no
     // memory to get wrong. The target is a pid otto spawned itself and recorded
-    // at spawn time, and the group is one otto created via `process_group(0)`,
-    // never a number read from the filesystem or from another process.
+    // at spawn time, and the group is one otto created via `setsid()`, never a
+    // number read from the filesystem or from another process.
     let rc = unsafe {
         if handle.own_group {
             libc::killpg(pid, signal)
@@ -720,6 +710,38 @@ async fn write_tty_log_markers(tasks_dir: &Path, task_name: &str) -> Result<()> 
     Ok(())
 }
 
+/// Uppercase `name` and fold every byte outside `[A-Za-z0-9_]` to `_`, giving
+/// the `<TASK>`/`<KEY>` segment of an `OTTO_INPUT_<TASK>_<KEY>` variable name.
+///
+/// The class is complemented, not enumerated. This folded `-` and `.` and
+/// nothing else, and a foreach subtask is named `parent:item`, so a consumer
+/// with `before: ["up:alpha"]` got an input file whose line read
+/// `OTTO_INPUT_UP:ALPHA_K=v-alpha` and a task that died on
+/// `command not found`.
+///
+/// Not [`crate::naming::is_identifier`]: that is a whole-name rule and rejects
+/// a leading digit, so applying it byte by byte would fold
+/// `OTTO_INPUT_UP_2024` to `OTTO_INPUT_UP____`. A fold is per byte and a
+/// digit is fine anywhere in it.
+///
+/// Per byte, and uppercase by the ASCII table only, because the reader is
+/// `LC_ALL=C tr` in `builtins.sh` and that is what `tr` does: a multibyte
+/// character is N bytes in and N underscores out on both sides. Folding per
+/// `char` would emit one underscore for `é` where the reader emits two, and
+/// the reader would then match nothing - the same silent-empty failure the
+/// `-`-only fold used to have.
+pub(crate) fn fold_to_var_name(name: &str) -> String {
+    name.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || byte == b'_' {
+                byte.to_ascii_uppercase() as char
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Convert JSON object to shell-sourceable .env format
 /// Handles proper escaping for bash safety
 fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
@@ -729,7 +751,7 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
     lines.push(String::new());
 
     if let Some(obj) = json.as_object() {
-        // Shell identifiers cannot hold `-` or `.`, so distinct JSON keys can
+        // Shell identifiers hold only `[A-Za-z0-9_]`, so distinct JSON keys can
         // fold onto one variable name: `a-b`, `a.b` and `A_B` all become
         // `..._A_B`. Every one of them used to be emitted under that single
         // name, so the last assignment won and the other values disappeared
@@ -744,8 +766,8 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
 
         for (key, value) in obj {
             // Create variable name: OTTO_INPUT_<TASK>_<KEY> (uppercase, safe chars only)
-            let safe_task = task_name.to_uppercase().replace(['-', '.'], "_");
-            let safe_key = key.to_uppercase().replace(['-', '.'], "_");
+            let safe_task = fold_to_var_name(task_name);
+            let safe_key = fold_to_var_name(key);
             let base = format!("OTTO_INPUT_{safe_task}_{safe_key}");
             let mut var_name = base.clone();
             let mut disambiguator = 1;
@@ -755,7 +777,7 @@ fn json_to_env(json: &serde_json::Value, task_name: &str) -> String {
             }
             if var_name != base {
                 log::warn!(
-                    "task '{task_name}' output keys collide as shell variables: '{key}' folds onto                      {base}, which is taken; it is carried as {var_name} instead"
+                    "task '{task_name}' output keys collide as shell variables: '{key}' folds onto {base}, which is taken; it is carried as {var_name} instead"
                 );
             }
 
@@ -1541,29 +1563,18 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             // If nothing is active and the ready queue is empty, sweep for newly-resolvable
             // blocked tasks (typically downstream of a Skipped task).
             if active_tasks.is_empty() {
-                let mut newly_ready = Vec::new();
-                let mut newly_skipped: Vec<Task> = Vec::new();
-                blocked_tasks.retain(|task| {
-                    let states = classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                    if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
-                        newly_skipped.push(task.clone());
-                        return false;
-                    }
-                    if states.iter().all(|s| matches!(s, EdgeState::Satisfied)) {
-                        newly_ready.push(task.clone());
-                        return false;
-                    }
-                    true
-                });
-                let progressed = !newly_ready.is_empty() || !newly_skipped.is_empty();
-                for t in newly_ready {
-                    ready_queue.push_back(t);
-                }
-                for t in newly_skipped {
-                    let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                    self.mark_skipped(&t, record, &mut skipped_set, &mut cursor).await;
-                    completed_tasks += 1;
-                }
+                let progressed = self
+                    .sweep_blocked(
+                        &mut blocked_tasks,
+                        &mut ready_queue,
+                        &mut completed_tasks,
+                        &serial_groups,
+                        &completed_set,
+                        &failed_set,
+                        &mut skipped_set,
+                        &mut cursor,
+                    )
+                    .await;
                 if !progressed && ready_queue.is_empty() {
                     // Nothing more we can do; bail out of the loop.
                     break;
@@ -1582,7 +1593,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 name = active_tasks.reap_unreported() => Wakeup::Report(Some(TaskReport::failure(
                     name.clone(),
                     eyre!("Task {name} panicked"),
-                    None,
                 ))),
                 () = self.cancel.cancelled() => Wakeup::Cancelled,
             } {
@@ -1595,7 +1605,6 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     name: completed_task,
                     error: None,
                     drain: report_drain,
-                    ..
                 }) => {
                     info!("Task {completed_task} completed successfully");
 
@@ -1709,34 +1718,22 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     active_tasks.reported(&completed_task);
 
                     // Sweep blocked_tasks: newly-ready and newly-unreachable.
-                    let mut newly_ready = Vec::new();
-                    let mut newly_skipped: Vec<Task> = Vec::new();
-                    blocked_tasks.retain(|task| {
-                        let states = classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
-                            newly_skipped.push(task.clone());
-                            return false;
-                        }
-                        if states.iter().all(|s| matches!(s, EdgeState::Satisfied)) {
-                            newly_ready.push(task.clone());
-                            return false;
-                        }
-                        true
-                    });
-                    for t in newly_ready {
-                        ready_queue.push_back(t);
-                    }
-                    for t in newly_skipped {
-                        let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        self.mark_skipped(&t, record, &mut skipped_set, &mut cursor).await;
-                        completed_tasks += 1;
-                    }
+                    self.sweep_blocked(
+                        &mut blocked_tasks,
+                        &mut ready_queue,
+                        &mut completed_tasks,
+                        &serial_groups,
+                        &completed_set,
+                        &failed_set,
+                        &mut skipped_set,
+                        &mut cursor,
+                    )
+                    .await;
                 }
                 Some(TaskReport {
                     name: task_name,
                     error: Some(e),
                     drain: report_drain,
-                    ..
                 }) => {
                     error!("Task {task_name} failed: {e}");
 
@@ -1773,28 +1770,17 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     completed_tasks += 1;
 
                     // Sweep blocked_tasks: newly-ready and newly-unreachable.
-                    let mut newly_ready = Vec::new();
-                    let mut newly_skipped: Vec<Task> = Vec::new();
-                    blocked_tasks.retain(|task| {
-                        let states = classify_gates(task, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
-                            newly_skipped.push(task.clone());
-                            return false;
-                        }
-                        if states.iter().all(|s| matches!(s, EdgeState::Satisfied)) {
-                            newly_ready.push(task.clone());
-                            return false;
-                        }
-                        true
-                    });
-                    for t in newly_ready {
-                        ready_queue.push_back(t);
-                    }
-                    for t in newly_skipped {
-                        let record = skip_record_for(&t, &serial_groups, &completed_set, &failed_set, &skipped_set);
-                        self.mark_skipped(&t, record, &mut skipped_set, &mut cursor).await;
-                        completed_tasks += 1;
-                    }
+                    self.sweep_blocked(
+                        &mut blocked_tasks,
+                        &mut ready_queue,
+                        &mut completed_tasks,
+                        &serial_groups,
+                        &completed_set,
+                        &failed_set,
+                        &mut skipped_set,
+                        &mut cursor,
+                    )
+                    .await;
 
                     if final_error.is_none() {
                         final_error = Some(e);

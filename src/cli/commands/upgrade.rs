@@ -5,7 +5,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use log::debug;
 use reqwest::Client;
 use semver::Version;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::env;
@@ -16,8 +16,11 @@ use std::time::{Duration, SystemTime};
 use tar::Archive;
 use tempfile::TempDir;
 
-/// GitHub API endpoint listing otto's releases.
-const RELEASES_URL: &str = "https://api.github.com/repos/otto-rs/otto/releases";
+/// GitHub API root for otto's own repository.
+///
+/// Every endpoint this command reads derives from this one string; the three
+/// that do are `releases_url`, `latest_release_url` and `tagged_release_url`.
+const REPO_API_URL: &str = "https://api.github.com/repos/otto-rs/otto";
 
 /// User-Agent GitHub requires on API requests.
 const USER_AGENT: &str = "otto-upgrade";
@@ -76,6 +79,15 @@ impl DownloadedArchive {
     fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// The published name of a release asset.
+///
+/// One function for both readers. `find_asset` looks for `otto-v{version}-...`,
+/// which is what the release workflow publishes, while the `--dry-run` plan
+/// printed `otto-{version}-...`: the plan named a file no release contains.
+fn asset_name(version: &str, platform: &str) -> String {
+    format!("otto-v{}-{}.tar.gz", version.trim_start_matches('v'), platform)
 }
 
 /// Build the single HTTP client this command reuses for every request.
@@ -137,6 +149,22 @@ fn sha256_file(path: &Path) -> Result<String> {
 /// `rename` across filesystems fails, and the previous `fs::copy` over a running
 /// executable is both non-atomic and ETXTBSY on Linux.
 fn stage_beside(source: &Path, target: &Path) -> Result<PathBuf> {
+    stage_beside_with(source, target, make_executable)
+}
+
+/// `stage_beside` with its "make the copy executable" step injected, so a test
+/// can prove the staged file is removed when that step fails.
+///
+/// Production has one caller and it always passes [`make_executable`]. A chmod
+/// that fails on a file this process has just created cannot be arranged from a
+/// test any other way, and the failures it stands for are real: a full or
+/// read-only filesystem, an immutable attribute, a mandatory access control
+/// policy.
+fn stage_beside_with(
+    source: &Path,
+    target: &Path,
+    set_executable: impl FnOnce(&Path) -> Result<()>,
+) -> Result<PathBuf> {
     debug!("stage_beside: source={} target={}", source.display(), target.display());
     let dir = target
         .parent()
@@ -152,16 +180,32 @@ fn stage_beside(source: &Path, target: &Path) -> Result<PathBuf> {
     fs::copy(source, &staged)
         .with_context(|| format!("Failed to stage {} at {}", source.display(), staged.display()))?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&staged)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&staged, perms)
-            .with_context(|| format!("Failed to set permissions on {}", staged.display()))?;
+    // The copy has already succeeded here, so a bare `?` on the step below
+    // stranded `.<name>.upgrade-<pid>` beside the binary until some later
+    // upgrade's reaper found it. This staging attempt is over either way, so it
+    // takes its own file with it.
+    if let Err(err) = set_executable(&staged) {
+        let _ = fs::remove_file(&staged);
+        return Err(err);
     }
 
     Ok(staged)
+}
+
+/// Give a staged copy the executable mode a released binary needs.
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)
+        .with_context(|| format!("Failed to read permissions of {}", path.display()))?
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).with_context(|| format!("Failed to set permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Remove staging files left behind by an upgrade that died between the copy and
@@ -295,14 +339,14 @@ pub struct UpgradeCommand {
     #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
     pub github_token: Option<String>,
 
-    /// Where to look for releases. `None` means [`RELEASES_URL`].
+    /// Which API to ask about releases. `None` means [`REPO_API_URL`].
     ///
     /// `#[arg(skip)]` and no `env =` on purpose, and it must stay that way: a
-    /// user-settable releases URL turns `otto Upgrade` into "download and
+    /// user-settable release API turns `otto Upgrade` into "download and
     /// execute a binary from wherever this string points". The only writer is
-    /// [`UpgradeCommand::with_releases_url`], which is `#[cfg(test)]`.
+    /// [`UpgradeCommand::with_fixture`], which is `#[cfg(test)]`.
     #[arg(skip)]
-    releases_url: Option<String>,
+    api_base: Option<String>,
 
     /// Which file to replace. `None` means `env::current_exe()`.
     ///
@@ -311,12 +355,21 @@ pub struct UpgradeCommand {
     /// running it.
     #[arg(skip)]
     install_target: Option<PathBuf>,
+
+    /// What version this invocation is running. `None` means `GIT_DESCRIBE`.
+    ///
+    /// Same `#[arg(skip)]` rule as above. Rollback reads this to refuse a
+    /// backup that is not older than the version running now, and a process's
+    /// own version is fixed at build time, so a test that needs two
+    /// invocations at two versions - roll back twice - has no other way to say
+    /// so. The only writer is [`UpgradeCommand::with_current_version`], which
+    /// is `#[cfg(test)]`.
+    #[arg(skip)]
+    current_version: Option<String>,
 }
 
 #[derive(Debug)]
 struct PlatformInfo {
-    _os: String,
-    _arch: String,
     platform_str: String,
 }
 
@@ -337,8 +390,6 @@ impl PlatformInfo {
         };
 
         Ok(PlatformInfo {
-            _os: os.to_string(),
-            _arch: arch.to_string(),
             platform_str: platform_str.to_string(),
         })
     }
@@ -347,8 +398,6 @@ impl PlatformInfo {
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
     tag_name: String,
-    #[serde(rename = "name")]
-    _name: String,
     published_at: String,
     assets: Vec<GitHubAsset>,
 }
@@ -366,10 +415,132 @@ struct BackupInfo {
     timestamp: u64,
 }
 
+/// A version that can be ordered even when it came from `git describe`.
+///
+/// `git describe --tags --always` (what `build.rs` records as `GIT_DESCRIBE`)
+/// prints `v2.2.1` on a tag and `v2.2.1-27-g85bb8fb` twenty-seven commits past
+/// it. Semver reads that suffix as a PRERELEASE of 2.2.1, which sorts BELOW the
+/// release, so every dev build compared as older than the tag it descends from:
+/// `otto Upgrade` on one planned a downgrade to that release and called it an
+/// upgrade, and `--rollback` treated a newer dev build as a rollback candidate.
+/// A build past a tag is newer than the tag, so the commit count breaks the tie
+/// upward instead. A genuine prerelease tag (`v2.3.0-rc.1`) has no `-<n>-g<sha>`
+/// suffix and keeps semver's own ordering.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct BuildVersion {
+    release: Version,
+    commits: u64,
+}
+
+/// `2.2.1-27-g85bb8fb` -> `("2.2.1", 27)`. `None` for anything that is not a
+/// `git describe` suffix, including a real prerelease.
+fn split_describe(text: &str) -> Option<(&str, u64)> {
+    let (rest, sha) = text.rsplit_once('-')?;
+    let hex = sha.strip_prefix('g')?;
+    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (core, count) = rest.rsplit_once('-')?;
+    Some((core, count.parse::<u64>().ok()?))
+}
+
+/// Every shape `git describe --tags --always [--dirty]` can print, and nothing
+/// else:
+///
+/// | printed                     | ordered as              |
+/// |-----------------------------|-------------------------|
+/// | `v2.2.1`                    | 2.2.1, 0 commits        |
+/// | `v2.2.1-dirty`              | 2.2.1, 0 commits        |
+/// | `v2.2.1-27-g85bb8fb`        | 2.2.1, 27 commits       |
+/// | `v2.2.1-27-g85bb8fb-dirty`  | 2.2.1, 27 commits       |
+/// | `85bb8fb` / `85bb8fb-dirty` | refused, with a reason  |
+///
+/// `-dirty` is stripped before anything else and then ignored. It says the
+/// working tree had uncommitted changes at build time, which is not a position
+/// in the version order: the build still descends from exactly the commits its
+/// `-<n>-g<sha>` names.
+///
+/// `build.rs` does not pass `--dirty` today. Handled anyway because the failure
+/// mode if someone adds it is silent: the suffix match would fail, semver would
+/// read the whole string as a PRERELEASE of the tag, and a dev build would sort
+/// BELOW the release again, which is the exact inversion this function exists
+/// to prevent. A comment in `build.rs` is a request; this is a guarantee.
+fn parse_build_version(version: &str) -> Result<BuildVersion> {
+    let text = version.trim_start_matches('v');
+    let text = text.strip_suffix("-dirty").unwrap_or(text);
+    let (core, commits) = split_describe(text).unwrap_or((text, 0));
+    let release = Version::parse(core).map_err(|err| {
+        eyre!(
+            "Cannot order the version 'v{version}': {err}. `git describe --tags --always` prints a bare commit sha when no tag is reachable, and a sha cannot be compared with a release."
+        )
+    })?;
+    Ok(BuildVersion { release, commits })
+}
+
+/// The backup a rollback should restore: the most recent one whose version is
+/// older than the version running now.
+///
+/// "The most recent backup" alone was wrong. A rollback writes a safety backup
+/// of the binary it replaces, so that file is the newest entry in the directory
+/// when the next rollback runs, and the next rollback restored it: the two
+/// commands undid each other and no run of rollbacks ever reached the version
+/// before last. Rolling back is a move backwards, so only an older version is a
+/// candidate, and repeating it walks the versions down.
+///
+/// A backup whose version is not a semver is skipped rather than guessed at:
+/// the name comes from a directory anything can write into, and a version that
+/// cannot be ordered cannot be shown to be older than this one.
+fn select_rollback_target<'a>(backups: &'a [BackupInfo], current_version: &str) -> Result<&'a BackupInfo> {
+    let current = parse_build_version(current_version)
+        .with_context(|| format!("Cannot order backups against the current version v{current_version}"))?;
+
+    // `list_backups` returns newest first, so the first match is the newest.
+    backups
+        .iter()
+        .find(|backup| match parse_build_version(&backup.version) {
+            Ok(version) => version < current,
+            Err(err) => {
+                debug!(
+                    "select_rollback_target: skipping {}, version {:?} is not a semver: {err}",
+                    backup.path.display(),
+                    backup.version
+                );
+                false
+            }
+        })
+        .ok_or_else(|| {
+            let present: Vec<String> = backups.iter().map(|b| format!("v{}", b.version)).collect();
+            eyre!(
+                "No backup older than the current v{} to roll back to (present: {})",
+                current_version,
+                present.join(", ")
+            )
+        })
+}
+
 impl UpgradeCommand {
-    /// The releases endpoint this invocation should use.
-    fn releases_url(&self) -> &str {
-        self.releases_url.as_deref().unwrap_or(RELEASES_URL)
+    /// The release API this invocation should ask.
+    fn api_base(&self) -> &str {
+        self.api_base.as_deref().unwrap_or(REPO_API_URL)
+    }
+
+    /// Every release, newest-created first, including prereleases. Only
+    /// `--list-versions` wants this.
+    fn releases_url(&self) -> String {
+        format!("{}/releases", self.api_base())
+    }
+
+    /// The one release GitHub itself marks latest, which is what `install.sh`
+    /// reads. Page 1 of the listing is creation order and includes prereleases,
+    /// so its first entry answers a different question.
+    fn latest_release_url(&self) -> String {
+        format!("{}/releases/latest", self.api_base())
+    }
+
+    /// One release by tag. Reaches a release that is too old to be on page 1 of
+    /// the listing, which `--version` used to report as "not found".
+    fn tagged_release_url(&self, version: &str) -> String {
+        format!("{}/releases/tags/v{}", self.api_base(), version.trim_start_matches('v'))
     }
 
     /// The binary this invocation should replace.
@@ -380,14 +551,6 @@ impl UpgradeCommand {
         }
     }
 
-    /// Point this command at a fixture release server and a scratch binary.
-    ///
-    /// Test-only, so that `execute()` itself can be driven end to end. Without
-    /// it the only reachable path was to hand-compose `download_and_verify` plus
-    /// `install_from_archive` in the test, which skipped `current_version`, the
-    /// already-on-target and downgrade short-circuits, `find_asset` and
-    /// `create_backup` - the test asserted its own transcription of the command
-    /// body rather than the command.
     /// Skip the backup step, so a fixture test asserts on the install alone.
     #[cfg(test)]
     fn tap_no_backup(mut self) -> Self {
@@ -395,10 +558,28 @@ impl UpgradeCommand {
         self
     }
 
+    /// Point this command at a fixture release API and a scratch binary.
+    ///
+    /// Test-only, so that `execute()` itself can be driven end to end. Without
+    /// it the only reachable path was to hand-compose
+    /// `download_and_check_checksum` plus `install_from_archive` in the test,
+    /// which skipped `current_version`, the already-on-target and downgrade
+    /// short-circuits, `find_asset` and `create_backup` - the test asserted its
+    /// own transcription of the command body rather than the command.
     #[cfg(test)]
-    fn with_fixture(mut self, releases_url: impl Into<String>, install_target: impl Into<PathBuf>) -> Self {
-        self.releases_url = Some(releases_url.into());
+    fn with_fixture(mut self, api_base: impl Into<String>, install_target: impl Into<PathBuf>) -> Self {
+        self.api_base = Some(api_base.into());
         self.install_target = Some(install_target.into());
+        self
+    }
+
+    /// Pretend this invocation is running `version`.
+    ///
+    /// Test-only. See the field's doc: rolling back twice is two processes at
+    /// two versions, and `GIT_DESCRIBE` is one value for the life of a process.
+    #[cfg(test)]
+    fn with_current_version(mut self, version: impl Into<String>) -> Self {
+        self.current_version = Some(version.into());
         self
     }
 
@@ -425,29 +606,35 @@ impl UpgradeCommand {
         let current_version = self.current_version()?;
         println!("Current version: v{}", current_version);
 
-        // 3. Fetch releases (one client, reused for metadata and download)
+        // 3. Resolve the one release this run is about (one client, reused for
+        //    metadata and the download). `--version X` asks for that tag by
+        //    name, which reaches a release too old to be on page 1 of the
+        //    listing; the default asks GitHub which release is latest rather
+        //    than reading the newest-created entry off that page, whose answer
+        //    includes prereleases.
         let client = build_http_client(CONNECT_TIMEOUT, READ_TIMEOUT)?;
-        let releases = self.fetch_releases(&client, self.releases_url()).await?;
+        let release = match &self.version {
+            Some(version) => {
+                let version = version.trim_start_matches('v');
+                self.fetch_release(&client, &self.tagged_release_url(version))
+                    .await
+                    .with_context(|| format!("Release v{} not found", version))?
+            }
+            None => self
+                .fetch_release(&client, &self.latest_release_url())
+                .await
+                .context("Could not determine the latest release")?,
+        };
 
         // 4. Determine target version
-        let target_version = if let Some(ref v) = self.version {
-            v.trim_start_matches('v').to_string()
-        } else {
-            // Get latest version
-            releases
-                .first()
-                .ok_or_else(|| eyre!("No releases found"))?
-                .tag_name
-                .trim_start_matches('v')
-                .to_string()
-        };
+        let target_version = release.tag_name.trim_start_matches('v').to_string();
 
         println!("Target version:  v{}", target_version);
 
         // 5. Check if upgrade needed
         if !self.force {
-            let current = Version::parse(&current_version)?;
-            let target = Version::parse(&target_version)?;
+            let current = parse_build_version(&current_version)?;
+            let target = parse_build_version(&target_version)?;
 
             match current.cmp(&target) {
                 Ordering::Equal => {
@@ -468,16 +655,13 @@ impl UpgradeCommand {
             return self.show_dry_run_plan(&target_version, &platform);
         }
 
-        // 6. Find and download release
-        let release = releases
-            .iter()
-            .find(|r| r.tag_name == format!("v{}", target_version))
-            .ok_or_else(|| eyre!("Release v{} not found", target_version))?;
-
-        let asset = self.find_asset(release, &platform.platform_str)?;
+        // 6. Download the asset this platform needs from that release
+        let asset = self.find_asset(&release, &platform.platform_str)?;
 
         println!("\nDownloading {}...", asset.name);
-        let archive = self.download_and_verify(&client, &asset.browser_download_url).await?;
+        let archive = self
+            .download_and_check_checksum(&client, &asset.browser_download_url)
+            .await?;
 
         println!("Download complete!");
 
@@ -511,28 +695,35 @@ impl UpgradeCommand {
             return Err(eyre!("No backups found to rollback to"));
         }
 
-        let latest = &backups[0];
-        println!("Rolling back to v{}...", latest.version);
+        let current_version = self.current_version()?;
+        let restore = select_rollback_target(&backups, &current_version)?;
+        println!("Rolling back to v{}...", restore.version);
 
         if self.dry_run {
-            println!("\nWould restore: {}", latest.path.display());
+            println!("\nWould restore: {}", restore.path.display());
             return Ok(());
         }
 
-        // Create backup of current version first
+        // Back up what is about to be replaced - once. Writing a fresh safety
+        // backup on every rollback is what made the directory's newest entry
+        // the version the previous rollback had just left.
         let current_exe = self.install_target()?;
         if !self.no_backup {
-            let backup_path = self.create_backup(&current_exe)?;
-            println!("Safety backup created: {}", backup_path.display());
+            if backups.iter().any(|b| b.version == current_version) {
+                println!("Safety backup skipped: v{} is already backed up.", current_version);
+            } else {
+                let backup_path = self.create_backup(&current_exe)?;
+                println!("Safety backup created: {}", backup_path.display());
+            }
         }
 
-        // Verify the backup before it replaces anything
-        self.verify_binary(&latest.path)?;
+        // Confirm the backup runs before it replaces anything
+        self.verify_binary(&restore.path)?;
 
         // Restore from backup: stage beside the target, then rename
-        install_binary(&latest.path, &current_exe).context("Failed to restore backup")?;
+        install_binary(&restore.path, &current_exe).context("Failed to restore backup")?;
 
-        println!("✓ Successfully rolled back to v{}!", latest.version);
+        println!("✓ Successfully rolled back to v{}!", restore.version);
 
         Ok(())
     }
@@ -541,14 +732,23 @@ impl UpgradeCommand {
         println!("Fetching available versions...");
 
         let client = build_http_client(CONNECT_TIMEOUT, READ_TIMEOUT)?;
-        let releases = self.fetch_releases(&client, self.releases_url()).await?;
+        let releases = self.fetch_releases(&client, &self.releases_url()).await?;
+
+        // The listing is creation order and includes prereleases, so its first
+        // entry is not the latest release: ask GitHub which one is, the same
+        // way the upgrade path does. A listing is still worth printing when
+        // that lookup fails, so a failure drops the marker and warns.
+        let latest_tag = match self.fetch_release(&client, &self.latest_release_url()).await {
+            Ok(release) => Some(release.tag_name),
+            Err(err) => {
+                log::warn!("Could not determine the latest release; listing without a marker: {err}");
+                None
+            }
+        };
 
         println!("\nAvailable versions:");
-        for (i, release) in releases.iter().enumerate() {
-            let version = release.tag_name.trim_start_matches('v');
-            let latest_tag = if i == 0 { " (latest)" } else { "" };
-            let date = self.format_date(&release.published_at);
-            println!("  v{}{:10} - {}", version, latest_tag, date);
+        for line in self.version_lines(&releases, latest_tag.as_deref()) {
+            println!("{}", line);
         }
 
         let current = self.current_version()?;
@@ -557,37 +757,77 @@ impl UpgradeCommand {
         Ok(())
     }
 
-    fn show_dry_run_plan(&self, target_version: &str, platform: &PlatformInfo) -> Result<()> {
-        println!("\nDry run - would perform the following actions:");
-        println!("  1. Download otto-{}-{}.tar.gz", target_version, platform.platform_str);
+    /// The steps `--dry-run` says it would take, in order.
+    ///
+    /// Returned rather than printed so a test can read them: the numbering used
+    /// to skip "2." under `--no-backup`, and step 1 named an asset spelling no
+    /// release publishes.
+    fn dry_run_steps(&self, target_version: &str, platform: &PlatformInfo) -> Result<Vec<String>> {
+        let mut steps = vec![format!(
+            "Download {}",
+            asset_name(target_version, &platform.platform_str)
+        )];
+
+        // Checksum before backup, because that is the order `execute_upgrade`
+        // runs them in: `download_and_check_checksum` returns before
+        // `create_backup` is called. Listed the other way round, the plan told
+        // a reader a backup would exist after a checksum failure, and none
+        // does; nothing is backed up until the download has been verified.
+        steps.push("Check the download against the release's published .sha256 checksum".to_string());
 
         if !self.no_backup {
             let backup_dir = self.get_backup_dir()?;
-            println!(
-                "  2. Create backup: {}/otto-<current>-<timestamp>.backup",
+            steps.push(format!(
+                "Create backup: {}/otto-<current>-<timestamp>.backup",
                 backup_dir.display()
-            );
+            ));
         }
 
-        println!("  3. Extract new binary from archive");
-        println!("  4. Verify new binary works");
+        steps.push("Extract the new binary from the archive".to_string());
+        steps.push("Run the new binary's --version to confirm it works".to_string());
+        steps.push(format!("Replace {}", self.install_target()?.display()));
 
-        let current_exe = self.install_target()?;
-        println!("  5. Replace {}", current_exe.display());
+        Ok(steps)
+    }
 
+    fn show_dry_run_plan(&self, target_version: &str, platform: &PlatformInfo) -> Result<()> {
+        println!("\nDry run - would perform the following actions:");
+        for (i, step) in self.dry_run_steps(target_version, platform)?.iter().enumerate() {
+            println!("  {}. {}", i + 1, step);
+        }
         println!("\nRun without --dry-run to perform upgrade.");
         Ok(())
+    }
+
+    /// The lines `--list-versions` prints, one per release, newest-created
+    /// first. Returned rather than printed so the "(latest)" marker is testable.
+    fn version_lines(&self, releases: &[GitHubRelease], latest_tag: Option<&str>) -> Vec<String> {
+        releases
+            .iter()
+            .map(|release| {
+                let marker = if latest_tag == Some(release.tag_name.as_str()) { " (latest)" } else { "" };
+                format!(
+                    "  v{}{:10} - {}",
+                    release.tag_name.trim_start_matches('v'),
+                    marker,
+                    self.format_date(&release.published_at)
+                )
+            })
+            .collect()
     }
 
     fn current_version(&self) -> Result<String> {
         // Use GIT_DESCRIBE which is set at build time in build.rs
         // This matches what --version displays
-        let version = env!("GIT_DESCRIBE");
+        let version = self.current_version.as_deref().unwrap_or(env!("GIT_DESCRIBE"));
         Ok(version.trim_start_matches('v').to_string())
     }
 
-    async fn fetch_releases(&self, client: &Client, url: &str) -> Result<Vec<GitHubRelease>> {
-        debug!("fetch_releases: url={}", url);
+    /// GET one JSON document from the release API, with the token when there is
+    /// one. The status check lives here so every endpoint reports a 404 the same
+    /// way instead of parsing GitHub's error body as a release.
+    async fn get_json<T: DeserializeOwned>(&self, client: &Client, url: &str) -> Result<T> {
+        debug!("get_json: url={}", url);
         let mut request = client.get(url).timeout(METADATA_TIMEOUT);
 
         if let Some(ref token) = self.github_token {
@@ -604,15 +844,22 @@ impl UpgradeCommand {
             ));
         }
 
-        let releases: Vec<GitHubRelease> = response.json().await.context("Failed to parse GitHub releases")?;
+        response.json().await.context("Failed to parse GitHub releases")
+    }
 
-        Ok(releases)
+    /// One release, from either single-release endpoint: see
+    /// `latest_release_url` and `tagged_release_url`.
+    async fn fetch_release(&self, client: &Client, url: &str) -> Result<GitHubRelease> {
+        self.get_json(client, url).await
+    }
+
+    /// The whole listing, which only `--list-versions` needs.
+    async fn fetch_releases(&self, client: &Client, url: &str) -> Result<Vec<GitHubRelease>> {
+        self.get_json(client, url).await
     }
 
     fn find_asset<'a>(&self, release: &'a GitHubRelease, platform: &str) -> Result<&'a GitHubAsset> {
-        // Extract version from release tag
-        let version = release.tag_name.trim_start_matches('v');
-        let pattern = format!("otto-v{}-{}.tar.gz", version, platform);
+        let pattern = asset_name(&release.tag_name, platform);
 
         release
             .assets
@@ -621,16 +868,23 @@ impl UpgradeCommand {
             .ok_or_else(|| eyre!("No asset found for platform: {} (looking for {})", platform, pattern))
     }
 
-    /// Download a release archive and verify it against its `.sha256` sibling.
+    /// Download a release archive and check it against the `.sha256` file
+    /// published beside it.
+    ///
+    /// A checksum match, not a signature check: it proves the bytes on disk are
+    /// the bytes named by the release's own `.sha256`, which catches a truncated
+    /// or corrupted download, and says nothing about who produced either file.
+    /// Signing is a non-goal of this command, so the name and the messages say
+    /// "checksum" and never "verified".
     ///
     /// The returned `DownloadedArchive` owns the temporary directory, so the
     /// archive stays on disk for as long as the caller holds it.
-    async fn download_and_verify(&self, client: &Client, url: &str) -> Result<DownloadedArchive> {
-        debug!("download_and_verify: url={}", url);
+    async fn download_and_check_checksum(&self, client: &Client, url: &str) -> Result<DownloadedArchive> {
+        debug!("download_and_check_checksum: url={}", url);
         let archive = self.download_with_progress(client, url).await?;
 
         let checksum_url = format!("{}.sha256", url);
-        println!("Verifying checksum...");
+        println!("Checking the download against the release's published .sha256 checksum...");
         let expected = self.fetch_expected_sha256(client, &checksum_url).await?;
         let actual = sha256_file(archive.path())?;
 
@@ -924,11 +1178,13 @@ impl UpgradeCommand {
 
     fn get_backup_dir(&self) -> Result<PathBuf> {
         if let Some(ref dir) = self.backup_dir {
-            return Ok(expanduser::expanduser(dir.to_string_lossy().as_ref())?);
+            return Ok(crate::executor::layout::expand_tilde(dir));
         }
 
-        let home = env::var("HOME").context("Failed to get HOME environment variable")?;
-        Ok(PathBuf::from(home).join(".otto").join("backups"))
+        // `$OTTO_HOME` moves every other piece of otto's state - run
+        // directories, the database - and backups were the one directory that
+        // ignored it and rebuilt `$HOME/.otto` itself.
+        Ok(crate::executor::layout::resolve_otto_home()?.join("backups"))
     }
 
     fn format_date(&self, date_str: &str) -> String {

@@ -53,20 +53,25 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         skipped_set: &mut SkippedSet,
         cursor: &mut ReplayCursor,
     ) -> Result<()> {
-        match self.needs_rebuild(&task).await {
-            Ok(true) => {
-                // Task needs to run
-                info!("Starting task {} ({}/{})", task.name, *completed_tasks + 1, total_tasks);
+        // Ordered replay is the only path to the terminal for a task the cursor
+        // owns, so those tasks write to their logs alone. Asking the cursor, not
+        // `task.buffered`, is what keeps the two in step: `otto say:alpha` on a
+        // `buffer: true` foreach carries the flag but has no group to replay it.
+        let suppress_terminal = self.tui_mode || cursor.parent_of(&task.name).is_some();
 
-                // Broadcast task started to TUI
-                self.broadcast_message(TaskMessage::Started {
-                    task_name: task.name.clone(),
-                    timestamp: std::time::SystemTime::now(),
-                });
+        if self.needs_rebuild(&task).await {
+            // Task needs to run
+            info!("Starting task {} ({}/{})", task.name, *completed_tasks + 1, total_tasks);
 
-                self.execute_task(task.clone(), tx.clone(), active_tasks).await?;
-            }
-            Ok(false) => {
+            // Broadcast task started to TUI
+            self.broadcast_message(TaskMessage::Started {
+                task_name: task.name.clone(),
+                timestamp: std::time::SystemTime::now(),
+            });
+
+            self.execute_task(task.clone(), tx.clone(), active_tasks, suppress_terminal)
+                .await?;
+        } else {
                 // Task can be skipped - outputs are up to date
                 info!(
                     "Skipping task {} - outputs are up to date ({}/{})",
@@ -75,75 +80,86 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     total_tasks
                 );
 
-                // Terminal transition 4 of four. Like `mark_skipped`, this path
-                // mutates the terminal-state sets inline and sends no report, so
-                // the cursor has to be advanced from here too.
-                let skipped_msg = format!("{} skipped (up to date)\n", self.status_label(&task.name));
-                self.report_status_line(cursor, &task.name, skipped_msg, false, Vec::new())
-                    .await;
+            // Terminal transition 4 of four. Like `mark_skipped`, this path
+            // mutates the terminal-state sets inline and sends no report, so
+            // the cursor has to be advanced from here too.
+            let skipped_msg = format!("{} skipped (up to date)\n", self.status_label(&task.name));
+            self.report_status_line(cursor, &task.name, skipped_msg, false, Vec::new())
+                .await;
 
-                // Broadcast task skipped to TUI
-                self.broadcast_message(TaskMessage::StatusChange {
-                    task_name: task.name.clone(),
-                    status: TuiTaskStatus::Skipped,
-                    timestamp: std::time::SystemTime::now(),
-                });
+            // Broadcast task skipped to TUI
+            self.broadcast_message(TaskMessage::StatusChange {
+                task_name: task.name.clone(),
+                status: TuiTaskStatus::Skipped,
+                timestamp: std::time::SystemTime::now(),
+            });
 
-                {
-                    let mut statuses = self.task_statuses.lock().await;
-                    statuses.insert(task.name.clone(), TaskStatus::Skipped(SkipKind::UpToDate));
-                }
-                // An up-to-date skip is success-like, so it lands in `completed_set`
-                // like any other success. It is also recorded in `skipped_set` with
-                // its kind, because it is still terminal-Skipped and the gates must
-                // be able to tell it apart from a gated-out skip.
-                completed_set.insert(task.name.clone());
-                skipped_set.insert(task.name.clone(), SkipKind::UpToDate);
-                *completed_tasks += 1;
-
-                blocked_tasks.retain(|blocked_task| {
-                    let task_deps_completed = blocked_task
-                        .task_deps
-                        .iter()
-                        .all(|task_dep| completed_set.contains(&task_dep.task));
-                    if !task_deps_completed {
-                        return true; // Keep the task in blocked list
-                    }
-
-                    // The serial gate composes with dependency readiness: a member whose
-                    // predecessor has not finished stays blocked.
-                    if !matches!(
-                        serial_groups.classify(blocked_task, completed_set, failed_set, skipped_set),
-                        EdgeState::Satisfied
-                    ) {
-                        return true;
-                    }
-
-                    // All dependencies are completed, move to ready queue
-                    ready_queue.push_back(blocked_task.clone());
-                    false // Remove from blocked list
-                });
+            {
+                let mut statuses = self.task_statuses.lock().await;
+                statuses.insert(task.name.clone(), TaskStatus::Skipped(SkipKind::UpToDate));
             }
-            Err(e) => {
-                error!("Error checking file dependencies for task {}: {}", task.name, e);
-                // On error, default to running the task
-                info!(
-                    "Starting task {} (file check failed, defaulting to run) ({}/{})",
-                    task.name,
-                    *completed_tasks + 1,
-                    total_tasks
-                );
+            // An up-to-date skip is success-like, so it lands in `completed_set`
+            // like any other success. It is also recorded in `skipped_set` with
+            // its kind, because it is still terminal-Skipped and the gates must
+            // be able to tell it apart from a gated-out skip.
+            completed_set.insert(task.name.clone());
+            skipped_set.insert(task.name.clone(), SkipKind::UpToDate);
+            *completed_tasks += 1;
 
-                // Broadcast task started to TUI
-                self.broadcast_message(TaskMessage::Started {
-                    task_name: task.name.clone(),
-                    timestamp: std::time::SystemTime::now(),
-                });
-
-                self.execute_task(task.clone(), tx.clone(), active_tasks).await?;
-            }
+            // The same sweep the drain loop runs. This site used to be a
+            // hand-rolled `completed_set.contains` walk that read no `when:`
+            // condition and could not mark a dependent unreachable at all.
+            self.sweep_blocked(
+                blocked_tasks,
+                ready_queue,
+                completed_tasks,
+                serial_groups,
+                completed_set,
+                failed_set,
+                skipped_set,
+                cursor,
+            )
+            .await;
         }
         Ok(())
+    }
+
+    /// One pass over `blocked_tasks`: newly-ready tasks go to the ready queue,
+    /// newly-unreachable ones are marked Skipped, everything else stays blocked.
+    /// The return value says whether either happened, which is what tells the
+    /// drain loop the difference between "made progress" and "deadlocked".
+    ///
+    /// The whole run has exactly one answer to "is this blocked task still
+    /// blocked?", and this is it. There were four copies of this walk: three
+    /// identical ones in the drain loop and a fourth, in `try_start_ready_task`,
+    /// that had already drifted into reading `completed_set` membership instead
+    /// of the edge conditions. `classify_source`'s own doc records that this
+    /// drift happened once before.
+    #[allow(clippy::too_many_arguments)]
+    async fn sweep_blocked(
+        &self,
+        blocked_tasks: &mut Vec<Task>,
+        ready_queue: &mut std::collections::VecDeque<Task>,
+        completed_tasks: &mut usize,
+        serial_groups: &SerialGroups,
+        completed_set: &std::collections::HashSet<String>,
+        failed_set: &std::collections::HashSet<String>,
+        skipped_set: &mut SkippedSet,
+        cursor: &mut ReplayCursor,
+    ) -> bool {
+        let Swept { ready, unreachable } =
+            partition_blocked(blocked_tasks, serial_groups, completed_set, failed_set, skipped_set);
+        let progressed = !ready.is_empty() || !unreachable.is_empty();
+
+        for task in ready {
+            ready_queue.push_back(task);
+        }
+        for task in unreachable {
+            let record = skip_record_for(&task, serial_groups, completed_set, failed_set, skipped_set);
+            self.mark_skipped(&task, record, skipped_set, cursor).await;
+            *completed_tasks += 1;
+        }
+        progressed
     }
 
     /// Stop the run: kill the in-flight children and everything they started,
@@ -155,8 +171,8 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
     /// `kill_on_drop(true)` SIGKILLs the direct child when its body's future is
     /// dropped and reaches nothing below it, so a task body running
     /// `bash -> otto -> docker compose logs` left the bottom two alive after
-    /// every Ctrl+C. Each non-tty child is its own process group leader
-    /// (`task_execution.rs`, `cmd.process_group(0)`), so `reap_live_children`
+    /// every Ctrl+C. Each non-tty child leads its own session, and so its own
+    /// process group (`task_execution.rs`, `setsid`), so `reap_live_children`
     /// signals the group and takes the whole subtree; `abort_all` still runs
     /// afterwards, as the backstop that guarantees the direct children are gone.
     ///
@@ -257,11 +273,18 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         statuses.get(task_name).cloned().unwrap_or(TaskStatus::Pending)
     }
 
-    pub async fn needs_rebuild(&self, task: &Task) -> Result<bool> {
+    /// Whether the task's outputs are stale with respect to its inputs.
+    ///
+    /// Infallible on purpose: every way of failing to read a timestamp (missing
+    /// file, unreadable metadata, no mtime) already means "run the task", so
+    /// there is no error left for a caller to handle differently. It used to
+    /// return `Result<bool>` whose `Err` arm was unreachable, and the caller's
+    /// `Err` handling was a second copy of its `Ok(true)` handling.
+    pub async fn needs_rebuild(&self, task: &Task) -> bool {
         // If no file dependencies, always run (traditional task-only mode)
         if task.file_deps.is_empty() {
             debug!("Task {} has no file dependencies, will run", task.name);
-            return Ok(true);
+            return true;
         }
 
         let output_files = &task.output_deps;
@@ -269,7 +292,7 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
         // If no output files exist, need to run
         if output_files.is_empty() {
             debug!("Task {} has no output files defined, will run", task.name);
-            return Ok(true);
+            return true;
         }
 
         for output_path in output_files {
@@ -278,12 +301,12 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                     "Output file {} does not exist, task {} needs to run",
                     output_path, task.name
                 );
-                return Ok(true);
+                return true;
             }
         }
 
-        let input_timestamps = self.get_file_timestamps(&task.file_deps).await?;
-        let output_timestamps = self.get_file_timestamps(output_files).await?;
+        let input_timestamps = self.get_file_timestamps(&task.file_deps).await;
+        let output_timestamps = self.get_file_timestamps(output_files).await;
 
         // Find the newest input and oldest output
         let newest_input = input_timestamps.iter().filter_map(|(_, time)| *time).max();
@@ -297,20 +320,25 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
                 } else {
                     debug!("Outputs up to date, task {} can be skipped", task.name);
                 }
-                Ok(needs_rebuild)
+                needs_rebuild
             }
             (None, _) => {
                 debug!("No input files found, task {} will run", task.name);
-                Ok(true) // No inputs found, run the task
+                true // No inputs found, run the task
             }
             (_, None) => {
                 debug!("No output files found, task {} needs to run", task.name);
-                Ok(true) // No outputs found, need to run
+                true // No outputs found, need to run
             }
         }
     }
 
-    async fn get_file_timestamps(&self, file_paths: &[String]) -> Result<Vec<(String, Option<std::time::SystemTime>)>> {
+    /// The mtime of each path, `None` for any path that has none to read.
+    ///
+    /// A path that cannot be read is not an error here: `needs_rebuild` treats
+    /// an unknown timestamp as "run the task", which is what a caller would do
+    /// with an error anyway.
+    async fn get_file_timestamps(&self, file_paths: &[String]) -> Vec<(String, Option<std::time::SystemTime>)> {
         let mut timestamps = Vec::new();
 
         for file_path in file_paths {
@@ -336,6 +364,50 @@ impl<F: FileSystem + 'static> TaskScheduler<F> {
             timestamps.push((file_path.clone(), timestamp));
         }
 
-        Ok(timestamps)
+        timestamps
     }
+}
+
+/// What one sweep over the blocked list found.
+///
+/// Both outcomes come back as data because the caller has to apply them in
+/// order (ready first, then the skips, which mutate `skipped_set` as they go)
+/// and because a sweep with nothing in either list is what "the run cannot
+/// progress" means.
+struct Swept {
+    /// Every gate satisfied: run these.
+    ready: Vec<Task>,
+    /// Some gate can never be satisfied: skip these.
+    unreachable: Vec<Task>,
+}
+
+/// Classify every blocked task against the current terminal sets, removing the
+/// ones that reached an answer from `blocked_tasks`.
+///
+/// Pure, and separate from `sweep_blocked` so the classification can be tested
+/// without a scheduler, a workspace or a replay cursor.
+fn partition_blocked(
+    blocked_tasks: &mut Vec<Task>,
+    serial_groups: &SerialGroups,
+    completed: &std::collections::HashSet<String>,
+    failed: &std::collections::HashSet<String>,
+    skipped: &SkippedSet,
+) -> Swept {
+    let mut swept = Swept {
+        ready: Vec::new(),
+        unreachable: Vec::new(),
+    };
+    blocked_tasks.retain(|task| {
+        let states = classify_gates(task, serial_groups, completed, failed, skipped);
+        if states.iter().any(|s| matches!(s, EdgeState::Unreachable)) {
+            swept.unreachable.push(task.clone());
+            return false;
+        }
+        if states.iter().all(|s| matches!(s, EdgeState::Satisfied)) {
+            swept.ready.push(task.clone());
+            return false;
+        }
+        true
+    });
+    swept
 }

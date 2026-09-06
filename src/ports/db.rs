@@ -44,8 +44,6 @@ pub trait StateStore: Send + Sync {
     ) -> Result<i64>;
 
     // Query methods
-    fn get_recent_runs(&self, limit: usize, project_filter: Option<&str>) -> Result<Vec<RunRecord>>;
-    fn get_run_tasks(&self, run_id: i64) -> Result<Vec<TaskRecord>>;
     fn get_task_history(&self, task_name: &str, limit: usize) -> Result<Vec<TaskRecord>>;
     fn get_overall_stats(&self) -> Result<OverallStats>;
     fn get_all_projects(&self) -> Result<Vec<ProjectSummary>>;
@@ -98,6 +96,13 @@ pub struct MemoryStateStore {
     next_run_id: std::sync::atomic::AtomicI64,
     next_task_id: std::sync::atomic::AtomicI64,
     next_project_id: std::sync::atomic::AtomicI64,
+    /// Answer every `delete_run` with `Ok(None)`, leaving the rows in place.
+    ///
+    /// That is what the loser of a race between two pruners over one store
+    /// sees: `find_old_runs` reported rows, and by the time it asked for them
+    /// the other pruner had deleted them. Off by default, so this fake behaves
+    /// exactly as it always has unless a test asks for the race.
+    delete_run_returns_none: std::sync::atomic::AtomicBool,
 }
 
 impl MemoryStateStore {
@@ -109,7 +114,14 @@ impl MemoryStateStore {
             next_run_id: std::sync::atomic::AtomicI64::new(1),
             next_task_id: std::sync::atomic::AtomicI64::new(1),
             next_project_id: std::sync::atomic::AtomicI64::new(1),
+            delete_run_returns_none: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Make every subsequent `delete_run` answer `Ok(None)`. See the field.
+    pub fn lose_every_delete_race(&self) {
+        self.delete_run_returns_none
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn get_or_create_project(&self, hash: &str, ottofile_path: Option<&PathBuf>) -> i64 {
@@ -122,12 +134,7 @@ impl MemoryStateStore {
 
         // Create new project
         let id = self.next_project_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let name = ottofile_path
-            .and_then(|p| p.parent())
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or(hash)
-            .to_string();
+        let name = crate::naming::project_name_from(ottofile_path.map(PathBuf::as_path), hash);
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -247,14 +254,23 @@ impl StateStore for MemoryStateStore {
             .as_secs();
 
         let mut tasks = self.tasks.write().unwrap();
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-            task.status = status;
-            task.exit_code = Some(exit_code);
-            task.ended_at = Some(ended_at);
-            if let Some(started_at) = task.started_at {
-                task.duration_seconds = Some((ended_at - started_at) as f64);
-            }
-        }
+        let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) else {
+            // Same rule as the SQLite store, which reports zero rows updated:
+            // completing a task that is not there leaves it `running` forever.
+            // This used to return `Ok(())`, so a test against the fake proved
+            // the opposite of what the real store does.
+            return Err(eyre::eyre!("No task with id {task_id} to mark complete"));
+        };
+
+        task.status = status;
+        task.exit_code = Some(exit_code);
+        task.ended_at = Some(ended_at);
+        // `saturating_sub`, matching the SQLite store's `MAX(?3 - started_at, 0)`:
+        // a clock that stepped backwards used to underflow this u64 subtraction
+        // and panic in debug, or write a duration of ~1.8e19 seconds in release.
+        task.duration_seconds = task
+            .started_at
+            .map(|started_at| ended_at.saturating_sub(started_at) as f64);
 
         Ok(())
     }
@@ -294,38 +310,6 @@ impl StateStore for MemoryStateStore {
         self.tasks.write().unwrap().push(task);
 
         Ok(task_id)
-    }
-
-    fn get_recent_runs(&self, limit: usize, project_filter: Option<&str>) -> Result<Vec<RunRecord>> {
-        let runs = self.runs.read().unwrap();
-        let projects = self.projects.read().unwrap();
-
-        let mut result: Vec<RunRecord> = runs
-            .iter()
-            .filter(|r| {
-                if let Some(hash) = project_filter {
-                    projects.iter().any(|p| p.id == r.project_id && p.hash == hash)
-                } else {
-                    true
-                }
-            })
-            .cloned()
-            .collect();
-
-        result.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
-        result.truncate(limit);
-
-        Ok(result)
-    }
-
-    fn get_run_tasks(&self, run_id: i64) -> Result<Vec<TaskRecord>> {
-        let tasks = self.tasks.read().unwrap();
-
-        let mut result: Vec<TaskRecord> = tasks.iter().filter(|t| t.run_id == run_id).cloned().collect();
-
-        result.sort_by_key(|r| r.started_at);
-
-        Ok(result)
     }
 
     fn get_task_history(&self, task_name: &str, limit: usize) -> Result<Vec<TaskRecord>> {
@@ -375,6 +359,12 @@ impl StateStore for MemoryStateStore {
         let projects = self.projects.read().unwrap();
 
         let mut stats_map: std::collections::HashMap<i64, TaskStats> = std::collections::HashMap::new();
+        // Every recorded duration per project, so avg/min/max are computed the
+        // same way the SQLite store's AVG/MIN/MAX do: over the rows that have a
+        // duration, ignoring the ones that do not. The fake used to leave all
+        // three `None` unconditionally, so `otto Stats`'s duration columns were
+        // never exercised by anything that asserted a number.
+        let mut durations: std::collections::HashMap<i64, Vec<f64>> = std::collections::HashMap::new();
 
         for task in tasks.iter().filter(|t| t.name == task_name) {
             if let Some(run) = runs.iter().find(|r| r.id == task.run_id)
@@ -404,6 +394,10 @@ impl StateStore for MemoryStateStore {
                     _ => {}
                 }
 
+                if let Some(duration) = task.duration_seconds {
+                    durations.entry(project.id).or_default().push(duration);
+                }
+
                 if let Some(started_at) = task.started_at
                     && (stats.last_executed.is_none() || started_at > stats.last_executed.unwrap())
                 {
@@ -413,17 +407,30 @@ impl StateStore for MemoryStateStore {
             }
         }
 
+        for (project_id, recorded) in durations {
+            let Some(stats) = stats_map.get_mut(&project_id) else {
+                continue;
+            };
+            stats.avg_duration_seconds = Some(recorded.iter().sum::<f64>() / recorded.len() as f64);
+            stats.min_duration_seconds = recorded.iter().copied().reduce(f64::min);
+            stats.max_duration_seconds = recorded.iter().copied().reduce(f64::max);
+        }
+
         Ok(stats_map.into_values().collect())
     }
 
     fn get_all_task_stats(&self, limit: Option<usize>) -> Result<Vec<TaskStats>> {
-        let tasks = self.tasks.read().unwrap();
-
-        let task_names: std::collections::HashSet<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        // The read guard is dropped before the loop: `get_task_stats` takes the
+        // same lock again, and `RwLock`'s read side is not reentrant when a
+        // writer is queued behind it.
+        let task_names: std::collections::HashSet<String> = {
+            let tasks = self.tasks.read().unwrap();
+            tasks.iter().map(|t| t.name.clone()).collect()
+        };
 
         let mut all_stats = Vec::new();
         for task_name in task_names {
-            all_stats.extend(self.get_task_stats(task_name)?);
+            all_stats.extend(self.get_task_stats(&task_name)?);
         }
 
         all_stats.sort_by_key(|s| std::cmp::Reverse(s.total_executions));
@@ -506,6 +513,10 @@ impl StateStore for MemoryStateStore {
     }
 
     fn delete_run(&self, run_id: i64, _delete_filesystem: bool) -> Result<Option<RunRecord>> {
+        if self.delete_run_returns_none.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(None);
+        }
+
         let mut runs = self.runs.write().unwrap();
         let mut tasks = self.tasks.write().unwrap();
         let mut projects = self.projects.write().unwrap();

@@ -316,6 +316,94 @@ async fn test_auto_prune_creates_marker_when_missing() {
     assert!(temp_dir.path().join(".last_prune").exists());
 }
 
+/// A run prune that fails must not take the rest of auto-prune down with it.
+///
+/// `auto_prune` used to `return` on a `Clean` error, so one run directory it
+/// could not delete also skipped `prune_orphaned_cache` and the `.last_prune`
+/// touch, and with the marker never written auto-prune re-fired on every
+/// subsequent run instead of once per interval. `26bafc6` changed it to warn
+/// and carry on; nothing pinned that until now.
+///
+/// The failure is real, not simulated: the run's directory is a symlink, which
+/// `delete_run` refuses through `ensure_deletable_under_root`. The row surviving
+/// is what proves the prune actually failed, so the other two assertions are
+/// about a genuinely failed prune rather than a quiet no-op.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_failed_run_prune_still_reaches_the_cache_prune_and_the_marker() {
+    use crate::executor::state::{RunMetadata, StateManager};
+
+    let temp_dir = TempDir::new().unwrap();
+    let otto_home = temp_dir.path().join("otto-home");
+    fs::create_dir_all(&otto_home).unwrap();
+
+    let victim = temp_dir.path().join("victim");
+    fs::create_dir_all(&victim).unwrap();
+    let project = otto_home.join("widget-abc12345");
+    fs::create_dir_all(&project).unwrap();
+    let run_dir = project.join("1000000000");
+    std::os::unix::fs::symlink(&victim, &run_dir).unwrap();
+
+    let db_path = otto_home.join("otto.db");
+    let manager = StateManager::with_db_path(db_path.clone()).unwrap();
+    let metadata = RunMetadata::minimal(
+        Some(PathBuf::from("/test/otto.yml")),
+        "abc12345".to_string(),
+        1_000_000_000,
+    )
+    .with_run_dir(run_dir);
+    manager.record_run_start(&metadata).unwrap();
+    drop(manager);
+
+    let orphan = cache_fixture(&otto_home, "ccdd3344.sh", false);
+    age_out(&orphan);
+
+    let previous_db = std::env::var("OTTO_DB_PATH").ok();
+    let previous_home = std::env::var("OTTO_HOME").ok();
+    unsafe {
+        std::env::set_var("OTTO_DB_PATH", &db_path);
+        std::env::set_var("OTTO_HOME", &otto_home);
+    }
+
+    let retention = RetentionSpec {
+        keep_days: 0,
+        keep_last: 0,
+        keep_failed: 0,
+        auto_prune: true,
+        prune_interval_hours: 0,
+    };
+    auto_prune(&otto_home, &retention).await;
+
+    unsafe {
+        match &previous_db {
+            Some(value) => std::env::set_var("OTTO_DB_PATH", value),
+            None => std::env::remove_var("OTTO_DB_PATH"),
+        }
+        match &previous_home {
+            Some(value) => std::env::set_var("OTTO_HOME", value),
+            None => std::env::remove_var("OTTO_HOME"),
+        }
+    }
+
+    let manager = StateManager::with_db_path(db_path).unwrap();
+    let surviving = manager.get_runs_with_filters(None, None, 10).unwrap();
+    assert_eq!(
+        surviving.len(),
+        1,
+        "the premise of this test is a run prune that FAILED; if the row is gone the assertions below prove nothing"
+    );
+
+    assert!(
+        !orphan.exists(),
+        "the orphan cache prune must run even though the run prune failed"
+    );
+    assert!(
+        otto_home.join(".last_prune").exists(),
+        "the marker must be written even though the run prune failed, or auto-prune re-fires on every run"
+    );
+    assert!(victim.exists(), "the symlink target must survive the refused delete");
+}
+
 // =========================================================================
 // Cache pruning tests
 // =========================================================================

@@ -9,7 +9,7 @@ use std::process::Command;
 /// inherited process environment before anything is evaluated, and it is the
 /// floor of the returned map. That is what makes `otto.envs-command` output
 /// visible to task bodies while a literal `envs:` entry for the same key still
-/// wins the final value - and, because [`evaluation_context`] seeds a key's
+/// wins the final value - and, because `evaluation_context` seeds a key's
 /// *inherited* value when evaluating that key, a shadowing literal that
 /// self-references (`FOO: '$(echo "${FOO:-x}")'`) sees the computed value
 /// rather than the OS one. Merging the overrides into the declared map instead
@@ -36,14 +36,19 @@ pub fn evaluate_envs(
     let mut pending: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     pending.sort_unstable_by_key(|(k, _)| *k);
     let mut iterations = 0;
-    // One pass per key, plus one. Every pass either resolves at least one key or
-    // hits the no-progress branch below, so a map of N keys cannot need more than
-    // N passes and this bound is unreachable for any resolvable input.
+    // One pass per key, plus one. Every pass either resolves at least one key,
+    // is the single retry of the parked keys below, or hits the no-progress
+    // branch, so a map of N keys cannot need more than N + 1 passes and this
+    // bound is unreachable for any resolvable input.
     //
     // It was a flat 100, which made a valid 200-deep chain a coin flip: measured
     // over 20 runs of one unchanged ottofile, 9 resolved correctly and 11 exited 1
     // with "Maximum iterations reached", purely on HashMap seeding order.
     let max_iterations = envs.len() + 1;
+    // Keys whose evaluation failed while other declared keys were still
+    // unresolved. They get exactly one more run once everything else has
+    // settled; see the `Err` arm in the loop.
+    let mut parked: Vec<(&str, &str, eyre::Report)> = Vec::new();
 
     // The environment otto itself was invoked with, before any declared key shadows it,
     // with `base_overrides` layered on top. This is what a declared key's own expression
@@ -74,6 +79,29 @@ pub fn evaluate_envs(
         let mut still_pending = Vec::new();
 
         for (var_name, raw_value) in std::mem::take(&mut pending) {
+            // Deferral is decided on the RAW value, before anything runs. A `$(...)`
+            // body can reference a declared sibling, and `referenced_vars` scans the
+            // body under the same rules as the expander, so the reference is visible
+            // here. It was not visible before: the substitution executed first, with
+            // the sibling stripped from the context, and spliced the empty read in as
+            // the answer. `A: '$(echo "got:$B")'` with `B: hello` resolved to `got:`
+            // whenever A was reached first, and to `got:hello` when B was.
+            //
+            // Only a DECLARED key defers. A reference to an inherited name resolves
+            // from the inherited environment inside the command, which is the
+            // `$(echo "${SOME_PROFILE:-default}")` idiom, and must not wait for
+            // anything. A key referencing its own name is excluded too: that reads
+            // the inherited seed (see [`evaluation_context`]), so deferring on it
+            // would never clear.
+            if let Some(unresolved) = referenced_vars(raw_value)
+                .into_iter()
+                .find(|name| name.as_str() != var_name && envs.contains_key(name) && !evaluated.contains_key(name))
+            {
+                log::debug!("cfg::evaluate_envs: deferring '{var_name}' on unresolved '{unresolved}'");
+                still_pending.push((var_name, raw_value));
+                continue;
+            }
+
             let context = evaluation_context(&base_env, &evaluated, &inherited, var_name);
 
             match evaluate_single_env_value(raw_value, &context, working_dir) {
@@ -81,14 +109,46 @@ pub fn evaluate_envs(
                     evaluated.insert(var_name.to_string(), resolved_value);
                     made_progress = true;
                 }
-                Err(_) => {
-                    // Might depend on other variables not yet resolved
-                    still_pending.push((var_name, raw_value));
+                // Every declared reference this value SPELLS is resolved, or the
+                // check above would have deferred it. But a command body can read
+                // a sibling without naming it - `$(env | grep '^Z_HOST=')`, or a
+                // tool that reads `VAULT_ADDR` from its environment - and that
+                // sibling is stripped from the context until it resolves. So a
+                // failure here is parked, not returned: once every other key has
+                // settled, the command runs one more time against the complete
+                // environment, and only a failure then is terminal. Returning at
+                // once, which is what the first cut of 2.3.0 did, failed at load
+                // a v2.2.1 ottofile whose `$(env | grep '^Z_HOST=' ...)` key
+                // sorted before `Z_HOST`. Two runs of a failing command at most,
+                // not one per pass, and a key that fails with nothing else
+                // pending is not retried at all.
+                Err(e) => {
+                    log::debug!("cfg::evaluate_envs: parking '{var_name}' after a failed evaluation: {e}");
+                    parked.push((var_name, raw_value, e));
                 }
             }
         }
 
+        // Every other declared key is resolved: the parked keys get their one
+        // retry. If this pass WAS that retry, nothing else ran, `made_progress`
+        // is false, and the failure stands.
+        if still_pending.is_empty() && !parked.is_empty() {
+            if !made_progress {
+                let (var_name, _, e) = parked.swap_remove(0);
+                return Err(eyre!("Failed to resolve environment variable '{}': {}", var_name, e));
+            }
+            pending = parked.drain(..).map(|(name, raw_value, _)| (name, raw_value)).collect();
+            continue;
+        }
+
         if !made_progress && !still_pending.is_empty() {
+            // A key still deferred here may be waiting on a parked one, so the
+            // parked failure is the root cause and is reported first; a cycle
+            // report would blame the waiting end.
+            if let Some((var_name, _, e)) = parked.first() {
+                return Err(eyre!("Failed to resolve environment variable '{}': {}", var_name, e));
+            }
+
             // A cycle is its own error, named as one. Checked before the retry
             // below, whose message ("... 'B' not found") describes a variable
             // that exists and blames the wrong end of the loop.
@@ -164,23 +224,12 @@ pub fn parse_env_assignments(stdout: &str) -> Result<HashMap<String, String>> {
         let Some((key, value)) = trimmed.split_once('=') else {
             return Err(eyre!("line {number} is not KEY=VALUE: '{line}'"));
         };
-        if !is_valid_env_key(key) {
+        if !crate::naming::is_identifier(key) {
             return Err(eyre!("line {number} has an invalid key '{key}': '{line}'"));
         }
         parsed.insert(key.to_string(), value.to_string());
     }
     Ok(parsed)
-}
-
-/// `[A-Za-z_][A-Za-z0-9_]*`, spelled out rather than pulled through a regex
-/// dependency for one predicate.
-fn is_valid_env_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Build the evaluation context for one expression.
@@ -221,8 +270,9 @@ fn evaluate_single_env_value(
     //
     // The output is data. Splicing it in before step 2 made step 2 read it as
     // syntax: `LEAK: "$(echo '$PARENTVAL')"` resolved `$PARENTVAL` out of otto's
-    // own environment (a parent-env leak the controlled command environment
-    // exists to prevent), and output containing an undefined `$word` failed the
+    // own environment (the context this resolves against carries the inherited
+    // environment, which is what made the leak reachable at all), and output
+    // containing an undefined `$word` failed the
     // whole config load. Placeholders keep the two stages from seeing each
     // other's text.
     let (templated, outputs) = resolve_shell_commands_with_env(value, working_dir, env_context)?;
@@ -437,8 +487,18 @@ fn execute_shell_command_with_env(
         cmd.current_dir(dir);
     }
 
-    // ALWAYS use controlled environment to prevent parent process pollution
-    // This is critical for preventing Otto's environment from leaking into subprocesses
+    // What the child actually gets: a cleared environment, then the seven names
+    // below out of otto's own environment, then `env_overrides` on top of that.
+    // `env_overrides` is the evaluation context, which is the whole inherited
+    // environment minus the declared keys, plus the declared values resolved so
+    // far. So this is not an isolated environment and the clear is not what keeps
+    // otto's environment out of the command - the command sees nearly all of it,
+    // by design, because that is how `$(echo "${SOME_PROFILE:-default}")` reads
+    // the value otto was invoked with.
+    //
+    // The essential list matters in exactly one case: when one of those seven
+    // names is itself a declared key. The context has it stripped until it
+    // resolves, so without this floor a command would run with, say, no PATH.
     cmd.env_clear();
 
     let essential_vars = ["PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL"];
@@ -448,7 +508,6 @@ fn execute_shell_command_with_env(
         }
     }
 
-    // Add the explicit environment context (variables we're building up during evaluation)
     cmd.envs(env_overrides);
 
     let output = cmd
@@ -492,6 +551,40 @@ pub(crate) fn expand_var_refs<F>(input: &str, mut lookup: F) -> Result<String>
 where
     F: FnMut(&str) -> Option<String>,
 {
+    walk_var_refs(input, |_, reference| lookup(reference))
+}
+
+/// The variable a brace reference reads: its leading identifier, after an
+/// optional `#` (`${#NAME}` is a length expansion). `${NAME}` gives `NAME`,
+/// `${NAME:-x}` and `${NAME%y}` give `NAME`, `${#NAME}` gives `NAME`. A
+/// reference with no leading identifier (`${}`, `${1}`) is returned whole, so it
+/// fails lookup naming exactly what was written.
+fn expansion_name(reference: &str) -> &str {
+    let body = reference.strip_prefix('#').unwrap_or(reference);
+    let end = body
+        .bytes()
+        .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+        .unwrap_or(body.len());
+    if end == 0 || body.as_bytes()[0].is_ascii_digit() {
+        return reference;
+    }
+    &body[..end]
+}
+
+/// The one scan behind [`expand_var_refs`] and [`referenced_vars`]. For every
+/// reference, `on_ref` receives the variable NAME the shell would read and the
+/// raw REFERENCE otto resolves. They are the same text for `$NAME` and `${NAME}`
+/// and differ for a parameter expansion: `${NAME:-x}` names `NAME` and
+/// references `NAME:-x`. otto's templates do not implement parameter expansion,
+/// so the expander looks the raw reference up and fails naming it (pinned by
+/// `tests/dollar_escape_test.rs`); inside a `$(...)` body the shell does
+/// implement it, so the deferral scan has to see `NAME`, or `AAA: '$(echo
+/// "${ZZZ:-x}")'` runs before `ZZZ` resolves and prints the fallback. `on_ref`
+/// returning `None` is an unresolved reference.
+fn walk_var_refs<F>(input: &str, mut on_ref: F) -> Result<String>
+where
+    F: FnMut(&str, &str) -> Option<String>,
+{
     let bytes = input.as_bytes();
     let mut result = String::with_capacity(input.len());
     let mut i = 0;
@@ -521,8 +614,9 @@ where
                     i += 1;
                     continue;
                 };
-                let name = &input[i + 2..close];
-                let value = lookup(name).ok_or_else(|| eyre!("Environment variable '{}' not found", name))?;
+                let reference = &input[i + 2..close];
+                let value = on_ref(expansion_name(reference), reference)
+                    .ok_or_else(|| eyre!("Environment variable '{}' not found", reference))?;
                 result.push_str(&value);
                 i = close + 1;
             }
@@ -533,7 +627,7 @@ where
                     end += 1;
                 }
                 let name = &input[start..end];
-                let value = lookup(name).ok_or_else(|| eyre!("Environment variable '{}' not found", name))?;
+                let value = on_ref(name, name).ok_or_else(|| eyre!("Environment variable '{}' not found", name))?;
                 result.push_str(&value);
                 i = end;
             }
@@ -548,11 +642,12 @@ where
     Ok(result)
 }
 
-/// Every variable name `value` references, in order. Same scanning rules as the
-/// expander, so "what it references" and "what it resolves" cannot disagree.
+/// Every variable name `value` references, in order: the name the shell would
+/// read, so `${NAME:-x}` reports `NAME`. Same scan as the expander
+/// ([`walk_var_refs`]), so the two cannot disagree about where a reference is.
 fn referenced_vars(value: &str) -> Vec<String> {
     let mut names = Vec::new();
-    let _ = expand_var_refs(value, |name| {
+    let _ = walk_var_refs(value, |name, _| {
         names.push(name.to_string());
         Some(String::new())
     });
@@ -576,9 +671,16 @@ fn find_reference_cycle(pending: &[String], envs: &HashMap<String, String>) -> O
         while let Some(value) = envs.get(&current) {
             // Follow the first reference that is itself still unresolved; a cycle
             // reachable this way is a cycle, which is all the message needs.
+            //
+            // A key's own name is not such a reference, for the same reason the
+            // deferral rule excludes it (`name.as_str() != var_name` in
+            // `evaluate_envs`): `AAA: '$AAA $BBB'` reads the inherited seed for
+            // `$AAA`, by design. Following it anyway reported the legal
+            // self-reference as `AAA -> AAA` and never reached the real cycle
+            // further down the chain.
             let Some(next) = referenced_vars(value)
                 .into_iter()
-                .find(|name| pending_set.contains(name.as_str()))
+                .find(|name| name.as_str() != current && pending_set.contains(name.as_str()))
             else {
                 break;
             };

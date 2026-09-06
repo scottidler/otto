@@ -20,10 +20,10 @@ impl Parser {
 
     fn divine_ottofile(source: crate::cli::parser::OttofileSource) -> Result<Option<PathBuf>> {
         let value = source.as_start_path();
-        // Both failures name the path. `otto -o /nope/nothere.yml` used to fail
-        // with a bare "No such file or directory (os error 2)", which says
-        // nothing about which file otto was looking for.
-        let expanded = expanduser(value).wrap_err_with(|| format!("could not expand ottofile path '{source}'"))?;
+        // `otto -o /nope/nothere.yml` used to fail with a bare "No such file or
+        // directory (os error 2)", which says nothing about which file otto
+        // was looking for.
+        let expanded = crate::executor::layout::expand_tilde(value);
         let path = fs::canonicalize(&expanded)
             .wrap_err_with(|| format!("ottofile path '{}' does not exist", expanded.display()))?;
         if path.is_dir() {
@@ -34,16 +34,12 @@ impl Parser {
 
     fn load_config_from_path(ottofile_path: Option<PathBuf>) -> Result<(ConfigSpec, String, Option<PathBuf>)> {
         if let Some(ottofile) = ottofile_path {
-            // Named, for the same reason `divine_ottofile` names its two
-            // failures: the not-exists branch already said which file it was
-            // looking for, while an unreadable one failed with a bare
+            // Named, for the same reason `divine_ottofile` names its
+            // not-exists failure: an unreadable file used to fail with a bare
             // "Permission denied (os error 13)" and no path at all.
             let content = fs::read_to_string(&ottofile)
                 .wrap_err_with(|| format!("could not read ottofile '{}'", ottofile.display()))?;
-            let mut hasher = Sha256::new();
-            hasher.update(&content);
-            let result = hasher.finalize();
-            let hash = hex::encode(result)[..8].to_string();
+            let hash = short_hash(&content);
 
             // Version gate BEFORE the typed parse, against the same string:
             // reversed, a file from a newer otto reports whichever key it
@@ -56,15 +52,20 @@ impl Parser {
             // fix, without an api bump (design doc `2026-09-01-cancellation-
             // reaping-and-foreach-concurrency.md`, Phase 4).
             let config_spec: ConfigSpec =
-                serde_yaml::from_str(&content).map_err(crate::cfg::otto::wrap_unknown_field_error)?;
+                yaml_serde::from_str(&content).map_err(crate::cfg::otto::wrap_unknown_field_error)?;
 
-            // Validate that no tasks use reserved builtin param names
+            // Validate that no tasks use reserved builtin task or param names.
+            // Task names first: a task named `Clean` is shadowed by the builtin
+            // on every surface, so the file is unrunnable as written and saying
+            // so here beats silently running the builtin.
+            Self::validate_no_builtin_tasks(&config_spec)?;
             Self::validate_no_builtin_params(&config_spec)?;
 
-            // Validate foreach sources (a `command:` source is exclusive with
-            // glob/items/range). Shape-only, executes nothing, so every
+            // Validate every `foreach:` block: exactly one source, an `as:`
+            // that is a shell identifier, and a `range:` that parses and fits
+            // inside `max_items`. Shape-only, executes nothing, so every
             // surface including `--help` reports the misconfiguration.
-            Self::validate_foreach_sources(&config_spec)?;
+            Self::validate_foreach_specs(&config_spec)?;
 
             // Validate `required: true` combinations (FLG, default:,
             // zero-capable nargs) and required-positional ordering.
@@ -89,10 +90,10 @@ impl Parser {
         }
     }
 
-    fn validate_foreach_sources(config: &ConfigSpec) -> Result<()> {
+    fn validate_foreach_specs(config: &ConfigSpec) -> Result<()> {
         for (task_name, task_spec) in &config.tasks {
             if let Some(foreach) = &task_spec.foreach {
-                foreach.validate_sources(task_name)?;
+                foreach.validate(task_name)?;
             }
         }
         Ok(())
@@ -194,6 +195,29 @@ impl Parser {
                     "Task '{task_name}': foreach.jobs cannot be combined with tty; \
                      a tty task owns the terminal exclusively, so it runs exclusively \
                      and a per-group concurrency override cannot be honored"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject a task whose name is a builtin command name.
+    ///
+    /// `inject_builtin_commands` does `tasks.insert("Clean", ...)` on an
+    /// `IndexMap`, which replaces a user task of that name in place, and
+    /// `main`'s early route reaches the builtin's own clap parser before the
+    /// ottofile is even read. So a task named `Clean` could never run: the
+    /// builtin ran instead, exit 0, with nothing said about the task the user
+    /// wrote. Same shape as `validate_no_builtin_params` below, at load time,
+    /// so every surface including `--help` reports it.
+    fn validate_no_builtin_tasks(config: &ConfigSpec) -> Result<()> {
+        for task_name in config.tasks.keys() {
+            if is_builtin(task_name) {
+                return Err(eyre!(
+                    "Task '{}' defines reserved builtin command name '{}'. \
+                     Capitalized names are reserved for otto builtins.",
+                    task_name,
+                    task_name
                 ));
             }
         }

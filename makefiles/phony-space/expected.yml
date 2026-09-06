@@ -1,0 +1,15 @@
+# Expected conversion of this directory's Makefile: `.PHONY : clean` is
+# recognized despite the whitespace before the colon, so `clean` converts
+# with no warnings at all.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - clean
+tasks:
+  clean:
+    before:
+    - dep
+    bash: rm -rf dist
+  dep:
+    bash: echo dep

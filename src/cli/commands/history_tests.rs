@@ -54,29 +54,73 @@ fn create_empty_store() -> Arc<MemoryStateStore> {
 }
 
 #[test]
-fn test_format_duration() {
-    assert_eq!(format_duration(Some(0.5)), "500ms");
-    assert_eq!(format_duration(Some(1.5)), "1.5s");
-    assert_eq!(format_duration(Some(65.0)), "1m5s");
-    assert_eq!(format_duration(Some(3665.0)), "1h1m");
-    assert_eq!(format_duration(None), "-");
+fn an_absent_duration_or_size_renders_as_a_dash() {
+    // `History` owns the Option handling; `format::format_duration` and
+    // `format::format_size` now take concrete values.
+    let duration: Option<f64> = None;
+    let size: Option<u64> = None;
+    assert_eq!(duration.map_or_else(|| "-".to_string(), format_duration), "-");
+    assert_eq!(size.map_or_else(|| "-".to_string(), format_size), "-");
+    assert_eq!(Some(65.0).map_or_else(|| "-".to_string(), format_duration), "1m5s");
+    assert_eq!(Some(1536u64).map_or_else(|| "-".to_string(), format_size), "1.5 KB");
 }
 
 #[test]
-fn test_format_size() {
-    assert_eq!(format_size(Some(500)), "500 B");
-    assert_eq!(format_size(Some(1536)), "1.5 KB");
-    assert_eq!(format_size(Some(1572864)), "1.5 MB");
-    assert_eq!(format_size(Some(1610612736)), "1.50 GB");
-    assert_eq!(format_size(None), "-");
+#[serial_test::serial]
+fn only_the_leading_home_prefix_becomes_a_tilde() {
+    // The bug: `s.replace(&home, "~")` rewrote every occurrence, so a path
+    // repeating the home prefix inside itself lost its interior segments.
+    // `HOME` is mutated in place (matching `clean_tests.rs`'s pattern for
+    // env-dependent tests) and restored on the way out, `#[serial]` because
+    // Rust tests share a process and an unguarded `set_var` racing another
+    // test's `HOME` read is a data race, not just a flaky assertion.
+    let original = std::env::var("HOME").ok();
+    unsafe {
+        std::env::set_var("HOME", "/home/u");
+    }
+
+    assert_eq!(abbreviate_home("/home/u/proj/home/u/x"), "~/proj/home/u/x");
+    assert_eq!(abbreviate_home("/home/u"), "~");
+    assert_eq!(abbreviate_home("/var/tmp/home/u"), "/var/tmp/home/u");
+
+    unsafe {
+        match &original {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }
 
+/// The home prefix has to end at a separator. Without that check a sibling
+/// directory whose name merely extends `$HOME` was rewritten as if it were
+/// inside it, and a `HOME` with a trailing slash ate the separator.
 #[test]
-fn test_format_timestamp() {
-    let timestamp = 1234567890;
-    let result = format_timestamp(timestamp);
-    assert!(result.contains("-"));
-    assert!(result.contains(":"));
+#[serial_test::serial]
+fn a_home_prefix_only_counts_when_it_ends_at_a_separator() {
+    let original = std::env::var("HOME").ok();
+
+    unsafe {
+        std::env::set_var("HOME", "/home/sa");
+    }
+    // `/home/saidler` is a different directory that happens to start with the
+    // same bytes; it used to render as `~idler/proj`.
+    assert_eq!(abbreviate_home("/home/saidler/proj"), "/home/saidler/proj");
+    assert_eq!(abbreviate_home("/home/sa/proj"), "~/proj");
+
+    unsafe {
+        std::env::set_var("HOME", "/home/u/");
+    }
+    // The trailing separator is the home's, not the path's: `~proj` was the
+    // old answer.
+    assert_eq!(abbreviate_home("/home/u/proj"), "~/proj");
+    assert_eq!(abbreviate_home("/home/u"), "~");
+
+    unsafe {
+        match &original {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }
 
 #[test]

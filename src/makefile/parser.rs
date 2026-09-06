@@ -35,6 +35,19 @@ pub struct MakefileParser {
     diagnostics: Vec<Diagnostic>,
 }
 
+/// What `MakefileParser::rule_colon` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleColon {
+    /// The byte offset of the colon that splits targets from dependencies: the
+    /// first one that is not inside a `$(...)` or `${...}` expansion.
+    At(usize),
+    /// No colon outside an expansion, and every expansion was closed.
+    Missing,
+    /// An expansion was opened and never closed, so any colon after it is
+    /// inside a group that never ends.
+    Unclosed,
+}
+
 impl MakefileParser {
     pub fn new(content: String) -> Self {
         Self {
@@ -251,6 +264,31 @@ impl MakefileParser {
         Ok(ast)
     }
 
+    /// Where a rule's colon is, or why there isn't one.
+    ///
+    /// `Unclosed` is kept apart from `Missing` so the author of `$(SRCS: dep`
+    /// is told about the paren they forgot rather than about a line otto did
+    /// not recognize.
+    fn rule_colon(text: &str) -> RuleColon {
+        let bytes = text.as_bytes();
+        let mut depth = 0usize;
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'$' if matches!(bytes.get(index + 1), Some(b'(') | Some(b'{')) => {
+                    depth += 1;
+                    index += 2;
+                    continue;
+                }
+                b')' | b'}' if depth > 0 => depth -= 1,
+                b':' if depth == 0 => return RuleColon::At(index),
+                _ => {}
+            }
+            index += 1;
+        }
+        if depth > 0 { RuleColon::Unclosed } else { RuleColon::Missing }
+    }
+
     /// Parse one rule. Returns every target it declares: `test check: build` is
     /// two rules in make, and used to become a single task named "test check".
     fn parse_rule(
@@ -264,9 +302,23 @@ impl MakefileParser {
         let (body, inline_comment) = split_inline_comment(&raw);
         let trimmed = body.trim().to_string();
 
-        let colon_pos = match trimmed.find(':') {
-            Some(pos) => pos,
-            None => {
+        let colon_pos = match Self::rule_colon(&trimmed) {
+            RuleColon::At(pos) => pos,
+            // An expansion that is never closed swallows the rest of the line,
+            // colon included, so this looked like a line otto could not
+            // recognize and its recipe was then reported as belonging to no
+            // rule: two messages, neither naming the typo. The author gets one
+            // that does, and the recipe is skipped with the rule it belongs to.
+            RuleColon::Unclosed => {
+                self.warn(
+                    number,
+                    format!("unclosed `$(` or `${{` in `{trimmed}`; the rule is skipped"),
+                );
+                *index += 1;
+                self.skip_recipe(lines, index);
+                return Ok(None);
+            }
+            RuleColon::Missing => {
                 self.warn(number, format!("unrecognized line ignored: `{trimmed}`"));
                 *index += 1;
                 return Ok(None);
@@ -311,7 +363,16 @@ impl MakefileParser {
 
         // `objs: %.o: %.c` - a static pattern rule, whose middle field is not a
         // dependency list at all.
-        if dep_part.contains(':') {
+        //
+        // Asked through `rule_colon` for the same reason the target side is: a
+        // substitution reference in the DEPENDENCY list carries a colon of its
+        // own, so `deps.d: $(OBJS:%.o=%.d)` read as a static pattern rule and
+        // the whole rule was skipped. Only a top-level colon makes a third
+        // field. This is safe to fix only because `converter.rs` now drops the
+        // edge for an expansion it cannot compute: emitting `before:
+        // ['$(OBJS:%.o=%.d)']` instead would trade a skipped rule for an
+        // ottofile that cannot run.
+        if matches!(Self::rule_colon(&dep_part), RuleColon::At(_)) {
             self.warn(
                 number,
                 format!("static pattern rule `{target_part}` is not supported; the rule is skipped"),
@@ -322,6 +383,23 @@ impl MakefileParser {
         }
 
         let names: Vec<String> = target_part.split_whitespace().map(|s| s.to_string()).collect();
+
+        // `$(TARGETS): dep` - the target name is itself a make variable
+        // reference this parser does not expand. It used to become a task
+        // literally named `$(TARGETS)`, silently (converter.rs only warns for
+        // `$` in a dependency, never in the target itself), and that name then
+        // became the default task. Treated like a pattern rule: the name is
+        // unknowable here, so warn and skip the recipe rather than emit a
+        // task nothing can ever invoke by that name.
+        if names.iter().any(|n| n.contains("$(") || n.contains("${")) {
+            self.warn(
+                number,
+                format!("target `{target_part}` is a make expansion; otto task names cannot be computed; the rule is skipped"),
+            );
+            *index += 1;
+            self.skip_recipe(lines, index);
+            return Ok(None);
+        }
 
         // `%.o: %.c` - a pattern rule is a template, not a task. It used to
         // become a task literally named `%.o`, which then also became the
@@ -512,13 +590,19 @@ fn unsupported_directive(trimmed: &str) -> Option<&'static str> {
 }
 
 fn is_phony_declaration(line: &str) -> Option<Vec<String>> {
-    line.strip_prefix(".PHONY:").map(|targets_part| {
+    // `.PHONY : clean` (whitespace before the colon) is legal make; the old
+    // exact-prefix match on `.PHONY:` missed it, so the line fell through to
+    // "special target `.PHONY` is not converted" and every target it named
+    // then got a false "not `.PHONY`" warning of its own.
+    let after_name = line.strip_prefix(".PHONY")?;
+    let targets_part = after_name.trim_start().strip_prefix(':')?;
+    Some(
         split_inline_comment(targets_part)
             .0
             .split_whitespace()
             .map(|s| s.to_string())
-            .collect()
-    })
+            .collect(),
+    )
 }
 
 fn extract_default_goal(line: &str) -> Option<String> {

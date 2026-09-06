@@ -94,6 +94,48 @@ impl Parser {
         }
     }
 
+    /// True when some task named in `args` declares `-<short>` as one of its own
+    /// params.
+    ///
+    /// otto intercepts a handful of single-letter tokens (`-h` for help, `-t`
+    /// for the TUI) before a task's arguments are bound. Every interception is
+    /// also a name otto takes away from the ottofile author, so each one asks
+    /// this first: a task that declares the short owns it, and otto keeps its
+    /// hands off. Reads declarations only - resolves nothing, runs nothing.
+    ///
+    /// A subtask id is looked up through its parent: `up:gamma` is not a key of
+    /// the task map, and asking for it directly answered "no task claims this"
+    /// for every foreach subtask, so a parent that declares `-t` or `-h` lost it
+    /// the moment the user addressed one of its items. `value_taking_options`
+    /// (`discovery.rs`) already partitions subtask arguments through the same
+    /// mapping.
+    fn args_claim_short(&self, args: &[String], short: char) -> bool {
+        args.iter().any(|arg| {
+            self.config_spec
+                .tasks
+                .get(crate::naming::parent_or_self(arg))
+                .is_some_and(|spec| spec.params.values().any(|param| param.short == Some(short)))
+        })
+    }
+
+    /// True when `args` asks for help: `--help` always, `-h` only when no task
+    /// in the list declared `-h` itself (a task with `-h|--host` could never be
+    /// given a host, because otto answered with help every time).
+    fn help_requested_in(&self, args: &[String]) -> bool {
+        args.iter().any(|arg| arg == "--help") || (args.iter().any(|arg| arg == "-h") && !self.args_claim_short(args, 'h'))
+    }
+
+    /// Every task name in this ottofile that the user wrote, built-ins excluded.
+    ///
+    /// `inject_builtin_commands` runs before every help decision, so
+    /// `self.config_spec.tasks` is never empty by the time anything asks - the
+    /// six builtins are always in it. Asking `is_empty()` therefore always
+    /// answered "no", which is why an ottofile with no tasks of its own printed
+    /// "No tasks to execute" instead of help.
+    fn has_user_tasks(&self) -> bool {
+        self.config_spec.tasks.keys().any(|name| !is_builtin(name))
+    }
+
     fn should_show_help(&self, args: &[String]) -> bool {
         // Show help if:
         // 1. Explicit help command: "otto help" or "otto help <task>"
@@ -104,7 +146,7 @@ impl Parser {
                 return true;
             }
             // Check if --help or -h is present (subcommand help)
-            if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
+            if self.help_requested_in(args) {
                 return true;
             }
             // An explicit task request is never a help request. Falling through
@@ -114,8 +156,7 @@ impl Parser {
         }
 
         let default_tasks = &self.config_spec.otto.tasks;
-        default_tasks.is_empty()
-            || (default_tasks.len() == 1 && default_tasks[0] == "*" && self.config_spec.tasks.is_empty())
+        default_tasks.is_empty() || (default_tasks.len() == 1 && default_tasks[0] == "*" && !self.has_user_tasks())
     }
 
     fn show_help(&self, args: &[String]) -> Result<()> {
@@ -131,7 +172,7 @@ impl Parser {
             // "otto help <task>" - show task-specific help
             let task_name = &args[1];
             self.show_task_help(task_name)?;
-        } else if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
+        } else if self.help_requested_in(args) {
             // "otto <task> --help" or "otto <task> -h" - show task-specific help
             let task_name = &args[0];
             self.show_task_help(task_name)?;

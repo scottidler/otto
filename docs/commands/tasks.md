@@ -150,11 +150,11 @@ otto --tasks | jq -r '.up.subtasks[]'
 ## Notes
 
 - `--tasks` resolves `foreach:` sources the same way `--list-subtasks` does, so subtask ids are always the real, current expansion, not a static count.
-- That includes a [`foreach: command:`](../foreach-subtasks.md) source: `--tasks` is an enumeration surface, so it runs the command once (reporting the real subtask ids is its job) and a non-zero exit becomes its own loud error with nothing on stdout. `otto --help` still never runs it.
+- That includes a [`foreach: command:`](../archive/foreach-subtasks.md) source: `--tasks` is an enumeration surface, so it runs the command once (reporting the real subtask ids is its job) and a non-zero exit becomes its own loud error with nothing on stdout. `otto --help` still never runs it.
 - A `foreach:` that resolves to zero items is not an error: it prints a one-line notice to stderr and the task's `subtasks` array is empty.
 - `--tasks` never executes a task's `bash:`/`python:`/`action:` body.
 
 ## Related Commands
 
 - `otto --list-subtasks` - human-readable subtask listing (same underlying foreach resolution)
-- [`foreach:` subtask generation](../foreach-subtasks.md) - how `subtasks` ids are derived
+- [`foreach:` subtask generation](../archive/foreach-subtasks.md) - how `subtasks` ids are derived

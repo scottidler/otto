@@ -231,4 +231,4 @@ tasks:
       echo "5. Data flows: task_a → task_b → task_c"
       echo ""
       echo "📁 Inspect files at:"
-      echo "   ~/.otto/*/latest/tasks/*/output.*.json"
+      echo "   ~/.otto/*/<run-timestamp>/tasks/*/output.*.json"

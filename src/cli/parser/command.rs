@@ -44,6 +44,26 @@ impl Parser {
             cmd = cmd.arg(arg);
         }
 
+        // A param that declares `-h` collides with clap's auto-generated help
+        // short: clap asserts on the duplicate outright ("Short option names
+        // must be unique"), so `-h|--host` panicked the binary instead of
+        // binding. otto answers `--help` itself before anything is bound
+        // (`should_show_help`), so the task's own help flag keeps the long form
+        // and gives the short back to the param that asked for it.
+        let declares_short_h = task_spec.params.values().any(|param| param.short == Some('h'));
+        let declares_long_help = task_spec.params.values().any(|param| param.long.as_deref() == Some("help"));
+        if declares_short_h {
+            cmd = cmd.disable_help_flag(true);
+            if !declares_long_help {
+                cmd = cmd.arg(
+                    Arg::new("help")
+                        .long("help")
+                        .help("Print help")
+                        .action(clap::ArgAction::Help),
+                );
+            }
+        }
+
         // Auto-inject --Serial flag for foreach tasks
         if task_spec.has_foreach() {
             cmd = cmd.arg(
@@ -180,33 +200,39 @@ impl Parser {
         }
         cmd = cmd.allow_external_subcommands(true);
 
-        if !self.config_spec.tasks.is_empty() {
-            // Separate regular tasks from built-in commands
-            let mut regular_tasks: Vec<_> = self
-                .config_spec
-                .tasks
-                .iter()
-                .filter(|(name, _)| !BUILTIN_COMMANDS.contains(&name.as_str()))
-                .collect();
-            regular_tasks.sort_by_key(|(name, _)| name.as_str());
+        // Separate regular tasks from built-in commands
+        let mut regular_tasks: Vec<_> = self
+            .config_spec
+            .tasks
+            .iter()
+            .filter(|(name, _)| !BUILTIN_COMMANDS.contains(&name.as_str()))
+            .collect();
+        regular_tasks.sort_by_key(|(name, _)| name.as_str());
 
-            for (_, task_spec) in regular_tasks {
-                cmd = cmd.subcommand(self.task_to_command_for_help(task_spec));
-            }
+        for (_, task_spec) in regular_tasks {
+            cmd = cmd.subcommand(self.task_to_command_for_help(task_spec));
+        }
 
-            // Collect and sort built-in commands
-            let mut builtins: Vec<(&String, &TaskSpec)> = self
-                .config_spec
-                .tasks
-                .iter()
-                .filter(|(name, _)| BUILTIN_COMMANDS.contains(&name.as_str()))
-                .collect();
-            builtins.sort_by_key(|(name, _)| name.as_str());
+        // Collect and sort built-in commands
+        let mut builtins: Vec<(&String, &TaskSpec)> = self
+            .config_spec
+            .tasks
+            .iter()
+            .filter(|(name, _)| BUILTIN_COMMANDS.contains(&name.as_str()))
+            .collect();
+        builtins.sort_by_key(|(name, _)| name.as_str());
 
-            for (_, task_spec) in builtins {
-                cmd = cmd.subcommand(self.task_to_command_for_help(task_spec));
-            }
-        } else {
+        for (_, task_spec) in builtins {
+            cmd = cmd.subcommand(self.task_to_command_for_help(task_spec));
+        }
+
+        // The epilogue is the "no ottofile anywhere up the tree" message, so it
+        // is gated on there being no ottofile - not on the task map being
+        // empty, which stopped being possible the moment builtins were injected
+        // into it. An ottofile that exists and declares no tasks of its own now
+        // renders help with the builtins, rather than claiming no ottofile was
+        // found or printing "No tasks to execute".
+        if !self.has_user_tasks() && self.ottofile.is_none() {
             cmd = cmd.after_help(ottofile_not_found_message());
         }
 

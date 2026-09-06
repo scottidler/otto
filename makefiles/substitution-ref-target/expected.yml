@@ -1,0 +1,17 @@
+# Expected conversion of this directory's Makefile: both substitution-reference
+# rules produce no task at all, only the make-expansion warning naming the whole
+# target, and the unclosed `$(BAD` rule produces none either; `headers`, the
+# first real rule in the file, becomes the default.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - headers
+  envs:
+    OBJS: a.o b.o
+    SRCS: a.c b.c
+tasks:
+  headers:
+    bash: echo headers
+  build:
+    bash: echo build

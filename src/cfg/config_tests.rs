@@ -10,7 +10,7 @@ use super::*;
 #[test]
 fn deny_unknown_fields_names_an_invented_root_envs_key() {
     let yaml = "tasks:\n  up:\n    bash: echo hi\nenvs:\n  FOO: bar\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = yaml_serde::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("envs"), "must name the field: {err}");
     assert!(err.contains("otto"), "must list otto in the expected set: {err}");
     assert!(err.contains("tasks"), "must list tasks in the expected set: {err}");

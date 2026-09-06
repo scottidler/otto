@@ -692,3 +692,75 @@ tasks:
     );
     assert_contiguous_blocks_in_item_order(&stdout(&output), &["say:alpha", "say:beta"]);
 }
+
+/// Requesting one item of a buffered foreach prints its output.
+///
+/// `buffer: true` is a property of the *group*, and ordered replay is the only
+/// path to the terminal for a task the replay cursor owns. Asking one item for
+/// it by name puts no group in the run, so the cursor owns nothing and no
+/// replay ever happens - but the subtask still carried `buffered: true` and
+/// suppressed itself anyway. `otto say:alpha` printed its status line and
+/// nothing else, at exit 0: the body ran and its output was discarded.
+#[test]
+fn test_requesting_one_item_of_a_buffered_foreach_prints_its_output() {
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile = write_ottofile(
+        temp_dir.path(),
+        r#"
+otto:
+  api: 1
+
+tasks:
+  say:
+    foreach:
+      items: [alpha, beta, gamma]
+      as: item
+      parallel: true
+      buffer: true
+    bash: echo "HELLO ${item}"
+"#,
+    );
+
+    let output = otto(&ottofile, &["say:alpha"]);
+    assert!(
+        output.status.success(),
+        "asking for one item must succeed: {}",
+        stderr(&output)
+    );
+    let clean = strip_ansi(&stdout(&output));
+    assert!(
+        clean.contains("HELLO alpha"),
+        "the requested item's output must reach the terminal:\n{clean}"
+    );
+    assert!(
+        !clean.contains("HELLO beta") && !clean.contains("HELLO gamma"),
+        "only the requested item runs:\n{clean}"
+    );
+}
+
+/// The whole group still replays in item order when the group IS in the run,
+/// which is what says the suppression moved rather than went away.
+#[test]
+fn test_asking_for_the_parent_still_buffers_the_whole_group() {
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile = write_ottofile(
+        temp_dir.path(),
+        r#"
+otto:
+  api: 1
+
+tasks:
+  say:
+    foreach:
+      items: [alpha, beta, gamma]
+      as: item
+      parallel: true
+      buffer: true
+    bash: echo "HELLO ${item}"
+"#,
+    );
+
+    let output = otto(&ottofile, &["say"]);
+    assert!(output.status.success(), "the run must succeed: {}", stderr(&output));
+    assert_contiguous_blocks_in_item_order(&stdout(&output), &["say:alpha", "say:beta", "say:gamma"]);
+}

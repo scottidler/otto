@@ -1,23 +1,37 @@
-# `otto clean` - Manage Run Artifacts
+# `otto Clean` - Manage Run Artifacts
 
-The `clean` command helps manage disk space by removing old Otto run artifacts based on configurable retention policies.
+The `Clean` command helps manage disk space by removing old Otto run artifacts based on configurable retention policies.
 
 ## Usage
 
 ```bash
-otto clean [OPTIONS]
+otto Clean [OPTIONS]
 ```
 
 ## Options
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--keep-days <N>` | Keep runs newer than N days | 30 |
-| `--keep-last <N>` | Keep at least N most recent runs regardless of age | none |
-| `--keep-failed <N>` | Keep failed runs for N days (overrides --keep-days) | same as --keep-days |
-| `--project-filter <HASH>` | Clean specific project only | all projects |
-| `--dry-run` | Show what would be deleted without deleting | false |
-| `--no-db` | Use filesystem scan instead of database | false |
+```
+$ otto Clean --help
+Clean old otto run directories
+
+Usage: Clean [OPTIONS]
+
+Options:
+      --keep-days <KEEP_DAYS>
+          Keep runs newer than this many days [default: 30]
+      --keep-last <KEEP_LAST>
+          Keep at least this many most recent runs (regardless of age)
+      --keep-failed <KEEP_FAILED>
+          Keep failed runs for this many days (overrides --keep-days for failed runs)
+      --dry-run
+          Dry run - show what would be deleted without deleting
+      --project-filter <PROJECT_FILTER>
+          Filter by project hash
+      --no-db
+          Use filesystem scan instead of database (fallback mode)
+  -h, --help
+          Print help
+```
 
 ## Examples
 
@@ -25,56 +39,56 @@ otto clean [OPTIONS]
 
 ```bash
 # Delete runs older than 30 days (default)
-otto clean
+otto Clean
 
 # Delete runs older than 7 days
-otto clean --keep-days 7
+otto Clean --keep-days 7
 
 # Delete runs older than 90 days
-otto clean --keep-days 90
+otto Clean --keep-days 90
 ```
 
 ### Preview Before Deleting
 
 ```bash
 # Dry run - see what would be deleted
-otto clean --dry-run
+otto Clean --dry-run
 
 # Preview 7-day cleanup
-otto clean --keep-days 7 --dry-run
+otto Clean --keep-days 7 --dry-run
 ```
 
 ### Smart Retention Policies
 
 ```bash
 # Keep last 10 runs regardless of age, delete older runs beyond 30 days
-otto clean --keep-days 30 --keep-last 10
+otto Clean --keep-days 30 --keep-last 10
 
 # Keep failed runs for 60 days, successful runs for 30 days
-otto clean --keep-days 30 --keep-failed 60
+otto Clean --keep-days 30 --keep-failed 60
 
 # Keep last 5 runs, successful runs for 14 days, failed runs for 30 days
-otto clean --keep-days 14 --keep-failed 30 --keep-last 5
+otto Clean --keep-days 14 --keep-failed 30 --keep-last 5
 ```
 
 ### Project-Specific Cleanup
 
 ```bash
 # Clean specific project only
-otto clean --project-filter abc123
+otto Clean --project-filter abc123
 
 # Dry run for specific project
-otto clean --project-filter abc123 --dry-run
+otto Clean --project-filter abc123 --dry-run
 ```
 
 ### Filesystem Fallback Mode
 
 ```bash
 # Force filesystem scan (no database)
-otto clean --no-db
+otto Clean --no-db
 
 # Useful if database is unavailable or for debugging
-otto clean --no-db --dry-run
+otto Clean --no-db --dry-run
 ```
 
 ## Output
@@ -101,7 +115,7 @@ Run without --dry-run to actually delete these runs
 ```
 Scanning /home/user/.otto for old runs...
 
-Found 15 runs older than 30 days (342.5 MB total)
+Found 15 runs to delete by keeping everything for 30 days (342.5 MB total)
 
 Dry run - showing what would be deleted:
 
@@ -139,7 +153,7 @@ The clean command applies retention rules in this order:
 ### Example Policy Flow
 
 ```bash
-otto clean --keep-days 30 --keep-failed 60 --keep-last 5
+otto Clean --keep-days 30 --keep-failed 60 --keep-last 5
 ```
 
 For each run:
@@ -151,19 +165,22 @@ For each run:
 
 Otto stores run artifacts in:
 ```
-~/.otto/
-├── otto-<project-hash>/        # Per-project directories
+$OTTO_HOME/ (default ~/.otto/)
+├── <project-name>-<hash>/      # Per-project directory, e.g. proj-70af3bf4/
+│   ├── .cache/                 # Rendered scripts, flat, named by content hash
 │   ├── <timestamp>/            # Individual run directories
-│   │   ├── run.yaml           # Run metadata
+│   │   ├── run.yaml           # Serialized ExecutionContext for this run
 │   │   ├── tasks/             # Task execution data
 │   │   │   ├── <task-name>/
-│   │   │   │   ├── script.sh
+│   │   │   │   ├── script.sh -> ../../../.cache/<hash>.sh
 │   │   │   │   ├── stdout.log
 │   │   │   │   ├── stderr.log
-│   │   │   │   └── output.json
+│   │   │   │   └── output.<task-name>.json
 │   │   └── ...
 └── otto.db                     # SQLite database (metadata only)
 ```
+
+Full detail, including the input/output files a task with dependencies gets, is in [`docs/directory-layout.md`](../directory-layout.md).
 
 ## Database vs Filesystem Mode
 
@@ -209,38 +226,38 @@ Otto stores run artifacts in:
 
 ```bash
 # Weekly cleanup script
-otto clean --keep-days 30 --keep-last 10
+otto Clean --keep-days 30 --keep-last 10
 ```
 
 ### Aggressive Space Recovery
 
 ```bash
 # Free up space aggressively
-otto clean --keep-days 7 --keep-last 3 --keep-failed 14
+otto Clean --keep-days 7 --keep-last 3 --keep-failed 14
 ```
 
 ### Long-Term Archival
 
 ```bash
 # Keep recent history
-otto clean --keep-days 90 --keep-last 20
+otto Clean --keep-days 90 --keep-last 20
 ```
 
 ### Per-Project Cleanup
 
 ```bash
 # Clean old project only
-otto clean --project-filter old_proj --keep-days 7
+otto Clean --project-filter old_proj --keep-days 7
 ```
 
 ### Audit Before Delete
 
 ```bash
 # See what will be deleted
-otto clean --dry-run
+otto Clean --dry-run
 
 # Review and confirm
-otto clean
+otto Clean
 ```
 
 ## Performance
@@ -261,7 +278,7 @@ otto clean
 If database is missing or corrupted:
 ```bash
 # Use filesystem fallback
-otto clean --no-db
+otto Clean --no-db
 
 # Database will be automatically recreated on next run
 ```
@@ -271,7 +288,7 @@ otto clean --no-db
 If database and filesystem are out of sync:
 ```bash
 # Verify with dry run
-otto clean --dry-run
+otto Clean --dry-run
 
 # Database will self-heal on next run
 ```
@@ -281,7 +298,7 @@ otto clean --dry-run
 Check actual file deletion:
 ```bash
 # Verify cleanup happened
-ls -lh ~/.otto/otto-*/
+ls -lh ~/.otto/*-*/
 
 # Check disk usage
 du -sh ~/.otto
@@ -289,10 +306,9 @@ du -sh ~/.otto
 
 ## Related Commands
 
-- [`otto history`](history.md) - View runs before cleaning
-- [`otto stats`](stats.md) - Understand disk usage patterns
+- [`otto History`](history.md) - View runs before cleaning
+- [`otto Stats`](stats.md) - Understand disk usage patterns
 
 ## See Also
 
 - [Architecture: SQLite Integration](../architecture/sqlite-integration.md)
-- [Migration Guide](../migration-guide.md)

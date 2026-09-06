@@ -158,13 +158,13 @@ fn test_foreach_requires_source() {
 
 #[test]
 fn test_foreach_jobs_deserializes_all_and_positive_integers() {
-    assert_eq!(serde_yaml::from_str::<ForeachJobs>("all\n").unwrap(), ForeachJobs::All);
+    assert_eq!(yaml_serde::from_str::<ForeachJobs>("all\n").unwrap(), ForeachJobs::All);
     assert_eq!(
-        serde_yaml::from_str::<ForeachJobs>("4\n").unwrap(),
+        yaml_serde::from_str::<ForeachJobs>("4\n").unwrap(),
         ForeachJobs::Fixed(std::num::NonZeroUsize::new(4).unwrap())
     );
     assert_eq!(
-        serde_yaml::from_str::<ForeachJobs>("1\n").unwrap(),
+        yaml_serde::from_str::<ForeachJobs>("1\n").unwrap(),
         ForeachJobs::Fixed(std::num::NonZeroUsize::new(1).unwrap())
     );
 }
@@ -174,7 +174,7 @@ fn test_foreach_jobs_deserializes_all_and_positive_integers() {
 /// truth violation the design doc's Resolved Decisions reject.
 #[test]
 fn test_foreach_jobs_zero_names_all_as_the_replacement() {
-    let err = serde_yaml::from_str::<ForeachJobs>("0\n").unwrap_err().to_string();
+    let err = yaml_serde::from_str::<ForeachJobs>("0\n").unwrap_err().to_string();
     assert!(err.contains('0'), "error must name the rejected value: {err}");
     assert!(err.contains("all"), "error must name 'all' as the replacement: {err}");
 }
@@ -184,7 +184,7 @@ fn test_foreach_jobs_zero_names_all_as_the_replacement() {
 #[test]
 fn test_foreach_jobs_negative_and_non_integer_are_loud_type_errors() {
     for bad in ["-3\n", "1.5\n", "sometimes\n"] {
-        let err = serde_yaml::from_str::<ForeachJobs>(bad).unwrap_err().to_string();
+        let err = yaml_serde::from_str::<ForeachJobs>(bad).unwrap_err().to_string();
         assert!(
             err.contains("all") || err.contains("positive integer"),
             "error for {bad:?} must describe the expected shape: {err}"
@@ -197,14 +197,14 @@ fn test_foreach_jobs_negative_and_non_integer_are_loud_type_errors() {
 #[test]
 fn test_foreach_jobs_round_trips() {
     let all = ForeachJobs::All;
-    let all_yaml = serde_yaml::to_string(&all).unwrap();
+    let all_yaml = yaml_serde::to_string(&all).unwrap();
     assert_eq!(all_yaml.trim(), "all");
-    assert_eq!(serde_yaml::from_str::<ForeachJobs>(&all_yaml).unwrap(), all);
+    assert_eq!(yaml_serde::from_str::<ForeachJobs>(&all_yaml).unwrap(), all);
 
     let fixed = ForeachJobs::Fixed(std::num::NonZeroUsize::new(4).unwrap());
-    let fixed_yaml = serde_yaml::to_string(&fixed).unwrap();
+    let fixed_yaml = yaml_serde::to_string(&fixed).unwrap();
     assert_eq!(fixed_yaml.trim(), "4");
-    assert_eq!(serde_yaml::from_str::<ForeachJobs>(&fixed_yaml).unwrap(), fixed);
+    assert_eq!(yaml_serde::from_str::<ForeachJobs>(&fixed_yaml).unwrap(), fixed);
 }
 
 /// Resolving `jobs` to the permit count its group's semaphore is built with
@@ -237,7 +237,7 @@ fn test_foreach_spec_jobs_defaults_to_none_and_is_omitted_when_serialized() {
     let spec = ForeachSpec::default();
     assert_eq!(spec.jobs, None);
 
-    let yaml = serde_yaml::to_string(&spec).unwrap();
+    let yaml = yaml_serde::to_string(&spec).unwrap();
     assert!(
         !yaml.contains("jobs"),
         "default ForeachSpec must not emit 'jobs': {yaml}"
@@ -338,15 +338,29 @@ fn test_foreach_command_is_exclusive_with_static_sources() {
     );
 }
 
+/// Inverted from `test_foreach_static_sources_still_validate_clean`, which
+/// pinned the old behavior: two static sources used to load, and
+/// `resolve_items`'s `else if` chain then silently dropped the items and
+/// expanded only the glob. Exactly one source, and the error names both.
 #[test]
-fn test_foreach_static_sources_still_validate_clean() {
+fn two_static_foreach_sources_are_rejected_naming_both() {
     let foreach = ForeachSpec {
         items: vec!["x".to_string()],
         glob: Some("*.sh".to_string()),
         ..Default::default()
     };
-    // Only a `command:` source is exclusive; the pre-existing glob/items
-    // precedence is untouched by this phase.
+    let err = foreach.validate_sources("up").unwrap_err().to_string();
+    assert!(err.contains("glob"), "must name glob: {err}");
+    assert!(err.contains("items"), "must name items: {err}");
+    assert!(err.contains("exactly one source"), "{err}");
+}
+
+#[test]
+fn exactly_one_static_foreach_source_validates_clean() {
+    let foreach = ForeachSpec {
+        items: vec!["x".to_string()],
+        ..Default::default()
+    };
     assert!(foreach.validate_sources("up").is_ok());
 }
 
@@ -363,17 +377,11 @@ fn test_resolve_items_refuses_a_command_source() {
 
 #[test]
 fn test_expand_foreach_with_items_names_subtasks_and_injects_vars() {
-    let mut task = TaskSpec::new(
-        "up".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo ${svc}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "up".to_string(),
+        action: "echo ${svc}".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("unused: items are supplied"));
 
     let items = vec![
@@ -398,17 +406,13 @@ fn test_expand_foreach_with_items_names_subtasks_and_injects_vars() {
 
 #[test]
 fn test_expand_foreach_with_items_interpolates_input_and_output_per_item() {
-    let mut task = TaskSpec::new(
-        "build".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec!["src/${item}.txt".to_string()],
-        vec!["out/${item}.o".to_string()],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo ${item}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "build".to_string(),
+        input: vec!["src/${item}.txt".to_string()],
+        output: vec!["out/${item}.o".to_string()],
+        action: "echo ${item}".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("unused: items are supplied"));
     task.foreach.as_mut().unwrap().var_name = "item".to_string();
 
@@ -443,17 +447,12 @@ fn test_expand_foreach_with_items_interpolates_input_and_output_per_item() {
 /// variable becomes an error. Found by the batched audit, batch 7 of 14.
 #[test]
 fn test_expand_foreach_with_items_preserves_a_non_loop_path_variable() {
-    let mut task = TaskSpec::new(
-        "build".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec!["${SRCDIR}/${svc}.txt".to_string()],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo hi".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "build".to_string(),
+        input: vec!["${SRCDIR}/${svc}.txt".to_string()],
+        action: "echo hi".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("unused: items are supplied"));
 
     let items = vec![ForeachItem {
@@ -472,17 +471,11 @@ fn test_expand_foreach_with_items_preserves_a_non_loop_path_variable() {
 
 #[test]
 fn test_expand_foreach_with_items_rejects_duplicates() {
-    let mut task = TaskSpec::new(
-        "up".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo ${svc}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "up".to_string(),
+        action: "echo ${svc}".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("printf 'a\na\n'"));
 
     let dup = ForeachItem {
@@ -515,17 +508,11 @@ fn sanitize_identifier_keeps_an_item_to_one_path_component() {
 
 #[test]
 fn expand_foreach_cannot_name_a_subtask_outside_its_tasks_dir() {
-    let mut task = TaskSpec::new(
-        "build".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo ${pkg}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "build".to_string(),
+        action: "echo ${pkg}".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("printf '../../../ESCAPED\n'"));
 
     let items = vec![ForeachItem {
@@ -549,17 +536,11 @@ fn expand_foreach_cannot_name_a_subtask_outside_its_tasks_dir() {
 
 #[test]
 fn foreach_item_values_are_escaped_against_the_env_evaluator() {
-    let mut task = TaskSpec::new(
-        "build".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "echo ${pkg}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "build".to_string(),
+        action: "echo ${pkg}".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(command_foreach("printf 'a\n'"));
 
     let items = vec![ForeachItem {
@@ -587,17 +568,12 @@ fn foreach_item_values_are_escaped_against_the_env_evaluator() {
 
 #[test]
 fn test_taskspec_expand_foreach_with_list() {
-    let mut task = TaskSpec::new(
-        "deploy".to_string(),
-        Some("Deploy to environment".to_string()),
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "#!/bin/bash\necho deploy".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "deploy".to_string(),
+        help: Some("Deploy to environment".to_string()),
+        action: "#!/bin/bash\necho deploy".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(ForeachSpec {
         items: vec!["dev".to_string(), "staging".to_string(), "prod".to_string()],
         var_name: "env".to_string(),
@@ -625,17 +601,11 @@ fn test_taskspec_expand_foreach_with_list() {
 
 #[test]
 fn test_taskspec_expand_foreach_none() {
-    let task = TaskSpec::new(
-        "build".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "#!/bin/bash\necho build".to_string(),
-    );
+    let task = TaskSpec {
+        name: "build".to_string(),
+        action: "#!/bin/bash\necho build".to_string(),
+        ..Default::default()
+    };
 
     let cwd = PathBuf::from("/tmp");
     let subtasks = task.expand_foreach(&cwd).unwrap();
@@ -646,17 +616,17 @@ fn test_taskspec_expand_foreach_none() {
 
 #[test]
 fn test_taskspec_as_virtual_parent() {
-    let mut task = TaskSpec::new(
-        "examples".to_string(),
-        Some("Run examples".to_string()),
-        vec![EdgeSpec::sugar("cleanup")],
-        vec![EdgeSpec::sugar("build")],
-        vec!["input.txt".to_string()],
-        vec!["output.txt".to_string()],
-        HashMap::from([("KEY".to_string(), "value".to_string())]),
-        ParamSpecs::new(),
-        "#!/bin/bash\necho hello".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "examples".to_string(),
+        help: Some("Run examples".to_string()),
+        after: vec![EdgeSpec::sugar("cleanup")],
+        before: vec![EdgeSpec::sugar("build")],
+        input: vec!["input.txt".to_string()],
+        output: vec!["output.txt".to_string()],
+        envs: HashMap::from([("KEY".to_string(), "value".to_string())]),
+        action: "#!/bin/bash\necho hello".to_string(),
+        ..Default::default()
+    };
     task.foreach = Some(ForeachSpec::default());
 
     let parent = task.as_virtual_parent();
@@ -680,7 +650,7 @@ fn test_taskspec_as_virtual_parent() {
 fn deny_unknown_fields_names_a_misspelled_foreach_items_key() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "tasks:\n  up:\n    foreach:\n      itmes: [a, b]\n    bash: echo hi\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = yaml_serde::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("itmes"), "must name the field: {err}");
     assert!(err.contains("tasks.up.foreach"), "must name the path: {err}");
 }
@@ -694,7 +664,7 @@ fn deny_unknown_fields_names_a_misspelled_foreach_items_key() {
 fn deny_unknown_fields_names_a_wrong_level_parallel_key() {
     use crate::cfg::config::ConfigSpec;
     let yaml = "tasks:\n  up:\n    parallel: false\n    foreach: {items: [alpha, beta, gamma], as: svc}\n    bash: |\n      echo \"start ${svc}\"; sleep 0.3; echo \"end ${svc}\"\n";
-    let err = serde_yaml::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
+    let err = yaml_serde::from_str::<ConfigSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("parallel"), "must name the field: {err}");
     assert!(err.contains("tasks.up"), "must name the path: {err}");
 }
@@ -711,7 +681,7 @@ fn test_foreach_yaml_deserialization() {
               echo ${example}
         "#;
 
-    let task: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task: TaskSpec = yaml_serde::from_str(yaml).unwrap();
 
     assert!(task.foreach.is_some());
     let foreach = task.foreach.unwrap();
@@ -728,7 +698,7 @@ fn test_foreach_yaml_deserialization_with_glob() {
             bash: echo test
         "#;
 
-    let task: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task: TaskSpec = yaml_serde::from_str(yaml).unwrap();
 
     assert!(task.foreach.is_some());
     let foreach = task.foreach.unwrap();
@@ -745,7 +715,7 @@ fn test_foreach_yaml_deserialization_with_range() {
             bash: echo ${num}
         "#;
 
-    let task: TaskSpec = serde_yaml::from_str(yaml).unwrap();
+    let task: TaskSpec = yaml_serde::from_str(yaml).unwrap();
 
     assert!(task.foreach.is_some());
     let foreach = task.foreach.unwrap();
@@ -760,34 +730,28 @@ fn test_foreach_yaml_deserialization_with_range() {
 #[test]
 fn test_tty_defaults_to_none_when_absent() {
     let yaml = "action: echo hi";
-    let spec: TaskSpec = serde_yaml::from_str(yaml).expect("parse failed");
+    let spec: TaskSpec = yaml_serde::from_str(yaml).expect("parse failed");
     assert_eq!(spec.tty, None, "an ottofile without tty: must not gain one");
 }
 
 #[test]
 fn test_tty_parses_both_values() {
-    let on: TaskSpec = serde_yaml::from_str("action: aws sso login\ntty: true").expect("parse failed");
+    let on: TaskSpec = yaml_serde::from_str("action: aws sso login\ntty: true").expect("parse failed");
     assert_eq!(on.tty, Some(true));
-    let off: TaskSpec = serde_yaml::from_str("action: echo hi\ntty: false").expect("parse failed");
+    let off: TaskSpec = yaml_serde::from_str("action: echo hi\ntty: false").expect("parse failed");
     assert_eq!(off.tty, Some(false));
 }
 
 #[test]
 fn test_tty_serializes_only_when_set() {
-    let mut spec = TaskSpec::new(
-        "login".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "#!/bin/bash\naws sso login".to_string(),
-    );
-    assert!(!serde_yaml::to_string(&spec).unwrap().contains("tty"));
+    let mut spec = TaskSpec {
+        name: "login".to_string(),
+        action: "#!/bin/bash\naws sso login".to_string(),
+        ..Default::default()
+    };
+    assert!(!yaml_serde::to_string(&spec).unwrap().contains("tty"));
     spec.tty = Some(true);
-    assert!(serde_yaml::to_string(&spec).unwrap().contains("tty: true"));
+    assert!(yaml_serde::to_string(&spec).unwrap().contains("tty: true"));
 }
 
 /// A task naming both `bash:` and `python:` used to silently run bash and
@@ -796,7 +760,7 @@ fn test_tty_serializes_only_when_set() {
 #[test]
 fn bash_and_python_together_is_a_loud_config_error() {
     let yaml = "bash: echo FROM_BASH\npython: print('FROM_PYTHON')\n";
-    let err = serde_yaml::from_str::<TaskSpec>(yaml).unwrap_err().to_string();
+    let err = yaml_serde::from_str::<TaskSpec>(yaml).unwrap_err().to_string();
     assert!(err.contains("bash"), "{err}");
     assert!(err.contains("python"), "{err}");
 }
@@ -852,17 +816,11 @@ fn deserialize_script_string_dedents_every_multibyte_whitespace_width() {
 /// even under `parallel: true`; that is documented behavior, not an error.
 #[test]
 fn test_foreach_subtasks_inherit_tty() {
-    let mut task = TaskSpec::new(
-        "login".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "#!/bin/bash\necho ${item}".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "login".to_string(),
+        action: "#!/bin/bash\necho ${item}".to_string(),
+        ..Default::default()
+    };
     task.tty = Some(true);
     task.foreach = Some(ForeachSpec {
         items: vec!["a".to_string(), "b".to_string()],
@@ -881,17 +839,11 @@ fn test_foreach_subtasks_inherit_tty() {
 /// would take the exclusive permit to do nothing.
 #[test]
 fn test_virtual_parent_drops_tty() {
-    let mut task = TaskSpec::new(
-        "login".to_string(),
-        None,
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        ParamSpecs::new(),
-        "#!/bin/bash\necho hi".to_string(),
-    );
+    let mut task = TaskSpec {
+        name: "login".to_string(),
+        action: "#!/bin/bash\necho hi".to_string(),
+        ..Default::default()
+    };
     task.tty = Some(true);
 
     assert_eq!(task.as_virtual_parent().tty, None);
@@ -939,7 +891,7 @@ const BOGUS_KEY_PROBE: &str = "__ottofile_reference_drift_probe__: true\n";
 /// copying them. Handles all three of serde's phrasings: "expected `a`",
 /// "expected `a` or `b`", and "expected one of `a`, `b`, ..., `z`".
 fn expected_keys_from_deny_unknown_fields<T: serde::de::DeserializeOwned>() -> Vec<String> {
-    let err = serde_yaml::from_str::<T>(BOGUS_KEY_PROBE)
+    let err = yaml_serde::from_str::<T>(BOGUS_KEY_PROBE)
         .err()
         .expect("bogus key must be rejected")
         .to_string();
@@ -1052,7 +1004,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         foreach: _,
         on_failure: _,
         tty: _,
-    } = serde_yaml::from_str::<TaskSpecHelper>("{}\n").unwrap();
+    } = yaml_serde::from_str::<TaskSpecHelper>("{}\n").unwrap();
     let ParamSpec {
         name: _,
         short: _,
@@ -1066,7 +1018,7 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
         help: _,
         required: _,
         value: _,
-    } = serde_yaml::from_str::<ParamSpec>("{}\n").unwrap();
+    } = yaml_serde::from_str::<ParamSpec>("{}\n").unwrap();
     // EdgeSpec has two bookkeeping fields (`from_sugar`, `is_injected_sugar`)
     // alongside its two on-disk keys (`task`, `when`); all four are bound
     // here so the destructuring still breaks on ANY field added or removed,
@@ -1177,4 +1129,150 @@ fn ottofile_reference_key_inventory_is_exhaustive() {
             "docs/commands/ottofile-reference.md's per-struct sum must read `{struct_name}` {expected_count}"
         );
     }
+}
+
+#[test]
+fn a_sourceless_foreach_is_rejected() {
+    let err = ForeachSpec::default().validate_sources("up").unwrap_err().to_string();
+    assert!(err.contains("no source"), "{err}");
+    assert!(err.contains("Task 'up'"), "{err}");
+}
+
+/// `foreach.as` becomes a shell variable in every subtask, so it has to be an
+/// identifier. It used to reach `executor::action`, which names "environment
+/// variable name" and not the field, at run time rather than at load.
+#[test]
+fn a_non_identifier_foreach_as_is_rejected_naming_the_field() {
+    let foreach = ForeachSpec {
+        items: vec!["a".to_string()],
+        var_name: "my item".to_string(),
+        ..Default::default()
+    };
+    let err = foreach.validate("up").unwrap_err().to_string();
+    assert!(err.contains("foreach.as"), "must name the field: {err}");
+    assert!(err.contains("my item"), "must quote the value: {err}");
+}
+
+#[test]
+fn the_default_foreach_as_validates_clean() {
+    let foreach = ForeachSpec {
+        items: vec!["a".to_string()],
+        ..Default::default()
+    };
+    assert!(foreach.validate("up").is_ok());
+}
+
+/// The count is computed with checked arithmetic before anything is built:
+/// `max_items` used to be checked against an already-materialized `Vec`.
+#[test]
+fn a_range_wider_than_max_items_is_rejected_at_validation() {
+    let foreach = ForeachSpec {
+        range: Some("1-5000".to_string()),
+        ..Default::default()
+    };
+    let err = foreach.validate("huge").unwrap_err().to_string();
+    assert!(err.contains("5000 items"), "must state the count: {err}");
+    assert!(err.contains("max_items"), "must name the limit: {err}");
+}
+
+#[test]
+fn a_range_spanning_the_whole_usize_space_is_rejected_without_counting() {
+    let foreach = ForeachSpec {
+        range: Some(format!("0-{}", usize::MAX)),
+        ..Default::default()
+    };
+    let err = foreach.validate("huge").unwrap_err().to_string();
+    assert!(err.contains("more items than this platform can count"), "{err}");
+}
+
+#[test]
+fn a_range_that_exactly_fills_max_items_is_accepted() {
+    let foreach = ForeachSpec {
+        range: Some("1-1000".to_string()),
+        ..Default::default()
+    };
+    assert!(foreach.validate("count").is_ok());
+    assert_eq!(foreach.resolve_items(&PathBuf::from(".")).unwrap().len(), 1000);
+}
+
+// ============================================================================
+// Scalar task keys and the edges that name them
+// ============================================================================
+
+#[derive(Deserialize)]
+struct TaskMapOnly {
+    #[serde(deserialize_with = "deserialize_task_map")]
+    tasks: TaskSpecs,
+}
+
+fn task_map(yaml: &str) -> TaskSpecs {
+    yaml_serde::from_str::<TaskMapOnly>(yaml).unwrap().tasks
+}
+
+/// `0x1f:` keys a task named `0x1f` (the source text), while `after: [0x1f]`
+/// reaches the edge visitor as the integer 31. Both must end up naming the one
+/// task the author wrote.
+#[test]
+fn a_hex_task_key_and_an_edge_naming_it_agree() {
+    let tasks = task_map("tasks:\n  0x1f:\n    bash: echo hi\n  report:\n    after: [0x1f]\n    bash: echo r\n");
+    assert!(
+        tasks.contains_key("0x1f"),
+        "the author's spelling keys the task: {:?}",
+        tasks.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(tasks["report"].after[0].task, "0x1f");
+}
+
+#[test]
+fn a_boolean_task_key_and_an_edge_naming_it_agree() {
+    let tasks = task_map("tasks:\n  True:\n    bash: echo hi\n  report:\n    after: [True]\n    bash: echo r\n");
+    assert!(tasks.contains_key("True"), "{:?}", tasks.keys().collect::<Vec<_>>());
+    assert_eq!(tasks["report"].after[0].task, "True");
+}
+
+#[test]
+fn a_signed_decimal_task_key_and_an_edge_naming_it_agree() {
+    let tasks = task_map("tasks:\n  \"+5\":\n    bash: echo hi\n  report:\n    after: [+5]\n    bash: echo r\n");
+    assert!(tasks.contains_key("+5"), "{:?}", tasks.keys().collect::<Vec<_>>());
+    assert_eq!(tasks["report"].after[0].task, "+5");
+}
+
+/// `before:` names tasks the same way `after:` does.
+#[test]
+fn a_scalar_edge_target_in_before_resolves_too() {
+    let tasks = task_map("tasks:\n  0x1f:\n    bash: echo hi\n  report:\n    before: [0x1f]\n    bash: echo r\n");
+    assert_eq!(tasks["report"].before[0].task, "0x1f");
+}
+
+/// A plain decimal key already agrees with its stringified edge, and an edge
+/// that names an existing task must never be re-pointed at another one.
+#[test]
+fn an_exact_task_key_match_wins_over_a_resolved_one() {
+    let tasks = task_map(
+        "tasks:\n  0x1f:\n    bash: echo hex\n  31:\n    bash: echo dec\n  report:\n    after: [31]\n    bash: echo r\n",
+    );
+    assert_eq!(tasks["report"].after[0].task, "31");
+}
+
+/// The accepted limit of the reconciliation, pinned so it is a decision rather
+/// than a surprise: YAML strips a key's quotes before serde is handed the key,
+/// so `"0x1f":` and `0x1f:` arrive as the same four bytes and an edge written as
+/// the resolved value binds to either. v2.2.1 refused this config outright
+/// (`invalid type: integer 31`). Reaching it takes one spelling quoted and the
+/// other written as its resolved value, which is not a config anyone writes on
+/// purpose, and the alternative is to give up the case authors do write.
+#[test]
+fn a_quoted_scalar_key_is_indistinguishable_from_an_unquoted_one() {
+    let tasks = task_map("tasks:\n  \"0x1f\":\n    bash: echo hex\n  report:\n    after: [31]\n    bash: echo r\n");
+    assert_eq!(tasks["report"].after[0].task, "0x1f");
+}
+
+/// Two keys resolving to one name is ambiguous, so neither claims the edge and
+/// the run fails loudly on the unresolved name rather than picking one.
+#[test]
+fn two_task_keys_resolving_to_one_name_claim_no_edge() {
+    let tasks = task_map(
+        "tasks:\n  0x1f:\n    bash: echo a\n  \"+31\":\n    bash: echo b\n  report:\n    after: [0x1f]\n    bash: echo r\n",
+    );
+    assert_eq!(tasks["report"].after[0].task, "31");
 }

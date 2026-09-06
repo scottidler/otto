@@ -66,6 +66,6 @@ fn the_panic_restore_is_a_noop_without_a_takeover() {
     // The claim is already false here unless a takeover happened, which is
     // the whole point: a panic in a non-TUI run writes nothing.
     TERMINAL_TAKEOVER.store(false, Ordering::SeqCst);
-    restore_terminal_on_panic();
+    restore_terminal_best_effort();
     assert!(!claim_terminal_restore());
 }

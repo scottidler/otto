@@ -85,7 +85,11 @@ impl<T: TerminalRestore> TerminalGuard<T> {
 impl<T: TerminalRestore> Drop for TerminalGuard<T> {
     fn drop(&mut self) {
         if let Err(e) = self.restore() {
-            eprintln!("otto: failed to restore the terminal: {e}");
+            // Best effort: a restore fails when the terminal is gone, and
+            // then this write fails too. `eprintln!` would panic inside a
+            // destructor for a message nobody can see.
+            use std::io::Write;
+            let _ = writeln!(io::stderr(), "otto: failed to restore the terminal: {e}");
         }
     }
 }
@@ -103,8 +107,16 @@ impl TuiTerminal {
 
 impl TerminalRestore for TuiTerminal {
     fn restore(&mut self) -> io::Result<()> {
-        // Whoever restores first wins the claim; the panic hook then stays quiet.
-        claim_terminal_restore();
+        // Whoever restores first wins the claim; the loser does nothing. This
+        // used to call the claim and throw the answer away, then restore
+        // regardless, which is the double `LeaveAlternateScreen` the claim
+        // exists to prevent: a panic (hook restores, then the guard's `Drop`
+        // restores again during unwind) or a second signal
+        // (`restore_terminal_best_effort` then `Drop`) dropped the user out of
+        // whatever screen they had legitimately gone back to.
+        if !claim_terminal_restore() {
+            return Ok(());
+        }
         disable_raw_mode()?;
         execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
         self.terminal.show_cursor()?;
@@ -118,11 +130,13 @@ impl TerminalGuard<TuiTerminal> {
     }
 }
 
-/// Best-effort terminal restore for the panic path.
+/// Best-effort terminal restore for the paths that never reach the guard's
+/// `Drop`: a panic unwinding past it, and the second-signal `process::exit`
+/// (`app.rs`, `install_stop_handler`), which runs no destructors at all.
 ///
 /// Errors are dropped on purpose: this runs while the process is already dying,
-/// and a `?` here would replace the panic message the user needs with an io error.
-pub fn restore_terminal_on_panic() {
+/// and a `?` here would replace the message the user needs with an io error.
+pub fn restore_terminal_best_effort() {
     if !claim_terminal_restore() {
         return;
     }
@@ -138,7 +152,7 @@ pub fn install_panic_hook() {
     PANIC_HOOK.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            restore_terminal_on_panic();
+            restore_terminal_best_effort();
             previous(info);
         }));
     });
@@ -161,7 +175,7 @@ pub fn init_terminal() -> io::Result<TerminalGuard<TuiTerminal>> {
     match Terminal::new(backend) {
         Ok(terminal) => Ok(TerminalGuard::new(TuiTerminal { terminal })),
         Err(e) => {
-            restore_terminal_on_panic();
+            restore_terminal_best_effort();
             Err(e)
         }
     }

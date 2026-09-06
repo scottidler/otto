@@ -85,6 +85,21 @@ fn test_env_to_json_keeps_an_unterminated_value() {
     );
 }
 
+/// Poll until the task body writes `marker`, so a step is gated on the run's own
+/// progress instead of on a duration. A fixed sleep here passes even when the
+/// child never spawned at all, which makes it a test of the timer.
+async fn wait_for_marker(marker: &std::path::Path) {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(25);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if marker.exists() {
+            return;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    panic!("timed out waiting for {}", marker.display());
+}
+
 /// Cancelling stops the run instead of waiting for the children.
 #[tokio::test]
 #[serial]
@@ -93,6 +108,10 @@ async fn test_cancel_signal_stops_the_run() -> Result<()> {
     let work_dir = PathBuf::from(temp_dir.path());
     setup_test_db(&work_dir);
 
+    // The child announces itself before it sleeps, and the cancel waits for
+    // that announcement: what is being tested is that a RUNNING child is
+    // stopped, so the child has to be running when the signal arrives.
+    let marker = work_dir.join("sleeper.started");
     let tasks = vec![Task::new(
         "sleeper".to_string(),
         None,
@@ -101,7 +120,7 @@ async fn test_cancel_signal_stops_the_run() -> Result<()> {
         vec![],
         HashMap::new(),
         HashMap::new(),
-        "sleep 60".to_string(),
+        format!("touch {}\nsleep 60", marker.display()),
     )];
 
     let workspace = Workspace::new(work_dir).await?;
@@ -110,7 +129,7 @@ async fn test_cancel_signal_stops_the_run() -> Result<()> {
     let cancel = scheduler.cancel_signal();
 
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        wait_for_marker(&marker).await;
         cancel.cancel();
     });
 
@@ -231,16 +250,17 @@ async fn test_execute_all_errors_when_no_task_reached_a_terminal_state() {
     assert!(err.to_string().contains("no task reached a terminal state"), "{err}");
 }
 
+/// The name is a field, so it never has to be recovered from the error text.
+/// The exit code is not a field: nothing downstream read it, and the body that
+/// knows the code writes it to the database itself.
 #[test]
-fn test_task_report_carries_the_name_and_code_structurally() {
+fn test_task_report_carries_the_name_structurally() {
     let ok = TaskReport::success("build".to_string());
     assert_eq!(ok.name, "build");
-    assert_eq!(ok.exit_code, Some(0));
     assert!(ok.error.is_none());
 
-    let failed = TaskReport::failure("build".to_string(), eyre!("No such file or directory"), Some(7));
+    let failed = TaskReport::failure("build".to_string(), eyre!("No such file or directory"));
     assert_eq!(failed.name, "build", "the name must not come from the error text");
-    assert_eq!(failed.exit_code, Some(7));
     assert!(failed.error.is_some());
 }
 
@@ -366,6 +386,97 @@ fn test_classify_gates_reports_both_edges_and_ordering() {
     let completed = std::collections::HashSet::from(["dep".to_string(), "up:alpha".to_string()]);
     let states = classify_gates(&tasks[1], &groups, &completed, &empty, &no_skips);
     assert!(states.iter().all(|s| matches!(s, EdgeState::Satisfied)));
+}
+
+/// The blocked sweep reads every gate, including each edge's `when:` condition.
+///
+/// A dependent gated on `when: failure` whose dep SUCCEEDED can never run, and
+/// one gated on `when: success` is ready the moment the dep completes. The
+/// fourth copy of this walk (in `try_start_ready_task`, deleted when the four
+/// were folded into one) tested only `completed_set.contains`, so it read the
+/// dep's membership and never its condition: this task went onto the ready
+/// queue and the answer was left to the dispatch gate to reach again.
+#[test]
+fn test_the_blocked_sweep_reads_the_edge_condition_not_bare_completion() {
+    let groups = SerialGroups::new(&[]);
+    let completed = std::collections::HashSet::from(["dep".to_string()]);
+    let empty = std::collections::HashSet::new();
+    let no_skips = SkippedSet::new();
+
+    let mut blocked = vec![
+        plain_task("on_failure", vec![TaskEdge::new("dep", When::Failure)]),
+        plain_task("on_success", vec![TaskEdge::success("dep")]),
+        plain_task("waiting", vec![TaskEdge::success("not_yet")]),
+    ];
+    let swept = partition_blocked(&mut blocked, &groups, &completed, &empty, &no_skips);
+
+    let names = |tasks: &[Task]| tasks.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&swept.unreachable), ["on_failure"]);
+    assert_eq!(names(&swept.ready), ["on_success"]);
+    assert_eq!(
+        names(&blocked),
+        ["waiting"],
+        "a gate that is merely Pending stays blocked"
+    );
+}
+
+/// An up-to-date skip resolves its dependents through that same sweep.
+///
+/// The up-to-date path is a terminal transition like any other, so a dependent
+/// it makes unreachable is skipped with its provenance recorded rather than
+/// left for a later pass to notice.
+#[tokio::test]
+#[serial]
+async fn test_an_up_to_date_skip_marks_its_unreachable_dependents() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let work_dir = PathBuf::from(temp_dir.path());
+    setup_test_db(&work_dir);
+
+    let input = work_dir.join("input.txt");
+    let output = work_dir.join("output.txt");
+    tokio::fs::write(&input, "in").await?;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    tokio::fs::write(&output, "out").await?;
+
+    let mut cached = plain_task("cached", vec![]);
+    cached.file_deps = vec![input.to_string_lossy().to_string()];
+    cached.output_deps = vec![output.to_string_lossy().to_string()];
+    let dependent = plain_task("on_failure", vec![TaskEdge::new("cached", When::Failure)]);
+
+    let workspace = Workspace::new(work_dir).await?;
+    workspace.init().await?;
+    let scheduler = TaskScheduler::new(
+        vec![cached.clone(), dependent],
+        Arc::new(workspace),
+        ExecutionContext::new(),
+        2,
+        false,
+    )
+    .await?;
+
+    assert!(
+        !scheduler.needs_rebuild(&cached).await,
+        "the fixture must be up to date, or nothing exercises the skip path"
+    );
+    scheduler.execute_all().await?;
+
+    assert_eq!(
+        scheduler.get_task_status("cached").await,
+        TaskStatus::Skipped(SkipKind::UpToDate)
+    );
+    assert_eq!(
+        scheduler.get_task_status("on_failure").await,
+        TaskStatus::Skipped(SkipKind::Unreachable),
+        "a when: failure dependent of a warm-cache success can never run"
+    );
+    let records = scheduler.get_skip_records().await;
+    let record = records.get("on_failure").expect("the skip must be recorded");
+    assert!(
+        record.detail.contains("cached"),
+        "the reason must name the dep that made it unreachable; got {}",
+        record.detail
+    );
+    Ok(())
 }
 
 #[test]
@@ -906,7 +1017,7 @@ async fn test_file_dependencies() -> Result<()> {
     )
     .await?;
 
-    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild = scheduler.needs_rebuild(&task).await;
     assert!(needs_rebuild, "Task should need to run when output doesn't exist");
 
     // Simulate file creation with newer timestamp
@@ -917,7 +1028,7 @@ async fn test_file_dependencies() -> Result<()> {
     filetime::set_file_times(&output_file, future_time, future_time)?;
 
     // Now the task should not need to run (output newer than input)
-    let needs_rebuild_after = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild_after = scheduler.needs_rebuild(&task).await;
     assert!(
         !needs_rebuild_after,
         "Task should not need to run when output is newer than inputs"
@@ -946,7 +1057,7 @@ async fn test_file_timestamp_checking() -> Result<()> {
     // Test timestamp retrieval
     let timestamps = scheduler
         .get_file_timestamps(&[file1.to_string_lossy().to_string(), file2.to_string_lossy().to_string()])
-        .await?;
+        .await;
 
     assert_eq!(timestamps.len(), 2);
     assert!(timestamps[0].1.is_some(), "Should have timestamp for existing file");
@@ -988,7 +1099,7 @@ async fn test_file_dependencies_nonexistent_files() -> Result<()> {
     .await?;
 
     // Should need to rebuild when input file doesn't exist (conservative approach)
-    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild = scheduler.needs_rebuild(&task).await;
     assert!(needs_rebuild, "Task should need to run when input file doesn't exist");
 
     Ok(())
@@ -1051,7 +1162,7 @@ async fn test_file_dependencies_multiple_inputs_outputs() -> Result<()> {
     .await?;
 
     // Should need to rebuild when outputs don't exist
-    let needs_rebuild = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild = scheduler.needs_rebuild(&task).await;
     assert!(needs_rebuild, "Task should need to run when outputs don't exist");
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -1059,7 +1170,7 @@ async fn test_file_dependencies_multiple_inputs_outputs() -> Result<()> {
     tokio::fs::write(&output2, "combined output copy").await?;
 
     // Should not need to rebuild when all outputs are newer than all inputs
-    let needs_rebuild_after = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild_after = scheduler.needs_rebuild(&task).await;
     assert!(
         !needs_rebuild_after,
         "Task should not need to run when all outputs are newer than all inputs"
@@ -1070,7 +1181,7 @@ async fn test_file_dependencies_multiple_inputs_outputs() -> Result<()> {
     tokio::fs::write(&input2, "modified content2").await?;
 
     // Should need to rebuild when any input is newer than any output
-    let needs_rebuild_final = scheduler.needs_rebuild(&task).await?;
+    let needs_rebuild_final = scheduler.needs_rebuild(&task).await;
     assert!(
         needs_rebuild_final,
         "Task should need to run when any input is newer than outputs"
@@ -1126,8 +1237,8 @@ async fn test_file_dependencies_with_task_dependencies() -> Result<()> {
     .await?;
 
     // Both tasks should need to run initially
-    let task1_needs_rebuild = scheduler.needs_rebuild(&task1).await?;
-    let task2_needs_rebuild = scheduler.needs_rebuild(&task2).await?;
+    let task1_needs_rebuild = scheduler.needs_rebuild(&task1).await;
+    let task2_needs_rebuild = scheduler.needs_rebuild(&task2).await;
     assert!(task1_needs_rebuild, "Task1 should need to run initially");
     assert!(task2_needs_rebuild, "Task2 should need to run initially");
 

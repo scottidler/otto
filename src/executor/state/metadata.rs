@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Metadata about a run, stored in run.yaml and the database
-/// This struct is shared between the file-based system and SQLite
+/// Metadata about a run, recorded into the state database.
+///
+/// Not what `run.yaml` holds - that file serializes `ExecutionContext`
+/// (`workspace.rs::save_execution_context`), a separate, file-facing type.
+/// This one exists for `StateStore::record_run_start` and its callers.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct RunMetadata {
     /// Path to the ottofile used for this run
@@ -40,7 +43,11 @@ pub struct RunMetadata {
 }
 
 impl RunMetadata {
-    /// Create minimal metadata (for backward compatibility with existing run.yaml files)
+    /// Build metadata with every optional field empty.
+    ///
+    /// Test-only in practice: no production caller needs a `RunMetadata` with
+    /// nothing but the three fields every run always has, but the test suite
+    /// constructs one of these for nearly every fixture.
     pub fn minimal(ottofile: Option<PathBuf>, hash: String, timestamp: u64) -> Self {
         Self {
             ottofile,

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+#
+# Fail the build when a doc points at a page that isn't there.
+#
+# Links moved into docs/archive/ broke seven times without anyone noticing
+# (docs/design/2026-09-02-second-code-review-remediation.md, Phase 17). A
+# one-off sweep fixes today's misses; this is the structural fix, run every
+# time via `otto docs` (and therefore `otto all`).
+#
+# Scope: every markdown link `[text](target)` whose target names a `.md`
+# file, found in docs/**/*.md, examples/**/*.md, and README.md. A target is
+# skipped if it's an absolute URL (http/https), a mailto link, or a bare
+# in-page anchor (#foo). Everything else is resolved relative to the file
+# that contains it (stripping any trailing #fragment) and must exist on
+# disk.
+#
+# The extractor tolerates one level of parentheses inside a target, so
+# `[x](docs/a(b).md)` is read whole. A flat `[^)]*` stopped at the inner `)`
+# and produced a target that could never resolve, which meant a broken link of
+# that shape was silently skipped rather than reported.
+#
+# Portability: the extractor is a POSIX `grep -oE`, not `grep -oP`. `-P` (Perl
+# regex, needed for the lookbehind this used to use) is a GNU extension that
+# BSD grep does not have, so on macOS the read loop got nothing, `fail` stayed
+# 0, and the script printed its success banner having checked no links at all.
+# The repo targets macOS (release artifacts, a bash-3.2 job), so a check that
+# silently passes there is not a check.
+#
+# The extractor is also checked for having WORKED, which is the general form of
+# that bug: grep exits 0 when it matches, 1 when it does not, and 2 or more when
+# it fails (a bad option, an unreadable file). Only the last is a broken check,
+# and it is now fatal and named. An earlier cut inferred breakage from a zero
+# link count instead, which fails a docs tree that legitimately has no relative
+# .md links -- a guard that has to be deleted to get green is not a guard.
+#
+# Usage:
+#   bin/check-doc-links
+
+set -uo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+
+fail=0
+checked=0
+
+check_file() {
+    local file="$1"
+    local dir
+    dir="$(dirname "$file")"
+
+    # Run the extractor first and keep its exit status: inside the `done < <(
+    # ... )` process substitution it used to hide in, a grep that failed
+    # outright was indistinguishable from a file with no links.
+    local matches status
+    matches="$(grep -noE '\]\(([^()]|\([^()]*\))*\)' "$file")"
+    status=$?
+    if [ "$status" -ge 2 ]; then
+        echo "$file: link extraction FAILED (grep exited $status); this check is not checking anything" >&2
+        fail=1
+        return
+    fi
+    [ -z "$matches" ] && return
+
+    while IFS=: read -r line target; do
+        # `grep -oE` matches the whole `](target)`; peel the delimiters off
+        # here rather than asking for a lookbehind grep may not have.
+        target="${target#\](}"
+        target="${target%)}"
+        [ -z "$target" ] && continue
+        case "$target" in
+        http://* | https://* | mailto:* | '#'*) continue ;;
+        esac
+
+        # Only .md links are in scope - the recurrence this guards against.
+        case "$target" in
+        *.md | *.md'#'*) ;;
+        *) continue ;;
+        esac
+
+        local path="${target%%#*}"
+        [ -z "$path" ] && continue
+
+        checked=$((checked + 1))
+        local resolved="$dir/$path"
+        if [ ! -e "$resolved" ]; then
+            echo "$file:$line: broken link -> $target (resolved: $resolved)"
+            fail=1
+        fi
+    done <<EOF
+$matches
+EOF
+}
+
+files=()
+while IFS= read -r -d '' f; do
+    files+=("$f")
+done < <(find docs examples -name '*.md' -print0 2>/dev/null)
+files+=("README.md")
+
+scanned=0
+for f in "${files[@]}"; do
+    if [ -f "$f" ]; then
+        check_file "$f"
+        scanned=$((scanned + 1))
+    fi
+done
+
+# Zero FILES is a broken check; zero LINKS is a legitimate tree. The two were
+# conflated once in each direction: first by a banner that printed success
+# having matched nothing, then by a guard that made an empty link count fatal.
+# This asserts only the thing that is always wrong -- pointed at a tree with no
+# docs to read, the check has nothing to say and must not say it passed.
+if [ "$scanned" -eq 0 ]; then
+    echo "check-doc-links: found no files to scan under docs/, examples/ or README.md" >&2
+    exit 1
+fi
+
+if [ "$fail" -eq 0 ]; then
+    echo "✅ check-doc-links: $checked relative .md links, every one resolves"
+else
+    exit 1
+fi

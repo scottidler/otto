@@ -1,417 +1,185 @@
 # SQLite Integration Architecture
 
-Otto uses a hybrid storage model combining SQLite for metadata with filesystem storage for artifacts. This provides fast querying while keeping scripts and logs inspectable.
+Otto uses a hybrid storage model: SQLite for metadata that `History`/`Stats`/`Clean` query, filesystem for the artifacts a run actually produces. Schema regenerated from `src/executor/state/schema.rs` (`SCHEMA_VERSION = 5`); every claim below that isn't a direct read of the schema was checked against the code that implements it.
 
 ## Design Principles
 
-### What Stays On Filesystem ✅
-- **Scripts** (`.cache/<task>/<hash>`) - Inspectable with `cat`
-- **Logs** (`stdout.log`, `stderr.log`) - Tailable with `tail -f`
-- **Outputs** (`output.json`) - Parseable with standard tools
-- **Artifacts** (task-generated files) - Direct filesystem access
+### What stays on the filesystem
+- **Scripts** (`.cache/<hash>.sh`) - inspectable with `cat`
+- **Logs** (`stdout.log`, `stderr.log`) - tailable with `tail -f`
+- **Outputs** (`output.<task>.json`/`.env`) - parseable with standard tools
+- **`run.yaml`** - the serialized `ExecutionContext` for a run
 
-### What Goes In Database ✅
-- **Run metadata** (timestamp, status, duration, user, etc.)
-- **Task state** (pending/running/completed/failed/skipped)
-- **Relationships** (task dependencies, project associations)
-- **Paths** to filesystem artifacts (not content)
-- **Metrics** (counts, durations, exit codes, sizes)
+### What goes in the database
+- Run and task metadata (timestamp, status, duration, user, hostname, exit code, sizes)
+- Task skip provenance (`skip_reason`, `skip_kind`)
+- Paths to the filesystem artifacts above (not their content)
+- Project identity (hash, name, first/last seen, run count)
 
-### Non-Negotiables
-
-- ✅ Scripts remain inspectable with `cat`
-- ✅ Logs remain tailable with `tail -f`
-- ✅ Database is optional (graceful degradation)
-- ✅ Zero breaking changes to existing workflows
-- ✅ Performance is same or better
+### Non-negotiables
+- Scripts and logs remain plain files, not blobs in the database
+- The database is optional: `StateManager::try_new()` returns `None` (logging a warning) rather than panicking when it can't open, and every caller (`History`, `Stats`, run recording) degrades gracefully rather than erroring
+- `Clean` works without a database at all (`--no-db`, filesystem-scan mode)
 
 ## Database Schema
 
-### Projects Table
+### `schema_version`
 
-Tracks unique Otto projects (identified by ottofile hash):
+```sql
+CREATE TABLE schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at INTEGER NOT NULL
+)
+```
+
+### `projects`
 
 ```sql
 CREATE TABLE projects (
     id INTEGER PRIMARY KEY,
-    hash TEXT NOT NULL UNIQUE,        -- Project identifier (e.g., "abc123")
-    ottofile_path TEXT,                -- Canonical path to otto.yml
-    first_seen INTEGER NOT NULL,       -- Unix timestamp of first run
-    last_seen INTEGER NOT NULL,        -- Unix timestamp of most recent run
-    run_count INTEGER DEFAULT 0        -- Total number of runs
-);
+    hash TEXT NOT NULL UNIQUE,
+    name TEXT,
+    ottofile_path TEXT,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    run_count INTEGER DEFAULT 0
+)
 ```
 
-**Indexes:**
-- Primary key on `id`
-- Unique index on `hash`
+Indexes: `hash` (unique), `name` (`idx_projects_name`).
 
-### Runs Table
-
-Records each Otto execution:
+### `runs`
 
 ```sql
 CREATE TABLE runs (
     id INTEGER PRIMARY KEY,
     project_id INTEGER NOT NULL,
-    timestamp INTEGER NOT NULL UNIQUE, -- Directory name, also run start time
-    status TEXT NOT NULL,              -- 'running', 'success', 'failed'
-    duration_seconds REAL,             -- NULL if still running
-    size_bytes INTEGER,                -- Total run directory size
-    ottofile_path TEXT,                -- Path at run time (may differ)
-    cwd TEXT,                          -- Working directory
-    user TEXT,                         -- Username
-    hostname TEXT,                     -- Host where it ran
-    args TEXT,                         -- JSON-serialized command args
-    ended_at INTEGER,                  -- Unix timestamp when completed
+    timestamp INTEGER NOT NULL,
+    status TEXT NOT NULL,              -- 'running' | 'success' | 'failed'
+    duration_seconds REAL,
+    size_bytes INTEGER,
+    ottofile_path TEXT,
+    cwd TEXT,
+    user TEXT,
+    hostname TEXT,
+    args TEXT,                         -- JSON-serialized argv
+    ended_at INTEGER,
+    run_dir TEXT,                      -- the directory this run actually wrote into
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-);
+)
 ```
 
-**Indexes:**
-- Primary key on `id`
-- Unique index on `timestamp`
-- Index on `status` (for filtering)
-- Index on `project_id` (for project queries)
+Indexes: `timestamp`, `status`, `project_id`. **No unique constraint on `timestamp`** — it has one-second resolution, so two runs starting in the same second are ordinary, not a conflict (schema v5 dropped a `UNIQUE(timestamp)` that used to silently lose the second run's row). `run_dir` is `NULL` for rows written before v5; there is no back-fill, so `History`'s `run_dir` JSON field is `null` for those.
 
-**Foreign Keys:**
-- Cascade delete: Deleting a project removes all its runs
-
-### Tasks Table
-
-Tracks individual task executions within runs:
+### `tasks`
 
 ```sql
 CREATE TABLE tasks (
     id INTEGER PRIMARY KEY,
     run_id INTEGER NOT NULL,
     name TEXT NOT NULL,
-    status TEXT NOT NULL,              -- 'pending', 'running', 'completed', 'failed', 'skipped'
-    script_hash TEXT,                  -- Hash of script content (for cache tracking)
-    exit_code INTEGER,                 -- Process exit code
-    started_at INTEGER,                -- Unix timestamp
-    ended_at INTEGER,                  -- Unix timestamp
-    duration_seconds REAL,             -- Execution time
-    stdout_path TEXT,                  -- Relative path from ~/.otto/
-    stderr_path TEXT,                  -- Relative path from ~/.otto/
-    script_path TEXT,                  -- Relative path from ~/.otto/
+    status TEXT NOT NULL,              -- 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+    script_hash TEXT,
+    exit_code INTEGER,
+    started_at INTEGER,
+    ended_at INTEGER,
+    duration_seconds REAL,
+    stdout_path TEXT,                  -- absolute
+    stderr_path TEXT,                  -- absolute
+    script_path TEXT,                  -- absolute
+    skip_reason TEXT,
+    skip_kind TEXT,                    -- 'up-to-date' | 'serial-predecessor' | 'unreachable'
     FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
-);
+)
 ```
 
-**Indexes:**
-- Primary key on `id`
-- Index on `run_id` (for run queries)
-- Index on `name` (for task history)
-- Index on `status` (for filtering)
+Indexes: `run_id`, `name`, `status`, `(name, run_id)` composite. `stdout_path`/`stderr_path`/`script_path` are **absolute paths**, not relative to `$OTTO_HOME` — a run recorded from one `$OTTO_HOME` is still resolvable if read from a different one. `script_hash` hashes the fully-rendered script, including otto's own injected builtins prologue, so upgrading otto and touching that prologue changes every task's `script_hash` even when the ottofile is untouched. `skip_reason`/`skip_kind` are `NULL` on rows written before schema v3/v4 respectively.
 
-**Foreign Keys:**
-- Cascade delete: Deleting a run removes all its tasks
+## Migrations
 
-### Schema Version Table
+`init_schema` creates the tables above fresh (schema v5, no migration needed). An existing database walks forward one version at a time via `migrate_v1_to_v2` (adds and backfills `projects.name`), `migrate_v2_to_v3` (adds `tasks.skip_reason`), `migrate_v3_to_v4` (adds `tasks.skip_kind`), and `migrate_v4_to_v5` (rebuilds `runs` to drop `UNIQUE(timestamp)` and add `run_dir`; SQLite can't drop a constraint in place, so this one rebuilds the table under a transaction). Every migration is idempotent — re-running one after a crash between its `ALTER`/rebuild and the version bump is a no-op, not an error.
 
-Tracks database migrations:
-
-```sql
-CREATE TABLE schema_version (
-    version INTEGER PRIMARY KEY,
-    applied_at INTEGER NOT NULL
-);
-```
+There is no rollback: a migration only goes forward. There is no separate `migrations.rs`-level health check either — `DatabaseManager` is a single `Mutex<Connection>`, not a connection pool, and there is no periodic integrity check or automatic in-memory fallback on corruption. A corrupted database is a hard error from `StateManager::new()`, which `try_new()` turns into "no history/stats today", not into a substitute in-memory store.
 
 ## Component Architecture
 
-### StateManager (`src/executor/state/manager.rs`)
+### `StateManager` (`src/executor/state/manager.rs`)
 
-Central component for database operations:
+Wraps a `DatabaseManager` and exposes the operations the CLI commands use:
 
-```rust
-pub struct StateManager {
-    db: DatabaseManager,  // Connection pooling and transactions
-}
-```
+**Recording**: `record_run_start`, `record_run_complete`, `record_task_start`, `record_task_complete`, `record_task_skipped`
 
-**Key Methods:**
+**Querying**: `get_runs_with_filters` (status/project/limit — what `History` calls with no `[TASK]`), `get_task_history` (what `History <task>` calls), `get_overall_stats`, `get_task_stats`, `get_all_task_stats` (the Top-N table in `Stats`)
 
-**Recording:**
-- `record_run_start()` - Create run record, mark as running
-- `record_run_complete()` - Update run with final status and metrics
-- `record_task_start()` - Record task beginning
-- `record_task_complete()` - Record task completion with exit code
-- `record_task_skipped()` - Mark task as skipped
+**Cleanup**: `find_old_runs`, `delete_run`
 
-**Querying:**
-- `get_recent_runs()` - Fetch last N runs, optionally filtered
-- `get_run_tasks()` - Get all tasks for a specific run
-- `get_task_history()` - Get execution history for a task name
-- `get_overall_stats()` - Aggregate statistics
-- `get_task_stats()` - Task-specific statistics
+There is no `get_recent_runs` and no `get_run_tasks` — `get_recent_runs` was deleted once `get_runs_with_filters` (which also handles the unfiltered case) replaced it as `History`'s only caller.
 
-**Cleanup:**
-- `find_old_runs()` - Query runs matching retention policy
-- `delete_run()` - Remove run from database and filesystem
-
-### DatabaseManager (`src/executor/state/db.rs`)
-
-Low-level database operations:
+### `DatabaseManager` (`src/executor/state/db.rs`)
 
 ```rust
 pub struct DatabaseManager {
-    db_path: PathBuf,
+    conn: Mutex<Connection>,
 }
 ```
 
-**Features:**
-- **WAL Mode**: Write-Ahead Logging for better concurrency
-- **Foreign Keys**: Enabled for referential integrity
-- **Connection Pooling**: Efficient connection reuse
-- **Transactions**: Atomic operations
-- **Health Checks**: Automatic integrity verification
-
-### Migration Framework (`src/executor/state/migrations.rs`)
-
-Handles schema evolution:
-
-```rust
-pub fn migrate(conn: &Connection) -> Result<()>
-```
-
-**Features:**
-- **Versioned migrations**: Track applied schema changes
-- **Idempotent**: Safe to run multiple times
-- **Transactional**: All-or-nothing application
-- **Rollback support**: Can revert failed migrations
+One connection, behind a mutex — not a pool. On open it retries the `journal_mode=WAL` pragma (SQLite can refuse it transiently under concurrent openers), then sets `synchronous=NORMAL` and `foreign_keys=ON`. WAL plus `synchronous=NORMAL` means a crash can lose the last commit but never corrupts the file.
 
 ## Data Flow
 
-### Run Execution
+### Run execution
 
 ```
-1. User runs: otto build test
-   ↓
-2. Workspace::init()
-   ├─ Create run directory: ~/.otto/otto-abc123/1730561025/
-   └─ Save run.yaml (metadata)
-   ↓
-3. StateManager::record_run_start()
-   ├─ Insert project (if new)
-   ├─ Insert run record (status: running)
-   └─ Return run_id
-   ↓
-4. Task execution loop
-   ├─ StateManager::record_task_start()
-   ├─ Execute task → Generate logs/outputs
-   ├─ StateManager::record_task_complete()
-   └─ Repeat for each task
-   ↓
-5. StateManager::record_run_complete()
-   ├─ Calculate run size
-   ├─ Update run record (status: success/failed)
-   └─ Update project last_seen
+otto <tasks>
+  -> Workspace::init() creates <project>-<hash>/<timestamp>/, writes run.yaml
+  -> StateManager::record_run_start() upserts the project row, inserts the run row (status: running)
+  -> per task: record_task_start() / record_task_complete() / record_task_skipped()
+  -> StateManager::record_run_complete() computes run_dir size, sets status: success/failed
 ```
 
-### History Query
+### History query
 
 ```
-1. User runs: otto history
-   ↓
-2. StateManager::get_recent_runs(limit=20)
-   ↓
-3. SQL Query:
-   SELECT r.*, p.hash
-   FROM runs r
-   JOIN projects p ON r.project_id = p.id
-   ORDER BY r.timestamp DESC
-   LIMIT 20
-   ↓
-4. Format and display results
+otto History            -> StateManager::get_runs_with_filters(status, project, limit)
+otto History <task>      -> StateManager::get_task_history(task, limit)
 ```
 
-### Cleanup Operation
+Both are plain indexed `SELECT`s against `runs`/`tasks`; there is no separate "recent runs" code path.
+
+### Cleanup
 
 ```
-1. User runs: otto clean --keep-days 30 --keep-last 10
-   ↓
-2. StateManager::find_old_runs()
-   ├─ Query all runs (ORDER BY timestamp DESC)
-   ├─ Keep first 10 (most recent)
-   ├─ Filter remainder by age
-   └─ Return list of runs to delete
-   ↓
-3. For each run:
-   ├─ StateManager::delete_run()
-   ├─ Delete database record
-   ├─ Delete filesystem directory
-   └─ Update project run_count
+otto Clean --keep-days D --keep-last N --keep-failed F
+  -> StateManager::find_old_runs(D, N, F, project_filter)
+  -> per run: StateManager::delete_run(id, delete_filesystem: true)
+       - deletes the run row (cascades to its tasks via ON DELETE CASCADE)
+       - removes run_dir from disk if it still exists
 ```
 
 ## Filesystem Layout
 
 ```
-~/.otto/
-├── otto.db                     # SQLite database (Phase 2+)
-├── otto-<project-hash>/        # Per-project directories
-│   ├── <timestamp>/            # Individual run directories
-│   │   ├── run.yaml           # Run metadata (Phase 1, kept for backward compat)
-│   │   ├── tasks/             # Task execution data
-│   │   │   ├── <task-name>/
-│   │   │   │   ├── script.sh       # Generated script
-│   │   │   │   ├── stdout.log      # Task output
-│   │   │   │   ├── stderr.log      # Task errors
-│   │   │   │   └── output.json     # Task result
-│   │   └── ...
-└── .cache/                     # Script cache (future)
+$OTTO_HOME/                       # default $HOME/.otto
+├── otto.db                       # SQLite database
+├── <project-name>-<hash>/        # per-project directory
+│   ├── .cache/                   # rendered scripts, flat, named by content hash
+│   ├── <timestamp>/              # one run
+│   │   ├── run.yaml
+│   │   └── tasks/<task-name>/{script.sh -> ../../../.cache/<hash>.sh, builtins.sh, stdout.log, stderr.log, output.<task>.json, output.<task>.env}
+│   └── ...
 ```
 
-**Database stores:**
-- Metadata only (see schema above)
-
-**Filesystem stores:**
-- All actual files (scripts, logs, outputs)
-- Database contains relative paths to these files
-
-## Performance Characteristics
-
-### Database Operations
-
-| Operation | Typical Time | Notes |
-|-----------|--------------|-------|
-| `record_run_start()` | <5ms | Single INSERT |
-| `record_run_complete()` | <5ms | Single UPDATE |
-| `record_task_start()` | <5ms | Single INSERT |
-| `get_recent_runs(20)` | <10ms | Indexed query |
-| `get_task_history(100)` | <20ms | Indexed query |
-| `find_old_runs()` | <50ms | Full table scan with filtering |
-| `delete_run()` | ~100ms | Database + filesystem I/O |
-
-### Scalability
-
-| Dataset Size | Query Performance | Notes |
-|--------------|-------------------|-------|
-| 100 runs | <10ms | Instant |
-| 1,000 runs | <20ms | Very fast |
-| 10,000 runs | <100ms | Fast |
-| 100,000 runs | <500ms | Acceptable |
-
-**Bottlenecks:**
-- Filesystem I/O (deletion, size calculation)
-- Not database queries (well-indexed)
-
-### Storage Overhead
-
-- **Database size**: ~2-5 KB per run
-- **10,000 runs**: ~20-50 MB database
-- **Minimal compared to**: Actual run artifacts (MBs-GBs)
-
-## Concurrency Model
-
-### WAL Mode Benefits
-
-Write-Ahead Logging provides:
-- **Concurrent reads**: Multiple queries don't block
-- **Writer isolation**: Writes don't block readers
-- **Crash recovery**: Automatic on next connection
-- **Performance**: Faster commits
-
-### Lock Behavior
-
-```
-READ operations:  No lock (WAL allows concurrent reads)
-WRITE operations: Brief lock (milliseconds)
-```
-
-**Implications:**
-- Multiple `otto history` commands can run simultaneously
-- Recording task completion doesn't block queries
-- Parallel task execution doesn't cause contention
+There is no top-level `.cache/` under `$OTTO_HOME` — the cache is per-project. Full detail, including the `input.<dep>.{json,env}` files a task with dependencies gets, is in [`docs/directory-layout.md`](../directory-layout.md).
 
 ## Error Handling
 
-### Database Unavailable
-
-```rust
-if let Some(manager) = StateManager::try_new() {
-    // Use database-backed operations
-} else {
-    // Fall back to filesystem-only mode
-    eprintln!("Warning: Database unavailable, using filesystem fallback");
-}
-```
-
-**Graceful degradation:**
-- `history`/`stats` commands report error but don't crash
-- `clean` command falls back to filesystem scan
-- Run execution continues without database
-
-### Database Corruption
-
-1. **Detection**: Health check on connection
-2. **Response**: Fall back to in-memory database
-3. **Recovery**: User can delete and recreate
-
-```bash
-# Manual recovery
-rm ~/.otto/otto.db
-otto history  # Automatically recreates database
-```
-
-### Partial Writes
-
-**Scenario**: Process killed during `record_run_complete()`
-
-**Result:**
-- Run remains marked as "running"
-- Next query shows stale state
-
-**Recovery:**
-- User can manually clean with `otto clean`
-- Future enhancement: Detect and mark stale runs
-
-## Testing Strategy
-
-### Unit Tests (`src/executor/state/manager.rs`)
-
-- Test each StateManager method
-- Use in-memory database (`:memory:`)
-- Verify schema constraints
-- Test error conditions
-
-### Integration Tests (`tests/cleanup_integration_test.rs`)
-
-- End-to-end command testing
-- Database + filesystem interaction
-- Graceful fallback scenarios
-- Project filtering and retention policies
-
-**Coverage:**
-- 11 unit tests for database operations
-- 8 integration tests for CLI commands
-- 100% coverage of new Phase 5 functionality
-
-## Future Enhancements
-
-### Action Cache (Post-1.0)
-- Cache task results by (script_hash, inputs_hash)
-- Skip unchanged tasks automatically
-- Like Bazel's action cache
-
-### Web Dashboard (Post-1.0)
-- Real-time execution view
-- Historical trends and charts
-- Failure analysis tools
-
-### Multi-User Support (Post-1.0)
-- PostgreSQL backend option
-- Shared execution history
-- Team dashboards
-
-## Migration Path
-
-See [Migration Guide](../migration-guide.md) for upgrading from file-only to database-backed storage.
+- **Database unavailable**: `StateManager::try_new()` logs a warning and returns `None`. `History`/`Stats` print `No {history,statistics} database found. Run otto to create it.` and exit 0. `Clean` prints `Database not available, falling back to filesystem scan...` and switches to `--no-db` behavior.
+- **`--no-db` / filesystem fallback**: `Clean` walks `$OTTO_HOME` directly. It cannot see run status (that only exists in the database), so `--keep-failed` is applied as the *longer* of the two cutoffs for every run in this mode, with a printed warning — it keeps more than asked rather than deleting something the flag meant to protect.
+- **Database corruption**: a hard error surfaces from `StateManager::new()`; there is no automatic repair or in-memory substitute. Manual recovery is `rm $OTTO_HOME/otto.db` — the next run recreates an empty one.
 
 ## Related Documentation
 
 - [History Command](../commands/history.md)
 - [Stats Command](../commands/stats.md)
 - [Clean Command](../commands/clean.md)
-- [Implementation Plan](../sqlite-implementation-plan.md)
+- [Directory Layout](../directory-layout.md)

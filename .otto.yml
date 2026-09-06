@@ -6,11 +6,16 @@ otto:
     GIT_SHA: "$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 
 tasks:
-  # Whitespace linting
+  # Whitespace linting.
+  #
+  # `--check`, not a bare `-r`: `whitespace -r` REWRITES files and exits 0, so
+  # for as long as this task has existed it could not fail, and `otto ci`'s
+  # `lint` step gated nothing. `--check` reports and exits 1, changing nothing,
+  # which is what a gate needs. Fixing is `whitespace -r`, run deliberately.
   lint:
-    help: "Run whitespace linting"
+    help: "Fail on trailing whitespace (fix with `whitespace -r`)"
     bash: |
-      whitespace -r
+      whitespace -r --check
 
   # Code quality checks — split into leaf tasks so they parallelize and
   # so fmt-check can auto-fix on failure via the on-failure: sugar.
@@ -211,13 +216,22 @@ tasks:
     # `cov`'s own `after: [cov-report]` chains the gate: cov instruments and
     # runs the suite, then cov-report reads its output and fails the run if
     # line coverage is under `--fail-under`'s default (see cov-report above).
-    before: [lint, check, test, cov]
+    before: [lint, check, test, cov, docs-check]
     bash: |
       echo "✅ All CI checks passed!"
+
+  # The doc-link guard on its own, so a gate can depend on it without paying
+  # for `cargo doc`. It ran only under `docs`/`all`, and CI runs neither, so
+  # the structural fix for the broken-link recurrence never ran on a PR.
+  docs-check:
+    help: "Verify every relative .md link in the docs resolves"
+    bash: |
+      bin/check-doc-links
 
   # Build documentation
   docs:
     help: "Build documentation"
+    before: [docs-check]
     bash: |
       cargo doc --no-deps --workspace
       echo "✅ Documentation built"
@@ -250,8 +264,8 @@ tasks:
 
   # Quick validation
   quick:
-    help: "Quick validation (check + test in parallel)"
-    before: [check, test]
+    help: "Quick validation (check + test + doc links in parallel)"
+    before: [check, test, docs-check]
     bash: |
       echo "✅ Quick checks passed!"
 
@@ -270,46 +284,6 @@ tasks:
       echo ""
       echo "🎉 Everything looks great!"
 
-  # Baseline verification
-  baseline:
-    help: "Run baseline verification (DO THIS BEFORE AND AFTER TUI CHANGES)"
-    bash: |
-      echo "═══════════════════════════════════════════════"
-      echo "Otto Baseline Verification"
-      echo "═══════════════════════════════════════════════"
-      echo ""
-      echo "[1/3] Running cargo test..."
-      if ! cargo test --quiet 2>&1 | tail -1; then
-        echo "❌ Tests failed!"
-        exit 1
-      fi
-      echo "✅ All tests passed"
-      echo ""
-      echo "[2/3] Building release binary..."
-      if ! cargo build --release --quiet 2>&1; then
-        echo "❌ Build failed!"
-        exit 1
-      fi
-      echo "✅ Release binary built"
-      echo ""
-      echo "[3/3] Testing basic execution..."
-      cd examples/ex1
-      if ! ../../target/release/otto punch > /dev/null 2>&1; then
-        echo "❌ Basic execution failed!"
-        exit 1
-      fi
-      echo "✅ Basic execution works"
-      cd ../..
-      echo ""
-      echo "═══════════════════════════════════════════════"
-      echo "✅ BASELINE VERIFICATION PASSED"
-      echo "═══════════════════════════════════════════════"
-      echo ""
-      echo "The system is working correctly."
-      echo "Safe to proceed with TUI development."
-      echo ""
-      echo "Remember: Run 'otto baseline' after each TUI phase!"
-
   # Build release binaries
   build:
     help: "Build release binaries for all workspace members"
@@ -323,10 +297,6 @@ tasks:
     bash: |
       echo "Cleaning cargo artifacts..."
       cargo clean
-      echo ""
-      echo "Cleaning otto run directories..."
-      rm -rf .otto-run/
-      find examples/ -type d -name ".otto-run" -exec rm -rf {} + 2>/dev/null || true
       echo ""
       echo "✅ All cleaned!"
 

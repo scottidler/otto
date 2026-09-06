@@ -1,181 +1,181 @@
-# `otto history` - View Execution History
+# `otto History` - View Execution History
 
-The `history` command displays a chronological record of all Otto runs, providing insights into execution patterns, success rates, and resource usage.
+The `History` command displays a chronological record of Otto runs, or (with a task name) the execution history of one task across every run.
+
+> **Note**: Built-in commands are capitalized (e.g., `History`, `Stats`, `Clean`) to avoid namespace conflicts with user-defined tasks.
+
+Regenerated from `otto History --help` and a scratch run's `otto History --json`; every example below is observed output, not illustrative.
 
 ## Usage
 
 ```bash
-otto history [OPTIONS]
+otto History [OPTIONS] [TASK]
 ```
+
+## Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `[TASK]` | Show history for this task only, across all runs. Positional, not a flag. |
 
 ## Options
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--limit <N>` | Maximum number of runs to display | 20 |
-| `--status <STATUS>` | Filter by status (success, failed, running) | all |
-| `--project <HASH>` | Filter by project hash | all projects |
-| `--task <NAME>` | Show history for specific task only | all tasks |
-| `--json` | Output in JSON format | false |
+```
+$ otto History --help
+Show execution history
+
+Usage: History [OPTIONS] [TASK]
+
+Arguments:
+  [TASK]  Show history for a specific task
+
+Options:
+  -n, --limit <LIMIT>      Limit number of results [default: 20]
+  -s, --status <STATUS>    Filter by status (success, failed, running) [possible values: success, failed, running]
+  -p, --project <PROJECT>  Filter by project hash
+      --json               Output as JSON
+  -h, --help               Print help
+```
 
 ## Examples
 
-### View Recent Runs
+### Recent runs
 
 ```bash
-# Show last 20 runs (default)
-otto history
-
-# Show last 50 runs
-otto history --limit 50
+otto History
+otto History --limit 50
+otto History -n 5
 ```
 
-### Filter by Status
+### Filter by status or project
 
 ```bash
-# Show only successful runs
-otto history --status success
-
-# Show only failed runs
-otto history --status failed
-
-# Show currently running executions
-otto history --status running
+otto History --status failed
+otto History -s running
+otto History --project 70af3bf4
 ```
 
-### Filter by Project
+### Task-specific history
 
 ```bash
-# Show history for specific project
-otto history --project abc123
+otto History hello
+otto History hello --limit 10
 ```
 
-### Task-Specific History
+There is no dedicated task-selection flag: the task name is a bare positional argument.
+
+### JSON output
 
 ```bash
-# Show history for a specific task
-otto history --task build
-
-# Last 10 executions of the test task
-otto history --task test --limit 10
-```
-
-### JSON Output
-
-```bash
-# Export history as JSON for scripting
-otto history --json | jq '.[] | select(.status == "failed")'
+otto History --json | jq '.[] | select(.status == "Failed")'
 ```
 
 ## Output Format
 
-### Run History Table
+### Run history table
+
+No `[TASK]` given:
 
 ```
-Timestamp            Status  Duration  Size      User     Path
-────────────────────────────────────────────────────────────────
-2025-11-02 14:23:45  ✓       12.3s     45.2 MB   saidler  ~/repos/myproject
-2025-11-02 13:15:22  ✗       8.5s      32.1 MB   saidler  ~/repos/myproject
-2025-11-02 11:42:10  ✓       15.8s     52.3 MB   saidler  ~/repos/myproject
+Timestamp            Status  Duration     Size  User     Path
+─────────────────────────────────────────────────────────────────────────────
+2026-09-03 05:23:53    ✗          0ms  10.3 KB  saidler  ~/repos/otto-rs/otto
+2026-09-03 05:23:53    ✓          0ms  10.4 KB  saidler  ~/repos/otto-rs/otto
+
+Total runs: 2
 ```
 
 **Columns:**
-- **Timestamp**: When the run started
-- **Status**:
-  - `✓` (green) - Successful completion
-  - `✗` (red) - Failed execution
-  - `⋯` (yellow) - Still running
-- **Duration**: Total execution time (or `-` if still running)
-- **Size**: Disk space used by run artifacts
-- **User**: Username who initiated the run
-- **Path**: Working directory where Otto was executed
+- **Timestamp**: When the run started, local time
+- **Status**: `✓` (green) success, `✗` (red) failed, `⋯` (yellow) running
+- **Duration**: `-` if the run has no recorded duration (still running)
+- **Size**: On-disk size of the run directory
+- **User**: Username that started the run
+- **Path**: `cwd` at run start, `~`-abbreviated
 
-### Task History Table
+### Task history table
 
-When viewing task-specific history (`--task <name>`):
+`otto History <task>`:
 
 ```
-Timestamp            Status     Exit Code  Duration  Path
-─────────────────────────────────────────────────────────────
-2025-11-02 14:23:45  Completed  0          5.2s      ~/repos/myproject
-2025-11-02 13:15:22  Failed     1          3.1s      ~/repos/myproject
-2025-11-02 11:42:10  Completed  0          6.8s      ~/repos/myproject
+History for task 'hello'
+
+Timestamp            Status  Duration  Exit Code  Run ID
+────────────────────────────────────────────────────────
+2026-09-03 05:23:53    ✓          0ms      0           1
+
+Total executions: 1
+Success rate: 100.0%
 ```
 
-**Additional Columns:**
-- **Exit Code**: Process exit code (0 = success)
-- **Status**: Completed, Failed, Skipped, Running
+Columns are **Timestamp, Status, Duration, Exit Code, Run ID** — there is no Path column here, and Status is the task's own status (`✓`/`✗`/`⋯`/`○` skipped/`·` pending), not the run's. "Success rate" is `successful / (successful + failed)`; skipped and pending executions are excluded from the denominator.
 
 ## JSON Output Schema
+
+### Run list (no `[TASK]`)
 
 ```json
 [
   {
-    "id": 123,
-    "project_id": 45,
-    "timestamp": 1730561025,
-    "status": "success",
-    "duration_seconds": 12.3,
-    "size_bytes": 47456256,
-    "ottofile_path": "/home/user/project/otto.yml",
-    "cwd": "/home/user/project",
+    "id": 2,
+    "project_id": 1,
+    "timestamp": 1788438233,
+    "status": "Failed",
+    "duration_seconds": 0.0,
+    "size_bytes": 10532,
+    "ottofile_path": "/tmp/otto-doc-scratch/proj/.otto.yml",
+    "cwd": "/home/saidler/repos/otto-rs/otto",
     "user": "saidler",
-    "hostname": "workstation",
-    "args": ["build", "test"],
-    "ended_at": 1730561037
+    "hostname": "desk",
+    "args": ["otto"],
+    "ended_at": 1788438233,
+    "run_dir": "/tmp/otto-doc-scratch/home/proj-70af3bf4/1788438233-1"
   }
 ]
 ```
 
-## Use Cases
+`status` is `"Success"`, `"Failed"`, or `"Running"` — the Rust enum's `Debug`-style spelling, not lowercase. Newest run first.
 
-### Debugging Failures
+- **`hostname`**: real since it started being recorded (the hostname-collecting call existed with no caller before that, so every run written earlier has `hostname: null`). A run recorded before that point stays `null` forever — there is no back-fill, because guessing the host of a historical row would be inventing data the run never recorded. The table view above never prints hostname at all; this only matters to `--json` consumers.
+- **`run_dir`**: the directory the run actually wrote into, recorded at run start. `null` for runs recorded before this column existed (schema v4 and earlier).
+- **`args`**: the full argv otto was invoked with, `["otto", ...]`.
 
-Find recent failures to investigate:
+### Task history (`otto History <task> --json`)
 
-```bash
-otto history --status failed --limit 5
+```json
+[
+  {
+    "id": 1,
+    "run_id": 1,
+    "name": "hello",
+    "status": "Completed",
+    "script_hash": "734d509e",
+    "exit_code": 0,
+    "started_at": 1788438233,
+    "ended_at": 1788438233,
+    "duration_seconds": 0.0,
+    "stdout_path": "/home/user/.otto/proj-70af3bf4/1788438233/tasks/hello/stdout.log",
+    "stderr_path": "/home/user/.otto/proj-70af3bf4/1788438233/tasks/hello/stderr.log",
+    "script_path": "/home/user/.otto/proj-70af3bf4/1788438233/tasks/hello/script.sh",
+    "skip_reason": null,
+    "skip_kind": null
+  }
+]
 ```
 
-### Performance Analysis
-
-Track how execution time changes:
-
-```bash
-otto history --task build --limit 30 --json | jq '.[].duration_seconds'
-```
-
-### Disk Usage Monitoring
-
-Find runs consuming excessive space:
-
-```bash
-otto history --json | jq 'sort_by(.size_bytes) | reverse | .[0:5]'
-```
-
-### Success Rate Tracking
-
-Check success rate over time:
-
-```bash
-# All runs
-otto history --json | jq 'group_by(.status) | map({status: .[0].status, count: length})'
-```
+`status` here is the task-status vocabulary: `Pending`, `Running`, `Completed`, `Failed`, `Skipped` — distinct from the run-status vocabulary (`Success`/`Failed`/`Running`) used by the run list. `stdout_path`/`stderr_path`/`script_path` are absolute, not relative to `$OTTO_HOME`. `skip_reason`/`skip_kind` are populated only for a `Skipped` task; `skip_kind` is one of `up-to-date`, `serial-predecessor`, `unreachable`.
 
 ## Notes
 
-- **Database Requirement**: The `history` command requires SQLite integration (automatic since Phase 2)
-- **Data Collection**: History is automatically recorded starting from when the database was initialized
-- **Historical Runs**: Runs executed before database initialization won't appear unless imported
-- **Real-time Updates**: Running executions show current status; refresh to see updates
+- **Database requirement**: `History` needs `$OTTO_HOME/otto.db` (or `$HOME/.otto/otto.db`). If it is missing, `History` prints `No history database found. Run otto to create it.` to stderr and exits 0 rather than erroring.
+- **No back-fill**: fields added to the schema after a row was written (`hostname`, `run_dir`, `skip_kind`) are `null`/absent on that row forever.
+- **`script_hash`** (visible via `otto Stats`/the database, not in `History`'s own output) hashes the fully-rendered script including otto's injected builtins prologue, so upgrading otto's own injected builtins changes it even when the ottofile did not change.
 
 ## Related Commands
 
-- [`otto stats`](stats.md) - Aggregate statistics and metrics
-- [`otto clean`](clean.md) - Clean up old runs
-- [`otto graph`](graph.md) - Visualize task dependencies
+- [`otto Stats`](stats.md) - Aggregate statistics
+- [`otto Clean`](clean.md) - Clean up old runs
 
 ## See Also
 
 - [Architecture: SQLite Integration](../architecture/sqlite-integration.md)
-- [Migration Guide](../migration-guide.md)

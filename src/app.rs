@@ -1,15 +1,17 @@
 use crate::cfg::otto::RetentionSpec;
 use crate::cfg::param::Value;
+use crate::cli::commands::graph::{GraphCommand, GraphFormatArg};
 use crate::cli::commands::history::HistoryCommand;
 use crate::cli::commands::stats::StatsCommand;
 use crate::cli::parser::{Task, ottofile_base_dir};
 use crate::cli::{CleanCommand, ConvertCommand, ParseOutcome, Parser};
-use crate::executor::{DagVisualizer, TaskScheduler, Workspace};
+use crate::executor::{TaskScheduler, Workspace};
+use clap::ValueEnum as _;
 use eyre::{Report, Result, eyre};
-use log::info;
+use log::{error, info};
 use std::collections::HashMap;
 use std::env;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,45 +25,40 @@ const TUI_MESSAGE_CHANNEL_CAPACITY: usize = 1_000;
 // ============================================================================
 
 /// Parameters for the Clean command, extracted from task values.
+///
+/// No `Default`: every field comes from `CleanCommand`'s clap args, so the
+/// only honest source for `keep_days`' 30 is that declaration. A `Default`
+/// here was a second copy of it that nothing outside its own test read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CleanParams {
     pub keep_days: u64,
+    pub keep_last: Option<usize>,
+    pub keep_failed: Option<u64>,
     pub dry_run: bool,
     pub project_filter: Option<String>,
-}
-
-impl Default for CleanParams {
-    fn default() -> Self {
-        CleanParams {
-            keep_days: 30,
-            dry_run: false,
-            project_filter: None,
-        }
-    }
+    pub no_db: bool,
 }
 
 /// Extract Clean command parameters from task values.
 /// This is a pure function - no I/O, easily testable.
 pub fn extract_clean_params(values: &HashMap<String, Value>) -> CleanParams {
-    let keep_days = if let Some(Value::Item(s)) = values.get("keep") {
-        s.parse::<u64>().unwrap_or(30)
-    } else {
-        30
-    };
-
-    let dry_run = values
-        .get("dry-run")
-        .and_then(|v| if let Value::Item(s) = v { Some(s == "true") } else { None })
-        .unwrap_or(false);
-
-    let project_filter = values
-        .get("project")
-        .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None });
-
     CleanParams {
-        keep_days,
-        dry_run,
-        project_filter,
+        keep_days: derived_item(values, "Clean", "keep-days")
+            .parse::<u64>()
+            .expect("Clean's --keep-days is derived from CleanCommand's u64 arg, which clap parses before binding"),
+        keep_last: optional_item(values, "keep-last").map(|s| {
+            s.parse::<usize>().expect(
+                "Clean's --keep-last is derived from CleanCommand's usize arg, which clap parses before binding",
+            )
+        }),
+        keep_failed: optional_item(values, "keep-failed").map(|s| {
+            s.parse::<u64>().expect(
+                "Clean's --keep-failed is derived from CleanCommand's u64 arg, which clap parses before binding",
+            )
+        }),
+        dry_run: flag_value(values, "dry-run"),
+        project_filter: optional_item(values, "project-filter").map(str::to_string),
+        no_db: flag_value(values, "no-db"),
     }
 }
 
@@ -75,50 +72,17 @@ pub struct HistoryParams {
     pub json: bool,
 }
 
-impl Default for HistoryParams {
-    fn default() -> Self {
-        HistoryParams {
-            task_name: None,
-            limit: 20,
-            status: None,
-            project: None,
-            json: false,
-        }
-    }
-}
-
 /// Extract History command parameters from task values.
 /// This is a pure function - no I/O, easily testable.
 pub fn extract_history_params(values: &HashMap<String, Value>) -> HistoryParams {
-    let task_name = values
-        .get("task")
-        .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None });
-
-    let limit = if let Some(Value::Item(s)) = values.get("limit") {
-        s.parse::<usize>().unwrap_or(20)
-    } else {
-        20
-    };
-
-    let status = values
-        .get("status")
-        .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None });
-
-    let project = values
-        .get("project")
-        .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None });
-
-    let json = values
-        .get("json")
-        .and_then(|v| if let Value::Item(s) = v { Some(s == "true") } else { None })
-        .unwrap_or(false);
-
     HistoryParams {
-        task_name,
-        limit,
-        status,
-        project,
-        json,
+        task_name: optional_item(values, "task-name").map(str::to_string),
+        limit: derived_item(values, "History", "limit")
+            .parse::<usize>()
+            .expect("History's --limit is derived from HistoryCommand's usize arg, which clap parses before binding"),
+        status: optional_item(values, "status").map(str::to_string),
+        project: optional_item(values, "project").map(str::to_string),
+        json: flag_value(values, "json"),
     }
 }
 
@@ -130,35 +94,38 @@ pub struct StatsParams {
     pub json: bool,
 }
 
-impl Default for StatsParams {
-    fn default() -> Self {
-        StatsParams {
-            task_name: None,
-            limit: 10,
-            json: false,
-        }
-    }
-}
-
 /// Extract Stats command parameters from task values.
 /// This is a pure function - no I/O, easily testable.
 pub fn extract_stats_params(values: &HashMap<String, Value>) -> StatsParams {
-    let task_name = values
-        .get("task")
-        .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None });
+    StatsParams {
+        task_name: optional_item(values, "task-name").map(str::to_string),
+        limit: derived_item(values, "Stats", "limit")
+            .parse::<usize>()
+            .expect("Stats' --limit is derived from StatsCommand's usize arg, which clap parses before binding"),
+        json: flag_value(values, "json"),
+    }
+}
 
-    let limit = if let Some(Value::Item(s)) = values.get("limit") {
-        s.parse::<usize>().unwrap_or(10)
-    } else {
-        10
-    };
+/// Parameters for the Graph command, extracted from task values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphParams {
+    pub format: GraphFormatArg,
+    pub output: Option<PathBuf>,
+}
 
-    let json = values
-        .get("json")
-        .and_then(|v| if let Value::Item(s) = v { Some(s == "true") } else { None })
-        .unwrap_or(false);
-
-    StatsParams { task_name, limit, json }
+/// Extract Graph command parameters from task values.
+/// This is a pure function - no I/O, easily testable.
+pub fn extract_graph_params(values: &HashMap<String, Value>) -> GraphParams {
+    let format = derived_item(values, "Graph", "format");
+    GraphParams {
+        // Typed here, not deep inside the visualizer: the format's value set
+        // is `GraphCommand`'s, otto binds the param against those same
+        // choices, and an unknown one is therefore impossible rather than
+        // quietly rendered as ascii.
+        format: GraphFormatArg::from_str(format, true)
+            .expect("Graph's --format is bound against GraphCommand's choices, which reject an unknown format"),
+        output: optional_item(values, "output").map(PathBuf::from),
+    }
 }
 
 /// Parameters for the Convert command, extracted from task values.
@@ -173,9 +140,7 @@ pub struct ConvertParams {
 pub fn extract_convert_params(values: &HashMap<String, Value>) -> ConvertParams {
     ConvertParams {
         strict: flag_value(values, "strict"),
-        output: values
-            .get("output")
-            .and_then(|v| if let Value::Item(s) = v { Some(PathBuf::from(s)) } else { None }),
+        output: optional_item(values, "output").map(PathBuf::from),
     }
 }
 
@@ -188,6 +153,8 @@ pub struct UpgradeParams {
     pub rollback: bool,
     pub force: bool,
     pub no_backup: bool,
+    pub backup_dir: Option<PathBuf>,
+    pub github_token: Option<String>,
 }
 
 /// Extract Upgrade command parameters from task values.
@@ -195,13 +162,13 @@ pub struct UpgradeParams {
 pub fn extract_upgrade_params(values: &HashMap<String, Value>) -> UpgradeParams {
     UpgradeParams {
         dry_run: flag_value(values, "dry-run"),
-        version: values
-            .get("version")
-            .and_then(|v| if let Value::Item(s) = v { Some(s.clone()) } else { None }),
+        version: optional_item(values, "version").map(str::to_string),
         list_versions: flag_value(values, "list-versions"),
         rollback: flag_value(values, "rollback"),
         force: flag_value(values, "force"),
         no_backup: flag_value(values, "no-backup"),
+        backup_dir: optional_item(values, "backup-dir").map(PathBuf::from),
+        github_token: optional_item(values, "github-token").map(str::to_string),
     }
 }
 
@@ -211,6 +178,29 @@ fn flag_value(values: &HashMap<String, Value>, name: &str) -> bool {
         .get(name)
         .and_then(|v| if let Value::Item(s) = v { Some(s == "true") } else { None })
         .unwrap_or(false)
+}
+
+/// A param the user may or may not have given: no `default:`, so an absent
+/// value is a real answer and stays `None`.
+fn optional_item<'a>(values: &'a HashMap<String, Value>, name: &str) -> Option<&'a str> {
+    match values.get(name) {
+        Some(Value::Item(value)) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+/// A param the derivation guarantees is bound.
+///
+/// Every builtin param comes from its clap `Command`
+/// (`cli/parser/meta_tasks.rs`), and one carrying a `default_value` is written
+/// onto the task whether or not the user typed it (`process_tasks_with_filter`
+/// Phase 3). Missing here means the derivation or the bind broke, which is a
+/// bug in otto and not something a user typed - so it says so instead of
+/// silently substituting a second copy of the default.
+fn derived_item<'a>(values: &'a HashMap<String, Value>, builtin: &str, name: &str) -> &'a str {
+    optional_item(values, name).unwrap_or_else(|| {
+        panic!("{builtin}'s --{name} is derived from its clap Command, which gives it a default; a bound {builtin} task always carries a value")
+    })
 }
 
 // ============================================================================
@@ -274,7 +264,7 @@ pub async fn dispatch_builtin(builtin: Builtin, task: &Task) -> Result<(), Repor
     match builtin {
         Builtin::Clean => execute_clean_from_task(task).await,
         Builtin::Convert => execute_convert_from_task(task),
-        Builtin::Graph => DagVisualizer::execute_command(task).await,
+        Builtin::Graph => execute_graph_from_task(task),
         Builtin::History => execute_history_from_task(task),
         Builtin::Stats => execute_stats_from_task(task),
         Builtin::Upgrade => execute_upgrade_from_task(task).await,
@@ -284,16 +274,6 @@ pub async fn dispatch_builtin(builtin: Builtin, task: &Task) -> Result<(), Repor
 // ============================================================================
 // Pure Functions - Task Filtering
 // ============================================================================
-
-/// Filter out built-in commands from a list of tasks.
-/// Returns only tasks that should be executed by the scheduler.
-/// This is a pure function - no I/O, easily testable.
-pub fn filter_execution_tasks(tasks: Vec<Task>) -> Vec<Task> {
-    tasks
-        .into_iter()
-        .filter(|task| !crate::cli::is_builtin(&task.name))
-        .collect()
-}
 
 /// Convert parser tasks into executor tasks.
 ///
@@ -434,14 +414,6 @@ pub async fn execute_with_terminal_output(
         return dispatch_builtin(builtin, task).await;
     }
 
-    // Filter out built-in commands for normal execution using pure function
-    let execution_tasks = filter_execution_tasks(tasks);
-
-    if execution_tasks.is_empty() {
-        println!("No tasks to execute");
-        return Ok(());
-    }
-
     let cwd = crate::executor::workspace::current_dir()?;
     let root = ottofile_base_dir(ottofile_path.as_deref(), &cwd).to_path_buf();
     let workspace = Workspace::new(root).await?;
@@ -455,7 +427,7 @@ pub async fn execute_with_terminal_output(
     workspace.save_execution_context(execution_context.clone()).await?;
 
     // Convert parser tasks to executor tasks
-    let executor_tasks = build_executor_tasks(execution_tasks);
+    let executor_tasks = build_executor_tasks(tasks);
 
     // The scheduler takes ownership; teardown still needs the workspace to close
     // out the run in the database.
@@ -467,7 +439,9 @@ pub async fn execute_with_terminal_output(
     // terminal's SIGINT default-killed otto outright and `abandon_run` never
     // ran, so a buffered foreach group lost every completed-but-unreplayed
     // block. Taken before `execute_all` borrows the scheduler.
-    install_interrupt_handler(scheduler.cancel_signal());
+    // Nothing extra to do on either signal here: the plain path has no
+    // dashboard flag to set and no terminal to hand back.
+    install_stop_handler(scheduler.cancel_signal(), || {}, || {});
 
     // Execute all tasks, capturing result
     let result = scheduler.execute_all().await;
@@ -485,49 +459,91 @@ pub async fn execute_with_terminal_output(
     result
 }
 
-/// Turn Ctrl+C into a scheduler cancel on the non-TUI path, and a second Ctrl+C
-/// into an immediate exit.
+/// Await the first of SIGINT, SIGTERM and SIGHUP; report which one it was.
 ///
-/// The first interrupt sets the same `CancelSignal` the TUI path sets
-/// (`execute_with_tui`), so the run goes through `abandon_run`: the report
-/// channel is drained, completed buffered blocks are replayed in item order,
-/// killed children get their log paths printed, and the unstarted items get
-/// did-not-start lines. Installing nothing, which is what shipped through
-/// v2.0.5, meant the terminal's default SIGINT disposition killed otto between
-/// those two states and printed nothing.
+/// All three mean the same thing to a run - stop - and all three are fatal by
+/// default, which is the bug: a default disposition kills otto between "children
+/// spawned" and "children reaped" and orphans every one of them. Only SIGINT was
+/// handled before this, so `kill <otto>` and a closing terminal both left the
+/// subtree running. `None` means the signal machinery could not be installed at
+/// all, which leaves the default dispositions in place rather than pretending a
+/// handler exists.
+async fn next_stop_signal() -> Option<(&'static str, i32)> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())
+        .inspect_err(|e| error!("could not listen for SIGTERM: {e}"))
+        .ok()?;
+    let mut hangup = signal(SignalKind::hangup())
+        .inspect_err(|e| error!("could not listen for SIGHUP: {e}"))
+        .ok()?;
+    tokio::select! {
+        received = tokio::signal::ctrl_c() => received.ok().map(|()| ("SIGINT", libc::SIGINT)),
+        received = terminate.recv() => received.map(|()| ("SIGTERM", libc::SIGTERM)),
+        received = hangup.recv() => received.map(|()| ("SIGHUP", libc::SIGHUP)),
+    }
+}
+
+/// Turn the first stop signal into a scheduler cancel, and the second into an
+/// immediate exit. Used by both the plain path and the `--tui` path.
+///
+/// The first signal sets the `CancelSignal`, so the run goes through
+/// `abandon_run`: the report channel is drained, completed buffered blocks are
+/// replayed in item order, killed children get their log paths printed, and the
+/// unstarted items get did-not-start lines. Installing nothing, which is what
+/// shipped through v2.0.5, meant the terminal's default SIGINT disposition
+/// killed otto between those two states and printed nothing. SIGTERM and SIGHUP
+/// are here for the same reason and not by analogy: a `kill` from a supervisor
+/// and a terminal hangup each killed otto outright, `abandon_run` never ran, and
+/// the children survived because they are not in otto's group.
 ///
 /// **otto does not forward the terminal's signal to task children, by design.**
-/// A terminal Ctrl+C is delivered to the whole foreground process group, but
-/// every task child is put in its own group (`task_execution.rs`,
-/// `cmd.process_group(0)`), so the children do not receive it and otto's
+/// A terminal Ctrl+C, and a hangup, are delivered to the pty's foreground
+/// process group and session, but every non-`tty` task child runs in its own
+/// session (`task_execution.rs`, `setsid`), so it receives neither and otto's
 /// teardown is not raced. They are killed by otto instead, on its own schedule:
 /// `abandon_run` signals each recorded process group, SIGTERM then SIGKILL, so
 /// the task's whole subtree dies rather than only its direct child. The one
-/// exception is a `tty: true` task: it deliberately stays in otto's group so it
-/// can own the terminal, so it takes the Ctrl+C directly, exactly as it would
-/// under any other runner, and cancellation signals its pid alone.
+/// exception is a `tty: true` task: it deliberately stays in otto's session and
+/// group so it can own the terminal, so it takes the terminal's signal directly,
+/// exactly as it would under any other runner, and cancellation signals its pid
+/// alone - its own grandchildren are outside the reaping, as the 2026-09-01 doc
+/// records.
 ///
-/// The second interrupt is the escape hatch, and it is not optional: with a
-/// handler installed the default disposition is gone, so a teardown wedged on a
-/// child that will not die would otherwise be unkillable from the keyboard. It
-/// exits 130 (128 + SIGINT) without closing the run out in the database - the
-/// run stays `running` and `otto Clean` ages it out, which is the honest record
-/// of what happened.
+/// The second signal is the escape hatch, and it is not optional: with a handler
+/// installed the default disposition is gone, so a teardown wedged on a child
+/// that will not die would otherwise be unkillable from the keyboard. It exits
+/// 128 plus the signal's number (130, 143, 129) without closing the run out in
+/// the database - the run stays `running` and `otto Clean` ages it out, which is
+/// the honest record of what happened.
 ///
-/// The ordinary interrupt path keeps the normal failure exit: `abandon_run`
-/// returns `Err`, so `execute_all` fails, the run is recorded not-ok, and
-/// `main` exits non-zero.
-fn install_interrupt_handler(cancel: Arc<crate::executor::scheduler::CancelSignal>) {
+/// The ordinary path keeps the normal failure exit: `abandon_run` returns `Err`,
+/// so `execute_all` fails, the run is recorded not-ok, and `main` exits
+/// non-zero.
+///
+/// `on_first` runs after the cancel and `before_exit` runs before the
+/// second-signal exit, because the `--tui` path has a quit flag to set and a
+/// terminal to hand back and the plain path has neither. Everything else about
+/// the two paths' signal handling is identical, so it lives here once.
+fn install_stop_handler(
+    cancel: Arc<crate::executor::scheduler::CancelSignal>,
+    on_first: impl FnOnce() + Send + 'static,
+    before_exit: impl FnOnce() + Send + 'static,
+) {
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_err() {
+        let Some((name, _)) = next_stop_signal().await else {
             return;
-        }
-        info!("Interrupt received; cancelling the run");
+        };
+        info!("{name} received; cancelling the run");
         cancel.cancel();
+        on_first();
 
-        if tokio::signal::ctrl_c().await.is_ok() {
-            eprintln!("otto: second interrupt; exiting without finishing teardown");
-            std::process::exit(130);
+        if let Some((name, number)) = next_stop_signal().await {
+            // Whatever the caller has to undo comes first: a message printed
+            // onto the alternate screen is a message nobody ever sees.
+            before_exit();
+            eprintln!("otto: second signal ({name}); exiting without finishing teardown");
+            std::process::exit(128 + number);
         }
     });
 }
@@ -554,14 +570,6 @@ pub async fn execute_with_tui(
         return dispatch_builtin(builtin, task).await;
     }
 
-    // Filter out built-in commands for normal execution using pure function
-    let execution_tasks = filter_execution_tasks(tasks);
-
-    if execution_tasks.is_empty() {
-        eprintln!("No tasks to execute");
-        return Ok(());
-    }
-
     let cwd = crate::executor::workspace::current_dir()?;
     let root = ottofile_base_dir(ottofile_path.as_deref(), &cwd).to_path_buf();
     let workspace = Workspace::new(root).await?;
@@ -574,7 +582,7 @@ pub async fn execute_with_tui(
     // Save execution context to run directory
     workspace.save_execution_context(execution_context.clone()).await?;
 
-    let executor_tasks = build_executor_tasks(execution_tasks);
+    let executor_tasks = build_executor_tasks(tasks);
 
     let mut task_streams_map = std::collections::HashMap::new();
     let output_dir = workspace.run().join("tasks");
@@ -629,16 +637,22 @@ pub async fn execute_with_tui(
     let cancel = scheduler.cancel_signal();
     let scheduler_handle = tokio::spawn(async move { scheduler.execute_all().await });
 
-    let ctrl_c_pressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ctrl_c_flag = ctrl_c_pressed.clone();
+    // The flag alone is not enough, and a hangup is why. `TuiApp::run` reads it
+    // once per loop iteration AFTER drawing, but after SIGHUP every write to the
+    // terminal fails EIO, so the draw returns `Err` and the flag is never read.
+    // Cancelling directly from the handler is what makes the run stop in that
+    // case; the flag is what makes the dashboard quit in the ordinary one.
+    let shutdown_requested = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_flag = shutdown_requested.clone();
+    install_stop_handler(
+        cancel.clone(),
+        move || shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst),
+        // A second signal exits the process outright, so the guard's `Drop`
+        // never runs and the user would keep the alternate screen and raw mode.
+        crate::tui::restore_terminal_best_effort,
+    );
 
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            ctrl_c_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    });
-
-    app.set_shutdown_flag(ctrl_c_pressed);
+    app.set_shutdown_flag(shutdown_requested);
 
     // Run TUI (blocks until user quits or Ctrl+C)
     let tui_result = app.run(terminal.terminal_mut());
@@ -648,16 +662,40 @@ pub async fn execute_with_tui(
     // alternate one that is about to be discarded.
     let still_running = app.running_task_names();
     if let Err(e) = terminal.restore() {
-        eprintln!("Warning: Failed to restore terminal: {}", e);
+        // Not `eprintln!`: after a hangup this write fails EIO too, and
+        // `eprintln!` panics on a failed write, which would unwind past the
+        // cancel and the run record below. The warning is best effort.
+        let _ = writeln!(std::io::stderr(), "Warning: Failed to restore terminal: {e}");
+        // A terminal that cannot be restored is gone. ratatui's `Terminal`
+        // shows the cursor in its `Drop` and `eprintln!`s when that fails,
+        // which on a dead terminal is a panic at the very end of an otherwise
+        // clean shutdown: exit 101 instead of 1, measured with the pty master
+        // closed. Skipping the drop leaks a handle the process is about to
+        // release anyway.
+        std::mem::forget(terminal);
     }
 
-    // Handle TUI errors
-    tui_result.map_err(|e| eyre::eyre!("TUI error: {}", e))?;
-
-    // The dashboard is gone, so nothing is watching the run any more. Cancel it and
-    // say so. Before this, quitting left the user staring at a bare prompt while
-    // children they could no longer see ran to completion, with no way to stop them.
-    if !scheduler_handle.is_finished() {
+    // Handle TUI errors. A hangup is how this path is reached: the terminal's
+    // descriptor reports it, or every write fails EIO, `run()` returns `Err`,
+    // and propagating that straight out - which is what this used to do -
+    // returned BEFORE the cancel below, leaving the scheduler and its whole
+    // subtree running with nobody watching. Then it returned before
+    // `record_run_complete_in_db`, so a hung-up run stayed `running` in the
+    // database until `Clean` aged it out. Cancel, then fall through to the same
+    // drain, record and prune as the ordinary path, and propagate at the end.
+    // No "dashboard closed" message: the dashboard did not close, the terminal
+    // went away, and saying otherwise would name the wrong cause.
+    let tui_error = tui_result.err();
+    if tui_error.is_some() {
+        if !scheduler_handle.is_finished() {
+            cancel.cancel();
+        }
+    } else if !scheduler_handle.is_finished() {
+        // The dashboard is gone, so nothing is watching the run any more. Cancel it and
+        // say so. Before this, quitting left the user staring at a bare prompt while
+        // children they could no longer see ran to completion, with no way to stop them.
+        // `CancelSignal::cancel` is idempotent (`scheduler.rs`), so a run the signal
+        // handler already cancelled passes through here harmlessly.
         eprintln!("otto: dashboard closed, cancelling the run...");
         cancel.cancel();
         // Naming what is still running is the difference between "otto hung"
@@ -687,6 +725,10 @@ pub async fn execute_with_tui(
         crate::executor::pruning::auto_prune(&otto_home, &retention).await;
     }
 
+    if let Some(e) = tui_error {
+        return Err(eyre::eyre!("TUI error: {}", e));
+    }
+
     result
 }
 
@@ -696,11 +738,13 @@ pub async fn execute_clean_from_task(task: &Task) -> Result<(), Report> {
 
     let clean_cmd = CleanCommand {
         keep_days: params.keep_days,
-        keep_last: None,
-        keep_failed: None,
+        keep_last: params.keep_last,
+        keep_failed: params.keep_failed,
         dry_run: params.dry_run,
         project_filter: params.project_filter,
-        no_db: false,
+        no_db: params.no_db,
+        // Not a CLI flag: `#[arg(skip)]` on the field, so it has no meta param
+        // either. Only auto-prune sets it.
         quiet: false,
     };
     clean_cmd.execute().await?;
@@ -747,6 +791,19 @@ pub fn execute_stats_from_task(task: &Task) -> Result<(), Report> {
     Ok(())
 }
 
+/// Execute Graph command from a parsed task.
+pub fn execute_graph_from_task(task: &Task) -> Result<(), Report> {
+    let params = extract_graph_params(&task.values);
+
+    let graph_cmd = GraphCommand {
+        format: params.format,
+        output: params.output,
+    };
+    graph_cmd.execute()?;
+
+    Ok(())
+}
+
 /// Execute Convert command from a parsed task.
 pub fn execute_convert_from_task(task: &Task) -> Result<(), Report> {
     let params = extract_convert_params(&task.values);
@@ -777,10 +834,12 @@ pub async fn execute_upgrade_from_task(task: &Task) -> Result<(), Report> {
     upgrade_cmd.rollback = params.rollback;
     upgrade_cmd.force = params.force;
     upgrade_cmd.no_backup = params.no_backup;
+    upgrade_cmd.backup_dir = params.backup_dir;
     // `#[arg(env = "GITHUB_TOKEN")]` only fires when clap parses the args;
     // constructing the command directly has to read the env itself, or the
-    // task route silently loses the token and rate-limits.
-    upgrade_cmd.github_token = env::var("GITHUB_TOKEN").ok();
+    // task route silently loses the token and rate-limits. The flag wins over
+    // the environment, same as clap's own precedence.
+    upgrade_cmd.github_token = params.github_token.or_else(|| env::var("GITHUB_TOKEN").ok());
 
     upgrade_cmd.execute().await?;
 

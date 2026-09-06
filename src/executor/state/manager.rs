@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, params};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use super::db::DatabaseManager;
+use super::db::{DatabaseManager, TransactionGuard};
 use super::metadata::RunMetadata;
 use super::retention::{Retention, RunAge};
 use super::schema::{RunStatus, SkipKind, TaskStatus};
@@ -145,6 +145,14 @@ impl StateManager {
         }
     }
 
+    /// Record the start of a run: the project upsert, the run row, and the
+    /// project's run counter.
+    ///
+    /// All three in one immediate transaction. They used to be four autocommit
+    /// statements, so a crash - or a failure - between the run INSERT and the
+    /// counter UPDATE drifted `projects.run_count` permanently against the rows
+    /// in `runs`, in either direction. The `MAX(run_count - 1, 0)` guard in
+    /// [`Self::delete_run`] exists because of exactly that drift.
     pub fn record_run_start(&self, metadata: &RunMetadata) -> Result<i64> {
         log::debug!(
             "record_run_start: hash={} timestamp={}",
@@ -152,6 +160,10 @@ impl StateManager {
             metadata.timestamp
         );
         self.db.with_connection(|conn| {
+            // Read-then-write (the upsert reads back the project id, the counter
+            // reads the current count), so the write lock is taken up front.
+            let tx = TransactionGuard::immediate(conn)?;
+
             // First, ensure project exists
             let project_id = self.ensure_project(conn, &metadata.hash, metadata.ottofile.as_ref())?;
 
@@ -190,6 +202,7 @@ impl StateManager {
                 params![metadata.timestamp as i64, project_id],
             )?;
 
+            tx.commit()?;
             Ok(run_id)
         })
     }
@@ -261,7 +274,17 @@ impl StateManager {
         })
     }
 
-    /// Record the completion of a task
+    /// Record the completion of a task.
+    ///
+    /// One statement, the same shape as [`Self::record_run_complete`]: the
+    /// duration is computed in SQL from the row's own start time and clamped at
+    /// zero. It used to be a `SELECT started_at` followed by an `UPDATE`, with
+    /// the subtraction done in Rust and unclamped - so a clock that stepped
+    /// backwards between start and end wrote a negative duration into the stats,
+    /// and a concurrent delete between the two statements turned the completion
+    /// into a silent no-op. `started_at` is nullable, hence the `CASE`: a task
+    /// with no recorded start has no duration, not a duration measured from the
+    /// epoch.
     pub fn record_task_complete(&self, task_id: i64, exit_code: i32, status: TaskStatus) -> Result<()> {
         log::debug!("record_task_complete: task_id={task_id} exit_code={exit_code} status={status:?}");
         let ended_at = SystemTime::now()
@@ -270,21 +293,15 @@ impl StateManager {
             .as_secs();
 
         self.db.with_connection(|conn| {
-            // `started_at` is nullable in the schema, so it is read as one:
-            // reading it as `i64` turned any task without a start time into a
-            // hard error out of a completion path that must not fail.
-            let started_at: Option<i64> =
-                conn.query_row("SELECT started_at FROM tasks WHERE id = ?1", params![task_id], |row| {
-                    row.get(0)
-                })?;
-
-            let duration_seconds = started_at.map(|started| (ended_at as i64 - started) as f64);
-
             let updated = conn.execute(
                 "UPDATE tasks
-                 SET status = ?1, exit_code = ?2, ended_at = ?3, duration_seconds = ?4
-                 WHERE id = ?5",
-                params![status.as_str(), exit_code, ended_at as i64, duration_seconds, task_id],
+                 SET status = ?1, exit_code = ?2, ended_at = ?3,
+                     duration_seconds = CASE
+                         WHEN started_at IS NULL THEN NULL
+                         ELSE MAX(?3 - started_at, 0)
+                     END
+                 WHERE id = ?4",
+                params![status.as_str(), exit_code, ended_at as i64, task_id],
             )?;
 
             if updated == 0 {
@@ -308,9 +325,9 @@ impl StateManager {
         skip_kind: Option<SkipKind>,
     ) -> Result<i64> {
         log::debug!("record_task_skipped: run_id={run_id} task_name={task_name} skip_kind={skip_kind:?}");
-        // A skip happens at a moment, and `get_run_tasks` orders by
-        // `started_at`: without one, every skipped task sorted ahead of the run
-        // it belongs to.
+        // A skip happens at a moment, and callers that order a run's tasks by
+        // `started_at` need one: without it, every skipped task sorted ahead
+        // of the run it belongs to.
         let started_at = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .context("Failed to get current time")?
@@ -332,56 +349,6 @@ impl StateManager {
             )?;
 
             Ok(conn.last_insert_rowid())
-        })
-    }
-
-    /// Get recent runs, optionally filtered by project hash
-    pub fn get_recent_runs(&self, limit: usize, project_filter: Option<&str>) -> Result<Vec<RunRecord>> {
-        self.db.with_connection(|conn| {
-            let query = if project_filter.is_some() {
-                format!(
-                    "SELECT {RUN_COLUMNS}
-                     FROM runs r
-                     JOIN projects p ON r.project_id = p.id
-                     WHERE p.hash = ?1
-                     ORDER BY r.timestamp DESC
-                     LIMIT ?2"
-                )
-            } else {
-                format!(
-                    "SELECT {RUN_COLUMNS}
-                     FROM runs r
-                     ORDER BY r.timestamp DESC
-                     LIMIT ?1"
-                )
-            };
-
-            let mut stmt = conn.prepare(&query)?;
-
-            let rows = if let Some(project_hash) = project_filter {
-                stmt.query_map(params![project_hash, limit as i64], Self::row_to_run_record)?
-            } else {
-                stmt.query_map(params![limit as i64], Self::row_to_run_record)?
-            };
-
-            rows.collect::<Result<Vec<_>, _>>().context("Failed to fetch runs")
-        })
-    }
-
-    pub fn get_run_tasks(&self, run_id: i64) -> Result<Vec<TaskRecord>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, run_id, name, status, script_hash, exit_code,
-                        started_at, ended_at, duration_seconds,
-                        stdout_path, stderr_path, script_path, skip_reason, skip_kind
-                 FROM tasks
-                 WHERE run_id = ?1
-                 ORDER BY started_at ASC",
-            )?;
-
-            let rows = stmt.query_map(params![run_id], Self::row_to_task_record)?;
-
-            rows.collect::<Result<Vec<_>, _>>().context("Failed to fetch tasks")
         })
     }
 
@@ -440,10 +407,23 @@ impl StateManager {
     }
 
     /// Helper to convert a database row to a TaskRecord
+    ///
+    /// Same rule as [`Self::row_to_run_record`] for every stored enum: an
+    /// unreadable value is reported, not smoothed over. `skip_kind` used to go
+    /// through `and_then(SkipKind::parse)`, so an unrecognised kind read back as
+    /// "this task was skipped for no recorded reason" while the status column
+    /// next to it rejected the same corruption.
     fn row_to_task_record(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         let status_str: String = row.get(3)?;
         let status = TaskStatus::parse(&status_str)
             .ok_or_else(|| bad_column(3, format!("unknown task status {status_str:?}")))?;
+
+        let skip_kind = match row.get::<_, Option<String>>(13)? {
+            Some(kind_str) => Some(
+                SkipKind::parse(&kind_str).ok_or_else(|| bad_column(13, format!("unknown skip kind {kind_str:?}")))?,
+            ),
+            None => None,
+        };
 
         Ok(TaskRecord {
             id: row.get(0)?,
@@ -459,7 +439,7 @@ impl StateManager {
             stderr_path: row.get::<_, Option<String>>(10)?.map(PathBuf::from),
             script_path: row.get::<_, Option<String>>(11)?.map(PathBuf::from),
             skip_reason: row.get(12)?,
-            skip_kind: row.get::<_, Option<String>>(13)?.as_deref().and_then(SkipKind::parse),
+            skip_kind,
         })
     }
 
@@ -537,307 +517,128 @@ impl StateManager {
         })
     }
 
+    /// Surfaced, not nulled: an unrecognised status is a named error, not "this
+    /// task has no last status". Same rule as `row_to_task_record`.
+    fn parse_last_status(status: Option<String>) -> rusqlite::Result<Option<TaskStatus>> {
+        status
+            .map(|s| {
+                TaskStatus::parse(&s)
+                    .ok_or_else(|| bad_column(0, format!("unknown task status {s:?} in the task stats query")))
+            })
+            .transpose()
+    }
+
     /// Get statistics for a specific task across all projects
+    ///
+    /// One `GROUP BY` query per task, not eight queries per project: the
+    /// per-project loop used to re-scan `tasks JOIN runs` once for the count,
+    /// once per status, and three times for durations. `last_status` is the
+    /// one field a plain aggregate cannot give the correlated row for, since
+    /// the query already has two other `MIN`/`MAX` aggregates in play; it is
+    /// the only correlated subquery left.
     pub fn get_task_stats(&self, task_name: &str) -> Result<Vec<TaskStats>> {
         self.db.with_connection(|conn| {
-            // Get all projects that have this task
             let mut stmt = conn.prepare(
-                "SELECT DISTINCT p.id, p.hash, p.name
+                "SELECT p.id, p.hash, p.name,
+                        COUNT(*),
+                        SUM(t.status = 'completed'),
+                        SUM(t.status = 'failed'),
+                        SUM(t.status = 'skipped'),
+                        AVG(t.duration_seconds),
+                        MIN(t.duration_seconds),
+                        MAX(t.duration_seconds),
+                        MAX(t.started_at),
+                        (SELECT t2.status FROM tasks t2
+                         JOIN runs r2 ON t2.run_id = r2.id
+                         WHERE t2.name = ?1 AND r2.project_id = p.id
+                         ORDER BY t2.started_at DESC LIMIT 1)
                  FROM tasks t
                  JOIN runs r ON t.run_id = r.id
                  JOIN projects p ON r.project_id = p.id
-                 WHERE t.name = ?1",
+                 WHERE t.name = ?1
+                 GROUP BY p.id, p.hash, p.name
+                 ORDER BY p.id",
             )?;
 
-            let projects: Vec<(i64, String, Option<String>)> = stmt
-                .query_map(params![task_name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let mut stats = Vec::new();
-            for (project_id, project_hash, project_name_opt) in projects {
-                let project_name = project_name_opt.unwrap_or_else(|| project_hash.clone());
-
-                let total_executions: u64 = conn.query_row(
-                    "SELECT COUNT(*)
-                     FROM tasks t
-                     JOIN runs r ON t.run_id = r.id
-                     WHERE t.name = ?1 AND r.project_id = ?2",
-                    params![task_name, project_id],
-                    |row| row.get::<_, i64>(0),
-                )? as u64;
-
-                let successful_executions: u64 = conn.query_row(
-                    "SELECT COUNT(*)
-                     FROM tasks t
-                     JOIN runs r ON t.run_id = r.id
-                     WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'completed'",
-                    params![task_name, project_id],
-                    |row| row.get::<_, i64>(0),
-                )? as u64;
-
-                let failed_executions: u64 = conn.query_row(
-                    "SELECT COUNT(*)
-                     FROM tasks t
-                     JOIN runs r ON t.run_id = r.id
-                     WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'failed'",
-                    params![task_name, project_id],
-                    |row| row.get::<_, i64>(0),
-                )? as u64;
-
-                let skipped_executions: u64 = conn.query_row(
-                    "SELECT COUNT(*)
-                     FROM tasks t
-                     JOIN runs r ON t.run_id = r.id
-                     WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'skipped'",
-                    params![task_name, project_id],
-                    |row| row.get::<_, i64>(0),
-                )? as u64;
-
-                let avg_duration_seconds: Option<f64> = conn
-                    .query_row(
-                        "SELECT AVG(t.duration_seconds)
-                         FROM tasks t
-                         JOIN runs r ON t.run_id = r.id
-                         WHERE t.name = ?1 AND r.project_id = ?2 AND t.duration_seconds IS NOT NULL",
-                        params![task_name, project_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-
-                let min_duration_seconds: Option<f64> = conn
-                    .query_row(
-                        "SELECT MIN(t.duration_seconds)
-                         FROM tasks t
-                         JOIN runs r ON t.run_id = r.id
-                         WHERE t.name = ?1 AND r.project_id = ?2 AND t.duration_seconds IS NOT NULL",
-                        params![task_name, project_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-
-                let max_duration_seconds: Option<f64> = conn
-                    .query_row(
-                        "SELECT MAX(t.duration_seconds)
-                         FROM tasks t
-                         JOIN runs r ON t.run_id = r.id
-                         WHERE t.name = ?1 AND r.project_id = ?2 AND t.duration_seconds IS NOT NULL",
-                        params![task_name, project_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-
-                let (last_executed, last_status_str): (Option<i64>, Option<String>) = conn
-                    .query_row(
-                        "SELECT t.started_at, t.status
-                         FROM tasks t
-                         JOIN runs r ON t.run_id = r.id
-                         WHERE t.name = ?1 AND r.project_id = ?2
-                         ORDER BY t.started_at DESC LIMIT 1",
-                        params![task_name, project_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()?
-                    .unwrap_or((None, None));
-
-                // Surfaced, not nulled. `and_then` turned an unrecognised status
-                // into "this task has no last status", so a corrupt row rendered
-                // as a clean stats report. Same rule as `row_to_task_record`.
-                let last_status = match last_status_str {
-                    Some(ref s) => Some(
-                        TaskStatus::parse(s)
-                            .ok_or_else(|| eyre::eyre!("unknown task status {s:?} in the task stats query"))?,
-                    ),
-                    None => None,
-                };
-
-                stats.push(TaskStats {
-                    project_id,
+            let rows = stmt.query_map(params![task_name], |row| {
+                let project_hash: String = row.get(1)?;
+                let project_name: Option<String> = row.get(2)?;
+                Ok(TaskStats {
+                    project_id: row.get(0)?,
+                    project_name: project_name.unwrap_or_else(|| project_hash.clone()),
                     project_hash,
-                    project_name,
                     task_name: task_name.to_string(),
-                    total_executions,
-                    successful_executions,
-                    failed_executions,
-                    skipped_executions,
-                    avg_duration_seconds,
-                    min_duration_seconds,
-                    max_duration_seconds,
-                    last_executed: last_executed.map(|t| t as u64),
-                    last_status,
-                });
-            }
+                    total_executions: row.get::<_, i64>(3)? as u64,
+                    successful_executions: row.get::<_, i64>(4)? as u64,
+                    failed_executions: row.get::<_, i64>(5)? as u64,
+                    skipped_executions: row.get::<_, i64>(6)? as u64,
+                    avg_duration_seconds: row.get(7)?,
+                    min_duration_seconds: row.get(8)?,
+                    max_duration_seconds: row.get(9)?,
+                    last_executed: row.get::<_, Option<i64>>(10)?.map(|t| t as u64),
+                    last_status: Self::parse_last_status(row.get(11)?)?,
+                })
+            })?;
 
-            Ok(stats)
+            rows.collect::<Result<Vec<_>, _>>()
+                .context("Failed to fetch task stats")
         })
     }
 
     /// Get statistics for all tasks, ordered by execution count, grouped by project
+    ///
+    /// Same rewrite as `get_task_stats`: one `GROUP BY` query across every
+    /// `(task, project)` pair instead of one `SELECT DISTINCT` plus eight
+    /// queries per row. `LIMIT` binds `-1` for "no limit", SQLite's own
+    /// spelling of it, rather than building two query strings.
     pub fn get_all_task_stats(&self, limit: Option<usize>) -> Result<Vec<TaskStats>> {
         self.db.with_connection(|conn| {
-            let query = if let Some(limit) = limit {
-                format!(
-                    "SELECT DISTINCT t.name, p.id, p.hash, p.name
-                     FROM tasks t
-                     JOIN runs r ON t.run_id = r.id
-                     JOIN projects p ON r.project_id = p.id
-                     ORDER BY (
-                         SELECT COUNT(*)
-                         FROM tasks t2
+            let mut stmt = conn.prepare(
+                "SELECT t.name, p.id, p.hash, p.name,
+                        COUNT(*),
+                        SUM(t.status = 'completed'),
+                        SUM(t.status = 'failed'),
+                        SUM(t.status = 'skipped'),
+                        AVG(t.duration_seconds),
+                        MIN(t.duration_seconds),
+                        MAX(t.duration_seconds),
+                        MAX(t.started_at),
+                        (SELECT t2.status FROM tasks t2
                          JOIN runs r2 ON t2.run_id = r2.id
                          WHERE t2.name = t.name AND r2.project_id = p.id
-                     ) DESC
-                     LIMIT {}",
-                    limit
-                )
-            } else {
-                "SELECT DISTINCT t.name, p.id, p.hash, p.name
+                         ORDER BY t2.started_at DESC LIMIT 1)
                  FROM tasks t
                  JOIN runs r ON t.run_id = r.id
                  JOIN projects p ON r.project_id = p.id
-                 ORDER BY (
-                     SELECT COUNT(*)
-                     FROM tasks t2
-                     JOIN runs r2 ON t2.run_id = r2.id
-                     WHERE t2.name = t.name AND r2.project_id = p.id
-                 ) DESC"
-                    .to_string()
-            };
+                 GROUP BY t.name, p.id, p.hash, p.name
+                 ORDER BY COUNT(*) DESC, t.name ASC, p.id ASC
+                 LIMIT ?1",
+            )?;
 
-            let mut stmt = conn.prepare(&query)?;
-            // `p.name` is nullable, so it is read as one and falls back to the
-            // hash, exactly as `get_task_stats` does. Reading it as `String`
-            // made this query error out on any project the v1-to-v2 backfill
-            // had not reached.
-            let task_projects: Vec<(String, i64, String, Option<String>)> = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
+            let limit = limit.map(|l| l as i64).unwrap_or(-1);
+            let rows = stmt.query_map(params![limit], |row| {
+                let task_name: String = row.get(0)?;
+                let project_hash: String = row.get(2)?;
+                let project_name: Option<String> = row.get(3)?;
+                Ok(TaskStats {
+                    project_id: row.get(1)?,
+                    project_name: project_name.unwrap_or_else(|| project_hash.clone()),
+                    project_hash,
+                    task_name,
+                    total_executions: row.get::<_, i64>(4)? as u64,
+                    successful_executions: row.get::<_, i64>(5)? as u64,
+                    failed_executions: row.get::<_, i64>(6)? as u64,
+                    skipped_executions: row.get::<_, i64>(7)? as u64,
+                    avg_duration_seconds: row.get(8)?,
+                    min_duration_seconds: row.get(9)?,
+                    max_duration_seconds: row.get(10)?,
+                    last_executed: row.get::<_, Option<i64>>(11)?.map(|t| t as u64),
+                    last_status: Self::parse_last_status(row.get(12)?)?,
+                })
+            })?;
 
-            let mut stats = Vec::new();
-            for (task_name, project_id, project_hash, project_name) in task_projects {
-                let project_name = project_name.unwrap_or_else(|| project_hash.clone());
-                // Calculate stats for this task within this project
-                let total_executions: u64 = conn.query_row(
-                    "SELECT COUNT(*)
-                     FROM tasks t
-                     JOIN runs r ON t.run_id = r.id
-                     WHERE t.name = ?1 AND r.project_id = ?2",
-                    params![&task_name, project_id],
-                    |row| row.get::<_, i64>(0),
-                )? as u64;
-
-                if total_executions == 0 {
-                    continue;
-                }
-
-                let successful_executions: u64 = conn.query_row(
-                    "SELECT COUNT(*)
-                     FROM tasks t
-                     JOIN runs r ON t.run_id = r.id
-                     WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'completed'",
-                    params![&task_name, project_id],
-                    |row| row.get::<_, i64>(0),
-                )? as u64;
-
-                let failed_executions: u64 = conn.query_row(
-                    "SELECT COUNT(*)
-                     FROM tasks t
-                     JOIN runs r ON t.run_id = r.id
-                     WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'failed'",
-                    params![&task_name, project_id],
-                    |row| row.get::<_, i64>(0),
-                )? as u64;
-
-                let skipped_executions: u64 = conn.query_row(
-                    "SELECT COUNT(*)
-                     FROM tasks t
-                     JOIN runs r ON t.run_id = r.id
-                     WHERE t.name = ?1 AND r.project_id = ?2 AND t.status = 'skipped'",
-                    params![&task_name, project_id],
-                    |row| row.get::<_, i64>(0),
-                )? as u64;
-
-                let avg_duration_seconds: Option<f64> = conn
-                    .query_row(
-                        "SELECT AVG(t.duration_seconds)
-                         FROM tasks t
-                         JOIN runs r ON t.run_id = r.id
-                         WHERE t.name = ?1 AND r.project_id = ?2 AND t.duration_seconds IS NOT NULL",
-                        params![&task_name, project_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-
-                let min_duration_seconds: Option<f64> = conn
-                    .query_row(
-                        "SELECT MIN(t.duration_seconds)
-                         FROM tasks t
-                         JOIN runs r ON t.run_id = r.id
-                         WHERE t.name = ?1 AND r.project_id = ?2 AND t.duration_seconds IS NOT NULL",
-                        params![&task_name, project_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-
-                let max_duration_seconds: Option<f64> = conn
-                    .query_row(
-                        "SELECT MAX(t.duration_seconds)
-                         FROM tasks t
-                         JOIN runs r ON t.run_id = r.id
-                         WHERE t.name = ?1 AND r.project_id = ?2 AND t.duration_seconds IS NOT NULL",
-                        params![&task_name, project_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-
-                let (last_executed, last_status_str): (Option<i64>, Option<String>) = conn
-                    .query_row(
-                        "SELECT t.started_at, t.status
-                         FROM tasks t
-                         JOIN runs r ON t.run_id = r.id
-                         WHERE t.name = ?1 AND r.project_id = ?2
-                         ORDER BY t.started_at DESC
-                         LIMIT 1",
-                        params![&task_name, project_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()?
-                    .unwrap_or((None, None));
-
-                // Surfaced, not nulled. `and_then` turned an unrecognised status
-                // into "this task has no last status", so a corrupt row rendered
-                // as a clean stats report. Same rule as `row_to_task_record`.
-                let last_status = match last_status_str {
-                    Some(ref s) => Some(
-                        TaskStatus::parse(s)
-                            .ok_or_else(|| eyre::eyre!("unknown task status {s:?} in the task stats query"))?,
-                    ),
-                    None => None,
-                };
-
-                stats.push(TaskStats {
-                    project_id,
-                    project_hash: project_hash.clone(),
-                    project_name: project_name.clone(),
-                    task_name: task_name.clone(),
-                    total_executions,
-                    successful_executions,
-                    failed_executions,
-                    skipped_executions,
-                    avg_duration_seconds,
-                    min_duration_seconds,
-                    max_duration_seconds,
-                    last_executed: last_executed.map(|t| t as u64),
-                    last_status,
-                });
-            }
-
-            Ok(stats)
+            rows.collect::<Result<Vec<_>, _>>()
+                .context("Failed to fetch task stats")
         })
     }
 
@@ -943,28 +744,42 @@ impl StateManager {
     /// Delete one run, by id, and optionally the directory it wrote into.
     ///
     /// Keyed on `id` rather than the timestamp so two runs from the same second
-    /// are two runs. The row deletion and the project's run-count adjustment are
-    /// one transaction; the directory is removed afterwards, because a failed
-    /// unlink must not roll a committed delete back into existence.
+    /// are two runs.
+    ///
+    /// Ordering, which is the whole point of the split below: the directory path
+    /// is resolved and fenced *before* `BEGIN`, the rows go in one immediate
+    /// transaction, and `remove_dir_all` runs only after the commit. It used to
+    /// commit first and fence afterwards, so a run directory that had been
+    /// replaced by a symlink - the case the fence exists for - lost its rows and
+    /// kept its directory, orphaned with nothing pointing at it. The unlink stays
+    /// after the commit for the opposite reason: a failed unlink must not roll a
+    /// committed delete back into existence.
     pub fn delete_run(&self, run_id: i64, delete_filesystem: bool) -> Result<Option<RunRecord>> {
         log::debug!("delete_run: run_id={run_id} delete_filesystem={delete_filesystem}");
+
+        let Some((run_record, project_hash, project_name)) = self.read_run_with_project(run_id)? else {
+            return Ok(None);
+        };
+
+        // Before BEGIN: a refusal here leaves the database untouched.
+        let doomed_dir = if delete_filesystem {
+            self.resolve_run_directory(&run_record, &project_name, &project_hash)?
+        } else {
+            None
+        };
+
         let deleted = self.db.with_connection(|conn| {
-            let tx = conn.unchecked_transaction()?;
+            let tx = TransactionGuard::immediate(conn)?;
 
-            let query = format!("SELECT {RUN_COLUMNS} FROM runs r WHERE r.id = ?1");
-            let run: Option<RunRecord> = conn
-                .query_row(&query, params![run_id], Self::row_to_run_record)
-                .optional()?;
-
-            let Some(run_record) = run else {
-                return Ok(None);
-            };
-
-            let project: (String, String) = conn.query_row(
-                "SELECT hash, COALESCE(name, hash) FROM projects WHERE id = ?1",
-                params![run_record.project_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
+            // Re-read under the write lock: the row was read outside it, and a
+            // concurrent otto may have deleted it in between. Deleting rows that
+            // are already gone would still decrement `run_count`.
+            let present: bool = conn.query_row("SELECT COUNT(*) FROM runs WHERE id = ?1", params![run_id], |row| {
+                Ok(row.get::<_, i64>(0)? > 0)
+            })?;
+            if !present {
+                return Ok(false);
+            }
 
             // Explicit rather than relying on the CASCADE, which is only armed
             // when foreign keys are on.
@@ -979,21 +794,44 @@ impl StateManager {
             )?;
 
             tx.commit()?;
-            Ok(Some((run_record, project)))
+            Ok(true)
         })?;
 
-        let Some((run_record, (project_hash, project_name))) = deleted else {
+        if !deleted {
             return Ok(None);
-        };
+        }
 
-        if delete_filesystem {
-            self.delete_run_directory(&run_record, &project_name, &project_hash)?;
+        if let Some(dir) = doomed_dir {
+            std::fs::remove_dir_all(&dir).context("Failed to delete run directory")?;
         }
 
         Ok(Some(run_record))
     }
 
-    /// Remove the directory a run wrote into.
+    /// Read one run row together with its project's hash and display name.
+    fn read_run_with_project(&self, run_id: i64) -> Result<Option<(RunRecord, String, String)>> {
+        self.db.with_connection(|conn| {
+            let query = format!("SELECT {RUN_COLUMNS} FROM runs r WHERE r.id = ?1");
+            let Some(run_record) = conn
+                .query_row(&query, params![run_id], Self::row_to_run_record)
+                .optional()?
+            else {
+                return Ok(None);
+            };
+
+            let (hash, name): (String, String) = conn.query_row(
+                "SELECT hash, COALESCE(name, hash) FROM projects WHERE id = ?1",
+                params![run_record.project_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+
+            Ok(Some((run_record, hash, name)))
+        })
+    }
+
+    /// Resolve the directory a run wrote into and check it is safe to delete,
+    /// returning the canonical path to remove, or `None` if there is nothing on
+    /// disk.
     ///
     /// The path comes from the run row, which records it at run start. Cleanup
     /// used to rebuild `otto-<hash>` under a hardcoded `$HOME/.otto`, which
@@ -1006,7 +844,12 @@ impl StateManager {
     /// while the directory name carries a hash of the project's *path*
     /// (`workspace.rs`), and for a pre-v5 row nothing recorded the latter. A
     /// derivation that misses is reported rather than passed off as a delete.
-    fn delete_run_directory(&self, run: &RunRecord, project_name: &str, project_hash: &str) -> Result<()> {
+    fn resolve_run_directory(
+        &self,
+        run: &RunRecord,
+        project_name: &str,
+        project_hash: &str,
+    ) -> Result<Option<PathBuf>> {
         let otto_home = resolve_otto_home().context("Cannot locate the otto home to delete a run directory")?;
 
         let run_dir = match run.run_dir {
@@ -1018,11 +861,11 @@ impl StateManager {
             // Reported, not skipped: a missing directory means the row and the
             // disk had already drifted apart, which is the thing worth knowing.
             log::warn!(
-                "Run {} had no directory at {}; deleted its database rows only",
+                "Run {} had no directory at {}; deleting its database rows only",
                 run.timestamp,
                 run_dir.display()
             );
-            return Ok(());
+            return Ok(None);
         }
 
         // Same fence as the filesystem-scan path in `clean`: never delete
@@ -1031,8 +874,7 @@ impl StateManager {
         // link's target instead.
         let canonical = crate::executor::pruning::ensure_deletable_under_root(&run_dir, &otto_home)
             .context("Refusing to delete run directory")?;
-        std::fs::remove_dir_all(&canonical).context("Failed to delete run directory")?;
-        Ok(())
+        Ok(Some(canonical))
     }
 
     /// Ensure a project exists in the database, creating it if necessary
@@ -1047,17 +889,7 @@ impl StateManager {
             .context("Failed to get current time")?
             .as_secs();
 
-        // Extract project name from ottofile path, or use hash as fallback
-        let name = if let Some(path) = ottofile_path {
-            std::path::Path::new(&path)
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or(hash)
-                .to_string()
-        } else {
-            hash.to_string()
-        };
+        let name = crate::naming::project_name_from(ottofile_path.map(PathBuf::as_path), hash);
 
         conn.execute(
             "INSERT INTO projects (hash, name, ottofile_path, first_seen, last_seen, run_count)
@@ -1130,14 +962,6 @@ impl StateStore for StateManager {
         skip_kind: Option<SkipKind>,
     ) -> Result<i64> {
         StateManager::record_task_skipped(self, run_id, task_name, script_hash, skip_reason, skip_kind)
-    }
-
-    fn get_recent_runs(&self, limit: usize, project_filter: Option<&str>) -> Result<Vec<RunRecord>> {
-        StateManager::get_recent_runs(self, limit, project_filter)
-    }
-
-    fn get_run_tasks(&self, run_id: i64) -> Result<Vec<TaskRecord>> {
-        StateManager::get_run_tasks(self, run_id)
     }
 
     fn get_task_history(&self, task_name: &str, limit: usize) -> Result<Vec<TaskRecord>> {

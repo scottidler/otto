@@ -53,7 +53,7 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
             "Makefile:17: warning: `MAKEFILE_LIST` is a make-internal variable; it will be empty in otto",
             "Makefile:42: warning: `package` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
             "Makefile:42: warning: `PROJECT_NAME` is not defined in the Makefile; it will come from the environment",
-            "Makefile:42: warning: dependency `build` of `package` has no rule in this Makefile; otto will reject the edge",
+            "Makefile:42: warning: dependency `build` of `package` has no rule in this Makefile, so the edge is dropped; otto rejects a dangling edge for the whole file, not just this task",
         ],
     ),
     (
@@ -62,6 +62,39 @@ const CONVERTING_FIXTURES: &[(&str, &[&str])] = &[
             "Makefile:7: warning: pattern rule `%.o` is not supported; the rule is skipped",
             "Makefile:10: warning: static pattern rule `objects` is not supported; the rule is skipped",
             "Makefile:13: warning: special target `.SUFFIXES` is not converted",
+        ],
+    ),
+    ("command-prefixes", &[]),
+    ("phony-space", &[]),
+    (
+        "builtin-name-target",
+        &[
+            "Makefile:4: warning: target `Clean` is otto's built-in command name and cannot be a task; converted as `clean`",
+        ],
+    ),
+    (
+        "dollar-paren-target",
+        &[
+            "Makefile:9: warning: target `$(TARGETS)` is a make expansion; otto task names cannot be computed; the rule is skipped",
+        ],
+    ),
+    (
+        "expansion-dependency",
+        &[
+            "Makefile:16: warning: `link` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:16: warning: dependency `$(OBJS)` of `link` is a make expansion; otto task names cannot be computed, so the edge is dropped",
+            "Makefile:19: warning: `package` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:19: warning: dependency `headers` of `package` has no rule in this Makefile, so the edge is dropped; otto rejects a dangling edge for the whole file, not just this task",
+            "Makefile:22: warning: `deps.d` is not `.PHONY` and has prerequisites; make skips its recipe when the target is newer than them and otto always runs it",
+            "Makefile:22: warning: dependency `$(OBJS:%.o=%.d)` of `deps.d` is a make expansion; otto task names cannot be computed, so the edge is dropped",
+        ],
+    ),
+    (
+        "substitution-ref-target",
+        &[
+            "Makefile:16: warning: target `$(SRCS:.c=.o)` is a make expansion; otto task names cannot be computed; the rule is skipped",
+            "Makefile:19: warning: target `$(OBJS:%.o=%.d)` is a make expansion; otto task names cannot be computed; the rule is skipped",
+            "Makefile:28: warning: unclosed `$(` or `${` in `$(BAD: headers`; the rule is skipped",
         ],
     ),
     (
@@ -146,7 +179,7 @@ fn convert(content: String) -> Conversion {
         .collect();
     diagnostics.sort_by_key(|d| d.line);
 
-    let yaml = serde_yaml::to_string(&config).expect("ConfigSpec should serialize");
+    let yaml = yaml_serde::to_string(&config).expect("ConfigSpec should serialize");
     Conversion {
         config,
         yaml,
@@ -239,7 +272,7 @@ fn test_every_fixture_matches_its_expected_output() {
         });
 
         let expected: ConfigSpec =
-            serde_yaml::from_str(&expected_yaml).unwrap_or_else(|e| panic!("{expected_path} is not a ConfigSpec: {e}"));
+            yaml_serde::from_str(&expected_yaml).unwrap_or_else(|e| panic!("{expected_path} is not a ConfigSpec: {e}"));
 
         assert_eq!(
             convert_fixture(&name).config,
@@ -256,7 +289,7 @@ fn test_every_fixture_round_trips_through_config_spec() {
 
         // Loading is the real test: `ConfigSpec` denies unknown fields, so this
         // proves the converter emits keys otto actually accepts.
-        let reloaded: ConfigSpec = serde_yaml::from_str(&conversion.yaml).unwrap_or_else(|e| {
+        let reloaded: ConfigSpec = yaml_serde::from_str(&conversion.yaml).unwrap_or_else(|e| {
             panic!(
                 "converted makefiles/{name}/Makefile does not load: {e}\n{}",
                 conversion.yaml
@@ -271,7 +304,7 @@ fn test_every_fixture_round_trips_through_config_spec() {
 }
 
 /// Every fixture's conversion must load through the *real* otto, not through
-/// `serde_yaml`.
+/// `yaml_serde`.
 ///
 /// `test_every_fixture_round_trips_through_config_spec` deserializes the
 /// converted YAML directly, which proves serde accepts the shape and nothing
@@ -461,7 +494,7 @@ clean:
 "#;
 
     let conversion = convert(simple_makefile.to_string());
-    let reloaded: ConfigSpec = serde_yaml::from_str(&conversion.yaml).expect("Failed to deserialize from YAML");
+    let reloaded: ConfigSpec = yaml_serde::from_str(&conversion.yaml).expect("Failed to deserialize from YAML");
 
     assert!(conversion.warnings.is_empty(), "{:?}", conversion.warnings);
     assert_eq!(reloaded, conversion.config);
@@ -732,4 +765,56 @@ fn test_space_indented_recipe_fails_the_command_with_the_line_number() {
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.contains("Makefile:6"), "{stderr}");
     assert!(stderr.contains("indented with spaces"), "{stderr}");
+}
+
+/// Every converting fixture's output loads through otto itself. The converter's
+/// consumer is the loader, and nothing checked that the two agreed: phase 5
+/// reserved the built-in command names at load, `Convert` kept emitting a
+/// `Clean:` target under that name, and the output it wrote at exit 0 failed
+/// `otto --tasks` with "defines reserved builtin command name". A golden
+/// compared as a `ConfigSpec` cannot see that; running the binary can.
+#[test]
+fn test_every_fixture_output_loads_through_otto() {
+    for name in converting_fixtures() {
+        let conversion = convert_fixture(&name);
+        let temp = TempDir::new().expect("tempdir");
+        let ottofile = temp.path().join("otto.yml");
+        fs::write(&ottofile, &conversion.yaml).expect("write converted ottofile");
+
+        // `--tasks` lists the graph without RESOLVING it, so it exits 0 on an
+        // ottofile carrying an edge to a task that does not exist. That is how
+        // `makefiles/expansion-dependency` came to ship an expected output on
+        // which `otto link` died with `Task 'package' has unknown dependency
+        // 'headers'`: this guard, which exists to catch exactly that, passed
+        // it. `Graph` builds the real DAG, so a dangling edge fails here.
+        let output = common::otto_cmd(temp.path())
+            .arg("-o")
+            .arg(&ottofile)
+            .arg("--tasks")
+            .output()
+            .expect("otto --tasks");
+        assert!(
+            output.status.success(),
+            "makefiles/{name}/Makefile converted to an ottofile otto itself rejects:\n{}\n--- output ---\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            conversion.yaml
+        );
+
+        let graph = common::otto_cmd(temp.path())
+            .arg("-o")
+            .arg(&ottofile)
+            .arg("Graph")
+            .output()
+            .expect("otto Graph");
+        let stderr = String::from_utf8_lossy(&graph.stderr);
+        // Asserted on the message rather than the exit code: several fixtures
+        // carry `envs:` whose commands need a git repo and fail in this temp
+        // dir, which is an artifact of where the test runs and not a defect in
+        // the conversion. A dangling edge is neither.
+        assert!(
+            !stderr.contains("unknown dependency"),
+            "makefiles/{name}/Makefile converted to an ottofile whose edges do not resolve:\n{stderr}\n--- output ---\n{}",
+            conversion.yaml
+        );
+    }
 }

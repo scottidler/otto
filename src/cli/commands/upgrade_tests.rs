@@ -133,8 +133,9 @@ fn command() -> UpgradeCommand {
         no_backup: false,
         backup_dir: None,
         github_token: None,
-        releases_url: None,
+        api_base: None,
         install_target: None,
+        current_version: None,
     }
 }
 
@@ -246,7 +247,7 @@ fn run_version(path: &Path) -> String {
 }
 
 #[tokio::test]
-async fn download_and_verify_keeps_the_archive_alive_after_the_call() {
+async fn download_and_check_checksum_keeps_the_archive_alive_after_the_call() {
     let scratch = tempfile::tempdir().unwrap();
     let tarball = fixture_tarball(scratch.path(), "9.9.9");
 
@@ -260,7 +261,7 @@ async fn download_and_verify_keeps_the_archive_alive_after_the_call() {
 
     let client = build_http_client(CONNECT_TIMEOUT, READ_TIMEOUT).unwrap();
     let archive = command()
-        .download_and_verify(&client, &format!("{}/otto.tar.gz", base))
+        .download_and_check_checksum(&client, &format!("{}/otto.tar.gz", base))
         .await
         .expect("download and verify");
 
@@ -275,7 +276,7 @@ async fn download_and_verify_keeps_the_archive_alive_after_the_call() {
 }
 
 #[tokio::test]
-async fn download_and_verify_rejects_a_checksum_mismatch() {
+async fn download_and_check_checksum_rejects_a_mismatch() {
     let scratch = tempfile::tempdir().unwrap();
     let tarball = fixture_tarball(scratch.path(), "9.9.9");
 
@@ -289,7 +290,7 @@ async fn download_and_verify_rejects_a_checksum_mismatch() {
 
     let client = build_http_client(CONNECT_TIMEOUT, READ_TIMEOUT).unwrap();
     let err = command()
-        .download_and_verify(&client, &format!("{}/otto.tar.gz", base))
+        .download_and_check_checksum(&client, &format!("{}/otto.tar.gz", base))
         .await
         .expect_err("a mismatched checksum must abort");
 
@@ -301,7 +302,7 @@ async fn download_and_verify_rejects_a_checksum_mismatch() {
 }
 
 #[tokio::test]
-async fn download_and_verify_rejects_a_missing_checksum_sibling() {
+async fn download_and_check_checksum_rejects_a_missing_sibling() {
     let scratch = tempfile::tempdir().unwrap();
     let tarball = fixture_tarball(scratch.path(), "9.9.9");
 
@@ -311,7 +312,7 @@ async fn download_and_verify_rejects_a_missing_checksum_sibling() {
 
     let client = build_http_client(CONNECT_TIMEOUT, READ_TIMEOUT).unwrap();
     let err = command()
-        .download_and_verify(&client, &format!("{}/otto.tar.gz", base))
+        .download_and_check_checksum(&client, &format!("{}/otto.tar.gz", base))
         .await
         .expect_err("a missing checksum must abort");
 
@@ -427,7 +428,7 @@ async fn upgrade_installs_a_fixture_release_end_to_end() {
     let client = build_http_client(CONNECT_TIMEOUT, READ_TIMEOUT).unwrap();
     let cmd = command();
     let archive = cmd
-        .download_and_verify(&client, &format!("{}/otto.tar.gz", base))
+        .download_and_check_checksum(&client, &format!("{}/otto.tar.gz", base))
         .await
         .expect("download and verify");
     cmd.install_from_archive(archive.path(), &target).expect("install");
@@ -618,56 +619,42 @@ fn platform_strings_match_the_published_asset_suffixes() {
 }
 
 #[test]
-fn test_platform_detection() {
-    let platform = PlatformInfo::detect().unwrap();
-    assert!(!platform.platform_str.is_empty());
-    assert!(
-        platform._os == "linux" || platform._os == "macos",
-        "Unexpected OS: {}",
-        platform._os
-    );
-}
-
-#[test]
-fn test_version_parsing() {
-    let v1 = Version::parse("0.5.5").unwrap();
-    let v2 = Version::parse("0.5.6").unwrap();
-    assert!(v1 < v2);
-}
-
-#[test]
+#[serial_test::serial]
 fn test_backup_dir_default() {
-    let cmd = UpgradeCommand {
-        dry_run: false,
-        version: None,
-        list_versions: false,
-        rollback: false,
-        force: false,
-        no_backup: false,
-        backup_dir: None,
-        github_token: None,
-        releases_url: None,
-        install_target: None,
-    };
+    let cmd = command();
 
-    let backup_dir = cmd.get_backup_dir().unwrap();
-    assert!(backup_dir.to_string_lossy().contains(".otto/backups"));
+    // `$OTTO_HOME` is what decides, so the test says which one it is rather
+    // than reading whatever the process happens to have. Serialized because the
+    // environment is process-global and other tests in this binary set it too.
+    let restore = std::env::var("OTTO_HOME").ok();
+    // SAFETY: `#[serial]` keeps this the only thread touching the environment.
+    unsafe { std::env::set_var("OTTO_HOME", "/tmp/otto-home-fixture") };
+    let with_otto_home = cmd.get_backup_dir().unwrap();
+    unsafe { std::env::remove_var("OTTO_HOME") };
+    let without_otto_home = cmd.get_backup_dir().unwrap();
+    if let Some(value) = restore {
+        // SAFETY: as above.
+        unsafe { std::env::set_var("OTTO_HOME", value) };
+    }
+
+    assert_eq!(
+        with_otto_home,
+        PathBuf::from("/tmp/otto-home-fixture/backups"),
+        "backups belong under the otto home, not under a rebuilt $HOME/.otto"
+    );
+    assert!(
+        without_otto_home.to_string_lossy().ends_with(".otto/backups"),
+        "unexpected default: {}",
+        without_otto_home.display()
+    );
 }
 
 #[test]
 fn test_backup_dir_custom() {
     let custom_path = PathBuf::from("/tmp/custom-backups");
     let cmd = UpgradeCommand {
-        dry_run: false,
-        version: None,
-        list_versions: false,
-        rollback: false,
-        force: false,
-        no_backup: false,
         backup_dir: Some(custom_path.clone()),
-        github_token: None,
-        releases_url: None,
-        install_target: None,
+        ..command()
     };
 
     let backup_dir = cmd.get_backup_dir().unwrap();
@@ -761,21 +748,27 @@ async fn fetch_releases_rejects_a_json_object_where_an_array_was_expected() {
     assert!(!err.to_string().is_empty());
 }
 
-/// Build the releases JSON GitHub would return for one published version.
-fn releases_json(version: &str, platform: &str, download_base: &str) -> Vec<u8> {
+/// The JSON object GitHub returns for one published release.
+fn release_json(version: &str, platform: &str, download_base: &str) -> String {
     format!(
-        r#"[{{"tag_name":"v{version}","name":"v{version}","published_at":"2026-01-01T00:00:00Z",
+        r#"{{"tag_name":"v{version}","name":"v{version}","published_at":"2026-01-01T00:00:00Z",
             "assets":[{{"name":"otto-v{version}-{platform}.tar.gz",
-                        "browser_download_url":"{download_base}/otto.tar.gz"}}]}}]"#
+                        "browser_download_url":"{download_base}/otto.tar.gz"}}]}}"#
     )
-    .into_bytes()
 }
 
-/// Two stubs, because the asset URL inside the releases JSON is absolute and the
-/// stub's port is not known until it is bound: one host serves the archive and
-/// its checksum, the other serves the release metadata pointing at the first.
-/// `digest_override` replaces the published checksum, for the mismatch case.
-fn spawn_fixture_release(scratch: &Path, version: &str, digest_override: Option<String>) -> String {
+/// One published release: a tarball and checksum on their own stub, plus the
+/// JSON that points at them.
+struct FixtureRelease {
+    version: String,
+    json: String,
+}
+
+/// Publish one fixture release. Its own stub serves the archive, because the
+/// asset URL inside the release JSON is absolute and a stub's port is not known
+/// until it is bound. `digest_override` replaces the published checksum, for the
+/// mismatch case.
+fn fixture_release(scratch: &Path, version: &str, digest_override: Option<String>) -> FixtureRelease {
     let platform = PlatformInfo::detect().expect("detect platform").platform_str;
     let tarball = fixture_tarball(scratch, version);
     let digest = digest_override.unwrap_or_else(|| sha256_hex(&tarball));
@@ -788,14 +781,47 @@ fn spawn_fixture_release(scratch: &Path, version: &str, digest_override: Option<
     );
     let download_base = spawn_stub(download_routes);
 
-    let mut meta_routes = HashMap::new();
-    meta_routes.insert(
-        "/releases".to_string(),
-        Route::Body(releases_json(version, &platform, &download_base)),
-    );
-    let meta_base = spawn_stub(meta_routes);
+    FixtureRelease {
+        version: version.to_string(),
+        json: release_json(version, &platform, &download_base),
+    }
+}
 
-    format!("{meta_base}/releases")
+/// Serve the three release endpoints `Upgrade` reads and return the API base
+/// `with_fixture` takes.
+///
+/// `latest` answers `/releases/latest`. `listing` answers `/releases` in the
+/// order given, which is GitHub's creation order and includes prereleases.
+/// `tagged` answers `/releases/tags/v<version>` and is deliberately its own
+/// list: a release too old for page 1 of the listing is reachable by tag and
+/// not by listing, which is the case `--version` used to fail on.
+fn spawn_release_api(latest: &FixtureRelease, listing: &[&FixtureRelease], tagged: &[&FixtureRelease]) -> String {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "/releases/latest".to_string(),
+        Route::Body(latest.json.clone().into_bytes()),
+    );
+
+    let array: Vec<&str> = listing.iter().map(|r| r.json.as_str()).collect();
+    routes.insert(
+        "/releases".to_string(),
+        Route::Body(format!("[{}]", array.join(",")).into_bytes()),
+    );
+
+    for release in tagged {
+        routes.insert(
+            format!("/releases/tags/v{}", release.version),
+            Route::Body(release.json.clone().into_bytes()),
+        );
+    }
+
+    spawn_stub(routes)
+}
+
+/// The single-release case: one version, reachable every way.
+fn spawn_fixture_release(scratch: &Path, version: &str, digest_override: Option<String>) -> String {
+    let release = fixture_release(scratch, version, digest_override);
+    spawn_release_api(&release, &[&release], &[&release])
 }
 
 /// Write a stand-in "installed otto" that reports `version`.
@@ -811,19 +837,19 @@ fn installed_binary(dir: &Path, version: &str) -> PathBuf {
 ///
 /// The phase's success criterion is "`otto Upgrade` completes an install
 /// end-to-end against a fixture release". The test that claimed it hand-composed
-/// `download_and_verify` + `install_from_archive`, skipping `current_version`,
+/// `download_and_check_checksum` + `install_from_archive`, skipping `current_version`,
 /// the already-on-target and downgrade short-circuits, `find_asset` and
 /// `create_backup` - it asserted its own transcription of the command body
 /// rather than the command. Found by the batched audit, batch 6 of 14.
 #[tokio::test]
 async fn execute_installs_a_fixture_release_end_to_end() {
     let scratch = tempfile::tempdir().expect("tempdir");
-    let releases_url = spawn_fixture_release(scratch.path(), "9.9.9", None);
+    let api_base = spawn_fixture_release(scratch.path(), "9.9.9", None);
     let target = installed_binary(scratch.path(), "0.0.1");
     assert_eq!(run_version(&target), "otto 0.0.1");
 
     command()
-        .with_fixture(releases_url, &target)
+        .with_fixture(api_base, &target)
         .tap_no_backup()
         .execute()
         .await
@@ -850,11 +876,11 @@ async fn execute_installs_a_fixture_release_end_to_end() {
 async fn execute_aborts_on_a_checksum_mismatch_without_touching_the_binary() {
     let scratch = tempfile::tempdir().expect("tempdir");
     // Well-formed digest, wrong tarball.
-    let releases_url = spawn_fixture_release(scratch.path(), "9.9.9", Some("a".repeat(64)));
+    let api_base = spawn_fixture_release(scratch.path(), "9.9.9", Some("a".repeat(64)));
     let target = installed_binary(scratch.path(), "0.0.1");
 
     let err = command()
-        .with_fixture(releases_url, &target)
+        .with_fixture(api_base, &target)
         .tap_no_backup()
         .execute()
         .await
@@ -937,7 +963,7 @@ async fn execute_rollback_with_no_backups_fails_and_leaves_the_binary() {
 #[tokio::test]
 async fn a_stale_staging_file_from_a_dead_pid_is_reaped() {
     let scratch = tempfile::tempdir().expect("tempdir");
-    let releases_url = spawn_fixture_release(scratch.path(), "9.9.9", None);
+    let api_base = spawn_fixture_release(scratch.path(), "9.9.9", None);
     let target = installed_binary(scratch.path(), "0.0.1");
     let dir = target.parent().expect("bin parent");
 
@@ -949,7 +975,7 @@ async fn a_stale_staging_file_from_a_dead_pid_is_reaped() {
     fs::write(&live, "a running process owns this").expect("write live");
 
     command()
-        .with_fixture(releases_url, &target)
+        .with_fixture(api_base, &target)
         .tap_no_backup()
         .execute()
         .await
@@ -1011,4 +1037,486 @@ fn pid_is_running_answers_a_pid_and_never_a_process_group() {
         !pid_is_running(0),
         "pid 0 means the caller's own process group to kill(2); it is never a pid to reap against"
     );
+}
+
+/// The default target is the release GitHub marks latest, not the newest entry
+/// on page 1 of the listing.
+///
+/// `/releases` is creation order and includes prereleases, so its first entry is
+/// whatever was cut most recently - the 9.9.10 prerelease here. `install.sh` has
+/// always read `/releases/latest`; this is `otto Upgrade` agreeing with it.
+#[tokio::test]
+async fn the_default_target_comes_from_the_latest_endpoint_not_the_listing() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let prerelease = fixture_release(scratch.path(), "9.9.10", None);
+    let latest = fixture_release(scratch.path(), "9.9.9", None);
+    // Creation order: the prerelease was cut last, so it is listed first.
+    let api_base = spawn_release_api(&latest, &[&prerelease, &latest], &[&prerelease, &latest]);
+    let target = installed_binary(scratch.path(), "0.0.1");
+
+    command()
+        .with_fixture(api_base, &target)
+        .tap_no_backup()
+        .execute()
+        .await
+        .expect("execute() must complete the install");
+
+    assert_eq!(
+        run_version(&target),
+        "otto 9.9.9",
+        "the default target must be the release GitHub calls latest, not the newest-created one"
+    );
+}
+
+/// `--version X` asks for the tag by name, so a release too old to be on page 1
+/// of the listing installs instead of reporting "Release vX not found".
+#[tokio::test]
+async fn an_explicit_version_is_fetched_by_tag_even_when_the_listing_omits_it() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let latest = fixture_release(scratch.path(), "9.9.9", None);
+    let off_page = fixture_release(scratch.path(), "9.9.8", None);
+    // The listing knows nothing about 9.9.8; only its tag route serves it.
+    let api_base = spawn_release_api(&latest, &[&latest], &[&latest, &off_page]);
+    let target = installed_binary(scratch.path(), "0.0.1");
+
+    let mut cmd = command().with_fixture(api_base, &target).tap_no_backup();
+    cmd.version = Some("9.9.8".to_string());
+    cmd.execute().await.expect("execute() must install the tagged release");
+
+    assert_eq!(run_version(&target), "otto 9.9.8");
+}
+
+/// A version that no release carries is still a named error.
+#[tokio::test]
+async fn an_unknown_explicit_version_names_the_release_it_could_not_find() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let latest = fixture_release(scratch.path(), "9.9.9", None);
+    let api_base = spawn_release_api(&latest, &[&latest], &[&latest]);
+    let target = installed_binary(scratch.path(), "0.0.1");
+
+    let mut cmd = command().with_fixture(api_base, &target).tap_no_backup();
+    cmd.version = Some("1.2.3".to_string());
+    let err = cmd.execute().await.expect_err("an unpublished version must fail");
+
+    assert!(
+        format!("{err:#}").contains("Release v1.2.3 not found"),
+        "the error must name the version, got: {err:#}"
+    );
+    assert_eq!(run_version(&target), "otto 0.0.1", "the binary must be untouched");
+}
+
+/// Rolling back twice walks the versions down instead of undoing itself.
+///
+/// A rollback writes a safety backup of the binary it replaces, so that file is
+/// the newest entry in the directory when the next rollback runs. Choosing "the
+/// newest backup" therefore restored the version the previous rollback had just
+/// left. Three versions in play, two rollbacks, and the binary must end on the
+/// oldest.
+#[tokio::test]
+async fn two_rollbacks_walk_down_to_the_oldest_backup() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let backup_dir = scratch.path().join("backups");
+    fs::create_dir_all(&backup_dir).expect("create backup dir");
+
+    for (version, timestamp) in [("1.0.0", 100), ("2.0.0", 200)] {
+        let backup = backup_dir.join(format!("otto-{version}-{timestamp}.backup"));
+        fs::write(&backup, format!("#!/bin/sh\necho \"otto {version}\"\n")).expect("write backup");
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o755)).expect("chmod backup");
+    }
+
+    let target = installed_binary(scratch.path(), "3.0.0");
+
+    // Each rollback is a separate process running the binary the previous one
+    // installed. `with_current_version` is how that is said: one process's own
+    // version is fixed at build time.
+    let mut first = command()
+        .with_fixture("http://127.0.0.1:1/unused", &target)
+        .with_current_version("3.0.0");
+    first.rollback = true;
+    first.backup_dir = Some(backup_dir.clone());
+    first.execute().await.expect("first rollback must succeed");
+    assert_eq!(
+        run_version(&target),
+        "otto 2.0.0",
+        "the first rollback goes back one version"
+    );
+
+    // The safety backup of 3.0.0 is now the newest file in the directory. It is
+    // the trap: "the newest backup" would restore the version just left.
+    let safety_backup_present = fs::read_dir(&backup_dir)
+        .expect("read backup dir")
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with("otto-3.0.0-"));
+    assert!(
+        safety_backup_present,
+        "the first rollback must have backed up the version it replaced"
+    );
+
+    let mut second = command()
+        .with_fixture("http://127.0.0.1:1/unused", &target)
+        .with_current_version("2.0.0");
+    second.rollback = true;
+    second.backup_dir = Some(backup_dir.clone());
+    second.execute().await.expect("second rollback must succeed");
+
+    assert_eq!(
+        run_version(&target),
+        "otto 1.0.0",
+        "the second rollback must go back another version, not undo the first"
+    );
+}
+
+/// The safety backup is written once per version, not once per rollback.
+#[tokio::test]
+async fn a_rollback_does_not_stack_a_second_backup_of_the_version_it_is_leaving() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let backup_dir = scratch.path().join("backups");
+    fs::create_dir_all(&backup_dir).expect("create backup dir");
+
+    for (version, timestamp) in [("1.0.0", 100), ("3.0.0", 300)] {
+        let backup = backup_dir.join(format!("otto-{version}-{timestamp}.backup"));
+        fs::write(&backup, format!("#!/bin/sh\necho \"otto {version}\"\n")).expect("write backup");
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o755)).expect("chmod backup");
+    }
+
+    let target = installed_binary(scratch.path(), "3.0.0");
+
+    let mut cmd = command()
+        .with_fixture("http://127.0.0.1:1/unused", &target)
+        .with_current_version("3.0.0");
+    cmd.rollback = true;
+    cmd.backup_dir = Some(backup_dir.clone());
+    cmd.execute().await.expect("rollback must succeed");
+
+    assert_eq!(run_version(&target), "otto 1.0.0");
+    let backups = cmd.list_backups().expect("list backups");
+    assert_eq!(
+        backups.len(),
+        2,
+        "v3.0.0 was already backed up, so no third file belongs here: {backups:?}"
+    );
+}
+
+#[test]
+fn rollback_refuses_a_backup_that_is_not_older_than_the_current_version() {
+    let backups = vec![
+        BackupInfo {
+            path: PathBuf::from("/backups/otto-3.0.0-300.backup"),
+            version: "3.0.0".to_string(),
+            timestamp: 300,
+        },
+        BackupInfo {
+            path: PathBuf::from("/backups/otto-2.0.0-200.backup"),
+            version: "2.0.0".to_string(),
+            timestamp: 200,
+        },
+    ];
+
+    // The newest backup is the safety backup of the version running now, and
+    // the other one is that same version's predecessor... which is what makes
+    // "newest wins" oscillate. Older wins instead.
+    let chosen = select_rollback_target(&backups, "3.0.0").expect("2.0.0 is older");
+    assert_eq!(chosen.version, "2.0.0");
+
+    // Nothing older at all is an error naming what is there, not a silent
+    // reinstall of the current version.
+    let err = select_rollback_target(&backups, "2.0.0").expect_err("nothing older than 2.0.0");
+    let message = format!("{err:#}");
+    assert!(message.contains("No backup older than the current v2.0.0"), "{message}");
+    assert!(
+        message.contains("v3.0.0"),
+        "the error must list what is present: {message}"
+    );
+}
+
+#[test]
+fn rollback_skips_a_backup_whose_version_is_not_a_semver() {
+    let backups = vec![
+        BackupInfo {
+            path: PathBuf::from("/backups/otto-nightly-400.backup"),
+            version: "nightly".to_string(),
+            timestamp: 400,
+        },
+        BackupInfo {
+            path: PathBuf::from("/backups/otto-1.0.0-100.backup"),
+            version: "1.0.0".to_string(),
+            timestamp: 100,
+        },
+    ];
+
+    // `~/.otto/backups` is a directory anything can write into, so an
+    // unorderable name is skipped rather than assumed to be older.
+    let chosen = select_rollback_target(&backups, "2.0.0").expect("1.0.0 is older");
+    assert_eq!(chosen.version, "1.0.0");
+}
+
+/// `git describe` past a tag names a build NEWER than that tag. Semver reads
+/// `2.2.1-27-g85bb8fb` as a PRERELEASE of 2.2.1, which sorts below the release,
+/// so every ordering built on `Version::parse` alone went the wrong way for a
+/// dev build.
+#[test]
+fn a_dev_build_orders_above_the_tag_it_descends_from() {
+    let dev = parse_build_version("v2.2.1-27-g85bb8fb").expect("a describe string is orderable");
+    let release = parse_build_version("2.2.1").expect("a tag is orderable");
+    let next = parse_build_version("2.2.2").expect("a tag is orderable");
+
+    assert!(dev > release, "27 commits past v2.2.1 is newer than v2.2.1, not older");
+    assert!(dev < next, "and still older than the next release");
+
+    // A genuine prerelease has no `-<n>-g<sha>` suffix, so it keeps semver's
+    // own ordering: rc.1 comes before the release it is a candidate for.
+    let rc = parse_build_version("2.3.0-rc.1").expect("a prerelease tag is orderable");
+    assert!(rc < parse_build_version("2.3.0").expect("a tag is orderable"));
+}
+
+/// A dirty working tree does not move a build's position in the version order.
+///
+/// `build.rs` does not pass `--dirty` today, and the point of handling it is
+/// that adding it would otherwise break this silently: the `-<n>-g<sha>` match
+/// fails on the extra field, semver reads the whole string as a prerelease of
+/// the tag, and a dev build sorts BELOW the release again.
+#[test]
+fn a_dirty_describe_string_orders_like_the_clean_one() {
+    let dirty_dev = parse_build_version("v2.2.1-27-g85bb8fb-dirty").expect("a dirty describe string is orderable");
+    let clean_dev = parse_build_version("v2.2.1-27-g85bb8fb").expect("a describe string is orderable");
+    let release = parse_build_version("2.2.1").expect("a tag is orderable");
+
+    assert_eq!(dirty_dev, clean_dev, "-dirty is not a position in the order");
+    assert!(dirty_dev > release, "27 commits past v2.2.1 is newer, dirty or not");
+
+    // A dirty build sitting exactly on the tag is still that tag.
+    assert_eq!(
+        parse_build_version("v2.2.1-dirty").expect("a dirty tag is orderable"),
+        release
+    );
+
+    // And a dirty sha is still a sha: refused, not guessed at.
+    let err = parse_build_version("85bb8fb-dirty").expect_err("a sha is not a version");
+    assert!(format!("{err:#}").contains("bare commit sha"), "{err:#}");
+}
+
+/// `git describe --tags --always` falls back to a bare sha in a checkout with
+/// no reachable tag, which used to reach the user as semver's own
+/// `unexpected character` with no hint of where the string came from.
+#[test]
+fn a_bare_sha_is_refused_with_a_reason() {
+    let err = parse_build_version("85bb8fb").expect_err("a sha is not a version");
+    let message = format!("{err:#}");
+    assert!(message.contains("bare commit sha"), "{message}");
+}
+
+#[test]
+fn rollback_refuses_a_dev_build_that_is_newer_than_the_current_version() {
+    let backups = vec![
+        BackupInfo {
+            path: PathBuf::from("/backups/otto-2.2.1-27-g85bb8fb-500.backup"),
+            version: "2.2.1-27-g85bb8fb".to_string(),
+            timestamp: 500,
+        },
+        BackupInfo {
+            path: PathBuf::from("/backups/otto-2.1.0-100.backup"),
+            version: "2.1.0".to_string(),
+            timestamp: 100,
+        },
+    ];
+
+    // The newest backup is a build 27 commits PAST the version running now.
+    // Read as a semver prerelease it looked older, so rollback restored a newer
+    // binary and called it a rollback.
+    let chosen = select_rollback_target(&backups, "2.2.1").expect("2.1.0 is older");
+    assert_eq!(chosen.version, "2.1.0");
+}
+
+/// The same ordering, through `execute()`: a dev build is not upgraded "up" to
+/// the release it descends from.
+#[tokio::test]
+async fn execute_refuses_to_downgrade_a_dev_build_to_its_own_base_tag() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let api_base = spawn_fixture_release(scratch.path(), "2.2.1", None);
+    let target = installed_binary(scratch.path(), "0.0.1");
+
+    command()
+        .with_fixture(api_base, &target)
+        .with_current_version("2.2.1-27-gcfc60e6")
+        .tap_no_backup()
+        .execute()
+        .await
+        .expect("a refused downgrade is not an error");
+
+    assert_eq!(
+        run_version(&target),
+        "otto 0.0.1",
+        "v2.2.1-27-gcfc60e6 is newer than v2.2.1; installing it is a downgrade and needs --force"
+    );
+}
+
+/// A staging copy that cannot be made executable takes its own file with it.
+///
+/// The copy has already succeeded at that point, so the old `?` returned and
+/// left `.otto.upgrade-<pid>` beside the binary until some later upgrade's
+/// reaper found it.
+#[test]
+fn a_staged_copy_is_removed_when_it_cannot_be_made_executable() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let target = scratch.path().join("otto");
+    fs::write(&target, "#!/bin/sh\necho \"otto 0.0.1\"\n").expect("write target");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).expect("chmod target");
+
+    let replacement = scratch.path().join("new-otto");
+    fs::write(&replacement, "#!/bin/sh\necho \"otto 9.9.9\"\n").expect("write replacement");
+
+    let err = stage_beside_with(&replacement, &target, |_| Err(eyre!("chmod refused")))
+        .expect_err("a failing permission step must fail the staging");
+    assert!(format!("{err:#}").contains("chmod refused"), "unexpected: {err:#}");
+
+    let debris: Vec<String> = fs::read_dir(scratch.path())
+        .expect("read scratch dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with(".otto.upgrade-"))
+        .collect();
+    assert!(debris.is_empty(), "staging debris left behind: {debris:?}");
+    assert_eq!(run_version(&target), "otto 0.0.1", "the target must be untouched");
+}
+
+/// The `--dry-run` plan names the file the real run downloads.
+///
+/// The plan printed `otto-{version}-{platform}.tar.gz` while `find_asset` looked
+/// for `otto-v{version}-...`, so the plan named a file no release publishes.
+#[test]
+fn the_dry_run_plan_names_the_asset_find_asset_looks_for() {
+    let platform = PlatformInfo::detect().expect("detect platform");
+    let published = asset_name("9.9.9", &platform.platform_str);
+
+    let steps = command()
+        .dry_run_steps("9.9.9", &platform)
+        .expect("dry-run steps must render");
+    assert!(
+        steps[0].contains(&published),
+        "step 1 must name the published asset {published}, got: {}",
+        steps[0]
+    );
+
+    // ...and that is exactly the name `find_asset` accepts.
+    let release = GitHubRelease {
+        tag_name: "v9.9.9".to_string(),
+        published_at: "2026-01-01T00:00:00Z".to_string(),
+        assets: vec![GitHubAsset {
+            name: published.clone(),
+            browser_download_url: "http://example.invalid/a.tar.gz".to_string(),
+        }],
+    };
+    assert_eq!(
+        command()
+            .find_asset(&release, &platform.platform_str)
+            .expect("find asset")
+            .name,
+        published
+    );
+
+    // The spelling the plan used to print is not a published asset.
+    let mispublished = GitHubRelease {
+        tag_name: "v9.9.9".to_string(),
+        published_at: "2026-01-01T00:00:00Z".to_string(),
+        assets: vec![GitHubAsset {
+            name: format!("otto-9.9.9-{}.tar.gz", platform.platform_str),
+            browser_download_url: "http://example.invalid/a.tar.gz".to_string(),
+        }],
+    };
+    assert!(
+        command().find_asset(&mispublished, &platform.platform_str).is_err(),
+        "the old dry-run spelling must not be mistaken for a published asset"
+    );
+}
+
+/// The plan is a promise about the order the real run works in. It listed the
+/// backup before the checksum while `execute_upgrade` verifies the download
+/// first, so a reader who hit a checksum failure went looking for a backup that
+/// was never written.
+#[test]
+fn the_dry_run_plan_checks_the_checksum_before_it_makes_a_backup() {
+    let platform = PlatformInfo::detect().expect("detect platform");
+
+    let steps = command()
+        .dry_run_steps("9.9.9", &platform)
+        .expect("dry-run steps must render");
+
+    let checksum = steps
+        .iter()
+        .position(|s| s.contains("checksum"))
+        .unwrap_or_else(|| panic!("the plan must name the checksum step: {steps:?}"));
+    let backup = steps
+        .iter()
+        .position(|s| s.contains("Create backup"))
+        .unwrap_or_else(|| panic!("the plan must name the backup step: {steps:?}"));
+
+    assert!(
+        checksum < backup,
+        "execute_upgrade verifies the download before it backs anything up: {steps:?}"
+    );
+}
+
+/// Every step in the plan is numbered from its position, so `--no-backup`
+/// cannot print "1, 3, 4, 5" again.
+#[test]
+fn the_dry_run_plan_drops_the_backup_step_without_leaving_a_gap() {
+    let platform = PlatformInfo::detect().expect("detect platform");
+
+    let with_backup = command()
+        .dry_run_steps("9.9.9", &platform)
+        .expect("dry-run steps must render");
+    assert!(
+        with_backup.iter().any(|s| s.contains("Create backup")),
+        "{with_backup:?}"
+    );
+
+    let without_backup = command()
+        .tap_no_backup()
+        .dry_run_steps("9.9.9", &platform)
+        .expect("dry-run steps must render");
+    assert!(
+        !without_backup.iter().any(|s| s.contains("Create backup")),
+        "{without_backup:?}"
+    );
+    assert_eq!(
+        without_backup.len(),
+        with_backup.len() - 1,
+        "only the backup step may disappear: {without_backup:?}"
+    );
+
+    // The numbering the plan prints is the position in this list, so it is
+    // contiguous by construction; this pins the render that relies on it.
+    let rendered: Vec<String> = without_backup
+        .iter()
+        .enumerate()
+        .map(|(i, step)| format!("  {}. {}", i + 1, step))
+        .collect();
+    assert!(rendered[1].starts_with("  2. "), "{rendered:?}");
+}
+
+/// The "(latest)" marker names the release GitHub calls latest, not whichever
+/// release was created most recently.
+#[test]
+fn the_latest_marker_follows_the_latest_endpoint_not_the_listing_order() {
+    let releases = vec![
+        GitHubRelease {
+            tag_name: "v9.9.10".to_string(),
+            published_at: "2026-02-02T00:00:00Z".to_string(),
+            assets: Vec::new(),
+        },
+        GitHubRelease {
+            tag_name: "v9.9.9".to_string(),
+            published_at: "2026-01-01T00:00:00Z".to_string(),
+            assets: Vec::new(),
+        },
+    ];
+
+    let lines = command().version_lines(&releases, Some("v9.9.9"));
+    assert!(!lines[0].contains("(latest)"), "{lines:?}");
+    assert!(lines[1].contains("(latest)"), "{lines:?}");
+    assert!(lines[1].contains("2026-01-01"), "{lines:?}");
+
+    // No answer from `/releases/latest` means no marker, not a guess.
+    let unmarked = command().version_lines(&releases, None);
+    assert!(!unmarked.iter().any(|l| l.contains("(latest)")), "{unmarked:?}");
 }

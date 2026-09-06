@@ -14,7 +14,6 @@ use crate::executor::task::TaskEdge;
 
 use clap::{Arg, ArgMatches, Command, value_parser};
 use daggy::Dag;
-use expanduser::expanduser;
 use eyre::{Context, Result, eyre};
 use glob;
 use hex;
@@ -115,7 +114,14 @@ pub fn is_valid_ottofile_name(filename: &str) -> bool {
     OTTOFILES.contains(&filename)
 }
 
-static DEFAULT_JOBS: LazyLock<String> = LazyLock::new(|| num_cpus::get().to_string());
+/// Number of CPUs to default `--jobs` to. `available_parallelism()` returns an
+/// `io::Result` because the count is genuinely unknowable on some platforms;
+/// 1 is the same conservative fallback the crate this replaced used.
+fn default_jobs() -> usize {
+    std::thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1)
+}
+
+static DEFAULT_JOBS: LazyLock<String> = LazyLock::new(|| default_jobs().to_string());
 
 /// Largest edit distance at which an unknown task name is worth suggesting a
 /// replacement for. Beyond this the "did you mean" is noise, not help.
@@ -244,13 +250,20 @@ fn canonical_choice<'a>(value: &str, choices: &'a [String]) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// Strip a `--tui` that landed in a task's arguments, reporting whether it was there.
+/// Strip a `--tui`/`-t` that landed in a task's arguments, reporting whether it
+/// was there.
 ///
 /// `--tui` is `.global(true)`, which clap does not propagate into external
 /// subcommands - and every otto task is an external subcommand - so
-/// `otto build --tui` failed with `unexpected argument '--tui'`. Anything after
-/// a `--` belongs to the task verbatim and is left alone.
-fn take_tui_flag(args: Vec<String>) -> (Vec<String>, bool) {
+/// `otto build --tui` failed with `unexpected argument '--tui'`. The declared
+/// short (`-t`) was not stripped alongside it, so `otto build -t` failed the
+/// same way against a flag `--help` says is global.
+///
+/// `take_short` is false when some task named in the same arg list declares its
+/// own `-t`: then the token is that task's, not otto's, and eating it here
+/// would make a declared param unreachable. Anything after a `--` belongs to
+/// the task verbatim and is left alone.
+fn take_tui_flag(args: Vec<String>, take_short: bool) -> (Vec<String>, bool) {
     let mut found = false;
     let mut kept = Vec::with_capacity(args.len());
     let mut iter = args.into_iter();
@@ -259,7 +272,7 @@ fn take_tui_flag(args: Vec<String>) -> (Vec<String>, bool) {
             kept.push(arg);
             break;
         }
-        if arg == "--tui" {
+        if arg == "--tui" || (take_short && arg == "-t") {
             found = true;
             continue;
         }
@@ -267,6 +280,38 @@ fn take_tui_flag(args: Vec<String>) -> (Vec<String>, bool) {
     }
     kept.extend(iter);
     (kept, found)
+}
+
+/// Reject a task list that names both a builtin and an ordinary task.
+///
+/// A builtin is dispatched by `app::find_builtin`, which returns on the first
+/// one it finds, so `otto build Clean` ran `Clean` and dropped `build` on the
+/// floor with exit 0 - the user asked for two things, otto did one and said
+/// nothing. The two cannot be combined (a builtin is not scheduled in the DAG),
+/// so the honest answer is an error naming both sides.
+fn reject_mixed_task_list(tasks_to_run: &[String]) -> Result<()> {
+    let (builtins, others): (Vec<&str>, Vec<&str>) = tasks_to_run
+        .iter()
+        .map(String::as_str)
+        .partition(|name| is_builtin(name));
+    if builtins.is_empty() || others.is_empty() {
+        return Ok(());
+    }
+    Err(eyre!(
+        "cannot run builtin command(s) {} together with task(s) {}: \
+         a builtin command runs on its own",
+        quoted_list(&builtins),
+        quoted_list(&others)
+    ))
+}
+
+/// `a`, `b` -> `'a', 'b'`, for an error that has to name every offender.
+fn quoted_list(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// True when `flag` appears in `args` as a flag, not as some option's value.
@@ -329,7 +374,10 @@ fn unconsumed_args<'a>(args: &'a [String], task_names: &[String]) -> Option<&'a 
 fn nearest_task_name<'a>(unknown: &str, task_names: &'a [String]) -> Option<&'a str> {
     task_names
         .iter()
-        .filter(|name| name.as_str() != "graph" && name.as_str() != "help")
+        // `help` is a partition-only entry, not a task to suggest. The
+        // lowercase `"graph"` that used to be filtered here never appeared in
+        // a production name list: the builtin is `Graph`.
+        .filter(|name| name.as_str() != "help")
         .map(|name| (levenshtein::levenshtein(unknown, name), name.as_str()))
         .filter(|(distance, name)| *distance <= MAX_SUGGESTION_DISTANCE && *distance < name.len())
         .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)))
@@ -363,10 +411,9 @@ fn required_param_error(task_name: &str, missing: &[&str]) -> eyre::Report {
 
 /// The clap `num_args` range implied by a param's `nargs:`.
 ///
-/// `Nargs::Range(min, max)` stores `min` already offset by one (see
-/// `cfg/param.rs`'s `Serialize`/`Deserialize`, which round-trip `nargs:
-/// "2:5"` through `Range(1, 5)`), so the count a user actually wrote back is
-/// `min + 1`.
+/// `Nargs::Range(min, max)` stores the counts the user wrote: `nargs: "2:5"`
+/// is `Range(2, 5)` and a bare `nargs: "3"` is `Range(3, 3)`, which clap
+/// reads as exactly three values.
 fn nargs_to_num_args(nargs: &Nargs) -> clap::builder::ValueRange {
     match nargs {
         Nargs::One => (1..=1).into(),
@@ -374,13 +421,17 @@ fn nargs_to_num_args(nargs: &Nargs) -> clap::builder::ValueRange {
         Nargs::OneOrZero => (0..=1).into(),
         Nargs::OneOrMore => (1..).into(),
         Nargs::ZeroOrMore => (0..).into(),
-        Nargs::Range(min, max) => (*min + 1..=*max).into(),
+        Nargs::Range(min, max) => (*min..=*max).into(),
     }
 }
 
-fn calculate_hash(action: &str) -> String {
+/// The first 8 hex digits of `content`'s sha256.
+///
+/// One function for both callers: a task's action hash and the ottofile's
+/// project hash were the same four lines written twice, in two files.
+fn short_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(action);
+    hasher.update(content);
     let result = hasher.finalize();
     hex::encode(result)[..8].to_string()
 }
@@ -417,17 +468,6 @@ fn ottofile_parse_error_message(ottofile: &std::path::Path, err: &eyre::Report) 
         err
     )
 }
-
-#[derive(Debug)]
-pub struct OttofileNotFound;
-
-impl std::fmt::Display for OttofileNotFound {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", ottofile_not_found_message())
-    }
-}
-
-impl std::error::Error for OttofileNotFound {}
 
 /// Serial foreach group membership: subtask name -> (group name, order index).
 type SerialMembership = HashMap<String, (String, usize)>;
@@ -522,7 +562,7 @@ impl Task {
         values: HashMap<String, Value>,
         action: String,
     ) -> Self {
-        let hash = calculate_hash(&action);
+        let hash = short_hash(&action);
         Self {
             name,
             task_deps,
@@ -667,9 +707,7 @@ enum BuildMode {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Parser {
-    prog: String,
     cwd: PathBuf,
-    user: String,
     config_spec: ConfigSpec,
     hash: String,
     args: Vec<String>,
@@ -685,20 +723,16 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(args: Vec<String>) -> Result<Self> {
-        let prog = args.first().cloned().unwrap_or_else(|| "otto".to_string());
         let cwd = crate::executor::workspace::current_dir()?;
-        let user = env::var("USER").unwrap_or_else(|_| "unknown".to_string());
 
         Ok(Self {
-            prog,
             cwd,
-            user,
             config_spec: ConfigSpec::default(),
             hash: String::new(),
             args,
             pargs: Vec::new(),
             ottofile: None,
-            jobs: num_cpus::get(), // Default to number of CPUs
+            jobs: default_jobs(),
             resolver: DynamicResolver::new(),
         })
     }
@@ -848,15 +882,20 @@ impl Parser {
                                     match Self::load_config_from_path(Some(path.clone())) {
                                         Ok((config_spec, _, _)) => {
                                             let mut temp_parser = Self {
-                                                prog: self.prog.clone(),
                                                 cwd: self.cwd.clone(),
-                                                user: self.user.clone(),
                                                 config_spec,
                                                 hash: String::new(),
                                                 args: self.args.clone(),
                                                 pargs: Vec::new(),
-                                                ottofile: None,
-                                                jobs: num_cpus::get(),
+                                                // The real path, not `None`:
+                                                // `base_dir()` reads this, so
+                                                // help used to resolve foreach
+                                                // globs against the cwd instead
+                                                // of the ottofile's directory
+                                                // and rendered `[0 items]` from
+                                                // a subdirectory.
+                                                ottofile: Some(path.clone()),
+                                                jobs: default_jobs(),
                                                 resolver: DynamicResolver::new(),
                                             };
                                             temp_parser.inject_builtin_commands();
@@ -934,8 +973,10 @@ impl Parser {
         self.hash = hash;
         self.ottofile = ottofile;
 
-        if !jobs_explicit {
-            self.jobs = self.config_spec.otto.jobs;
+        // `otto.jobs` is an `Option`: absent leaves the CPU-count default that
+        // clap already filled in, present overrides it.
+        if !jobs_explicit && let Some(jobs) = self.config_spec.otto.jobs {
+            self.jobs = jobs;
         }
 
         // Inject built-in commands
@@ -991,7 +1032,8 @@ impl Parser {
 
         // `--tui` is global but clap does not push global flags into external
         // subcommands, so `otto build --tui` arrives here as a task argument.
-        let (remaining_args, tui_in_task_args) = take_tui_flag(remaining_args);
+        let take_short_t = !self.args_claim_short(&remaining_args, 't');
+        let (remaining_args, tui_in_task_args) = take_tui_flag(remaining_args, take_short_t);
         tui_mode = tui_mode || tui_in_task_args;
 
         // Handle help commands
@@ -1025,6 +1067,10 @@ impl Parser {
             self.extract_task_names_from_partitions()
         };
 
+        // A builtin runs alone; naming one alongside an ordinary task used to
+        // run the builtin and silently drop the rest.
+        reject_mixed_task_list(&tasks_to_run)?;
+
         // Process tasks and build DAG
         let tasks = self.process_tasks_with_filter(&tasks_to_run)?;
 
@@ -1045,43 +1091,21 @@ impl Parser {
             // Parse command line arguments to extract ottofile path (similar to main parse method)
             let otto_cmd = Self::otto_command();
 
-            // Try to parse with allow_external_subcommands to capture ottofile flag
-            let matches = match otto_cmd.try_get_matches_from(&self.args) {
-                Ok(m) => m,
-                Err(_) => {
-                    // Parsing failed, so read the flag and env directly rather
-                    // than divining from the cwd and ignoring what was asked for.
-                    let ottofile_value = ottofile_value_from_args(&self.args, env::var("OTTOFILE").ok());
-                    let ottofile_path = Self::divine_ottofile(ottofile_value)?;
-                    let (config_spec, hash, ottofile) = Self::load_config_from_path(ottofile_path)?;
-
-                    self.config_spec = config_spec;
-                    self.hash = hash;
-                    self.ottofile = ottofile;
-
-                    let all_task_names: Vec<String> = self
-                        .config_spec
-                        .tasks
-                        .keys()
-                        .filter(|name| !is_builtin(name))
-                        .cloned()
-                        .collect();
-
-                    // Process all tasks
-                    let tasks = self.process_tasks_with_filter(&all_task_names)?;
-
-                    return Ok((tasks, self.hash.clone(), self.ottofile.clone()));
-                }
+            // Both branches want one thing - where to look for the ottofile -
+            // and then load it identically, so only that differs here. They
+            // used to be two copies of the whole load-and-process tail.
+            let ottofile_value = match otto_cmd.try_get_matches_from(&self.args) {
+                // Clap handles the env var. No clap default: absent means
+                // Divine, which is a state and not a path. `expect`ing a value
+                // here is what the `"."` sentinel existed to satisfy.
+                Ok(matches) => matches
+                    .get_one::<String>("ottofile")
+                    .cloned()
+                    .map_or(OttofileSource::Divine, OttofileSource::Explicit),
+                // Parsing failed, so read the flag and env directly rather
+                // than divining from the cwd and ignoring what was asked for.
+                Err(_) => ottofile_value_from_args(&self.args, env::var("OTTOFILE").ok()),
             };
-
-            // Extract ottofile path from parsed arguments (Clap handles env var automatically)
-            // No clap default: absent means Divine, which is a state and not a
-            // path. `expect`ing a value here is what the `"."` sentinel existed
-            // to satisfy.
-            let ottofile_value = matches
-                .get_one::<String>("ottofile")
-                .cloned()
-                .map_or(OttofileSource::Divine, OttofileSource::Explicit);
 
             let ottofile_path = Self::divine_ottofile(ottofile_value)?;
             let (config_spec, hash, ottofile) = Self::load_config_from_path(ottofile_path)?;

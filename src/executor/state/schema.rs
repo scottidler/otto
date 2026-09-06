@@ -111,11 +111,14 @@ impl SkipKind {
     }
 }
 
-/// The `runs` table as of schema v5.
+/// Every column of the `runs` table as of schema v5, without the
+/// `CREATE TABLE ...` wrapper.
 ///
-/// Shared by `init_schema` and the v4-to-v5 rebuild so a freshly created
-/// database and a migrated one cannot drift apart.
-const RUNS_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS runs (
+/// Shared by `init_schema` (wrapped as `runs`) and the v4-to-v5 rebuild
+/// (wrapped as `runs_v5`, then renamed) so a freshly created database and a
+/// migrated one cannot drift apart. `migrate_v4_to_v5` used to carry its own
+/// inline copy of this column list.
+const RUNS_TABLE_COLUMNS: &str = "
     id INTEGER PRIMARY KEY,
     project_id INTEGER NOT NULL,
     timestamp INTEGER NOT NULL,
@@ -130,7 +133,7 @@ const RUNS_TABLE_DDL: &str = "CREATE TABLE IF NOT EXISTS runs (
     ended_at INTEGER,
     run_dir TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-)";
+";
 
 /// Initialize the database schema
 pub fn init_schema(conn: &Connection) -> Result<()> {
@@ -162,7 +165,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     // `timestamp` is deliberately not UNIQUE: it has one-second resolution, so
     // two runs started in the same second are ordinary, not a conflict. Runs are
     // identified by `id`.
-    conn.execute(RUNS_TABLE_DDL, [])?;
+    conn.execute(&format!("CREATE TABLE IF NOT EXISTS runs ({RUNS_TABLE_COLUMNS})"), [])?;
 
     // Runs indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON runs(timestamp)", [])?;
@@ -259,18 +262,7 @@ pub fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
         .collect::<Result<Vec<_>, _>>()?;
 
     for (id, hash, ottofile_path) in projects {
-        let name = if let Some(path) = ottofile_path {
-            // Extract parent directory name from ottofile path
-            // e.g., "/home/user/repos/otto/otto.yml" -> "otto"
-            std::path::Path::new(&path)
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or(&hash)
-                .to_string()
-        } else {
-            hash.clone()
-        };
+        let name = crate::naming::project_name_from(ottofile_path.as_deref().map(std::path::Path::new), &hash);
 
         conn.execute("UPDATE projects SET name = ?1 WHERE id = ?2", [&name, &id.to_string()])?;
     }
@@ -302,23 +294,8 @@ pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
     if column_exists(conn, "runs", "run_dir")? {
         return Ok(());
     }
-    conn.execute_batch(
-        "CREATE TABLE runs_v5 (
-            id INTEGER PRIMARY KEY,
-            project_id INTEGER NOT NULL,
-            timestamp INTEGER NOT NULL,
-            status TEXT NOT NULL,
-            duration_seconds REAL,
-            size_bytes INTEGER,
-            ottofile_path TEXT,
-            cwd TEXT,
-            user TEXT,
-            hostname TEXT,
-            args TEXT,
-            ended_at INTEGER,
-            run_dir TEXT,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-         );
+    conn.execute_batch(&format!(
+        "CREATE TABLE runs_v5 ({RUNS_TABLE_COLUMNS});
          INSERT INTO runs_v5 (id, project_id, timestamp, status, duration_seconds, size_bytes,
                               ottofile_path, cwd, user, hostname, args, ended_at)
               SELECT id, project_id, timestamp, status, duration_seconds, size_bytes,
@@ -328,8 +305,8 @@ pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
          ALTER TABLE runs_v5 RENAME TO runs;
          CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON runs(timestamp);
          CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
-         CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);",
-    )?;
+         CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);"
+    ))?;
     Ok(())
 }
 

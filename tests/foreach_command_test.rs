@@ -319,7 +319,10 @@ tasks:
     assert_eq!(stdout(&output), "");
     let err = stderr(&output);
     assert!(err.contains("Task 'up'"), "{err}");
-    assert!(err.contains("cannot be combined with items"), "{err}");
+    // The message names every source it found, not just the static one: the
+    // check counts all four rather than treating `command` as the special case.
+    assert!(err.contains("declares command and items"), "{err}");
+    assert!(err.contains("exactly one source"), "{err}");
 }
 
 #[test]

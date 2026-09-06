@@ -2,42 +2,10 @@ use eyre::{Context, Result};
 use rusqlite::Connection;
 use std::time::SystemTime;
 
+use super::db::TransactionGuard;
 use super::schema::{
     SCHEMA_VERSION, init_schema, migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5,
 };
-
-/// A `BEGIN IMMEDIATE` transaction over a shared `&Connection`.
-///
-/// `Connection::transaction_with_behavior` needs `&mut Connection`, which the
-/// migration path does not have, and `unchecked_transaction` only gives the
-/// deferred behavior that cannot wait on a write lock. This drives the statements
-/// directly and rolls back on drop if `commit` was never called.
-struct TransactionGuard<'c> {
-    conn: &'c Connection,
-    committed: bool,
-}
-
-impl<'c> TransactionGuard<'c> {
-    fn immediate(conn: &'c Connection) -> Result<Self> {
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .context("Failed to begin an immediate transaction")?;
-        Ok(Self { conn, committed: false })
-    }
-
-    fn commit(mut self) -> Result<()> {
-        self.conn.execute_batch("COMMIT").context("Failed to commit")?;
-        self.committed = true;
-        Ok(())
-    }
-}
-
-impl Drop for TransactionGuard<'_> {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = self.conn.execute_batch("ROLLBACK");
-        }
-    }
-}
 
 pub fn get_current_version(conn: &Connection) -> Result<i64> {
     let table_exists: bool = conn
@@ -87,6 +55,29 @@ fn set_version(conn: &Connection, version: i64) -> Result<()> {
     Ok(())
 }
 
+/// Apply one upgrade step and its version bump as a single immediate
+/// transaction.
+///
+/// Every step reads before it writes: `column_exists` decides whether the ALTER
+/// is needed, and the version is re-read here to decide whether the step is
+/// needed at all. A deferred transaction cannot serve that shape - see
+/// [`TransactionGuard`] - so the write lock is taken up front.
+///
+/// The version is re-read *inside* the transaction because the read that
+/// scheduled this step happened outside it: a concurrent process may have
+/// applied the whole step in between, and then this one has nothing to do. That
+/// also makes an interrupted upgrade safe to resume: the step's own
+/// `column_exists` guard turns the replay into a no-op and only the version bump
+/// lands.
+fn migrate_step(conn: &Connection, target: i64, step: impl FnOnce(&Connection) -> Result<()>) -> Result<()> {
+    let tx = TransactionGuard::immediate(conn)?;
+    if get_current_version(conn)? < target {
+        step(conn)?;
+        set_version(conn, target)?;
+    }
+    tx.commit()
+}
+
 /// Run all pending migrations
 pub fn migrate(conn: &Connection) -> Result<()> {
     let current_version = get_current_version(conn)?;
@@ -119,26 +110,25 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         }
         tx.commit()?;
     } else if current_version < SCHEMA_VERSION {
-        // Run migrations in order. Step and version bump go in one transaction:
-        // a crash between them leaves a database whose recorded version lies
-        // about its shape, and the retry then dies on a duplicate column.
+        // Run migrations in order. Step and version bump go in one immediate
+        // transaction: a crash between them leaves a database whose recorded
+        // version lies about its shape, and a deferred transaction around a
+        // read-then-write step hands a concurrent upgrader SQLITE_BUSY with no
+        // wait. Both were live defects; `migrate_step` documents the mechanics.
         if current_version < 2 {
-            let tx = conn.unchecked_transaction()?;
-            migrate_v1_to_v2(conn).context("Failed to migrate from v1 to v2")?;
-            set_version(conn, 2)?;
-            tx.commit()?;
+            migrate_step(conn, 2, |conn| {
+                migrate_v1_to_v2(conn).context("Failed to migrate from v1 to v2")
+            })?;
         }
         if current_version < 3 {
-            let tx = conn.unchecked_transaction()?;
-            migrate_v2_to_v3(conn).context("Failed to migrate from v2 to v3")?;
-            set_version(conn, 3)?;
-            tx.commit()?;
+            migrate_step(conn, 3, |conn| {
+                migrate_v2_to_v3(conn).context("Failed to migrate from v2 to v3")
+            })?;
         }
         if current_version < 4 {
-            let tx = conn.unchecked_transaction()?;
-            migrate_v3_to_v4(conn).context("Failed to migrate from v3 to v4")?;
-            set_version(conn, 4)?;
-            tx.commit()?;
+            migrate_step(conn, 4, |conn| {
+                migrate_v3_to_v4(conn).context("Failed to migrate from v3 to v4")
+            })?;
         }
         if current_version < 5 {
             // The runs rebuild drops and recreates a table that `tasks`
@@ -147,13 +137,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             // restored whether the step succeeds or fails.
             conn.pragma_update(None, "foreign_keys", "OFF")
                 .context("Failed to disable foreign keys for the v4 to v5 rebuild")?;
-            let rebuilt = (|| -> Result<()> {
-                let tx = conn.unchecked_transaction()?;
-                migrate_v4_to_v5(conn).context("Failed to migrate from v4 to v5")?;
-                set_version(conn, 5)?;
-                tx.commit()?;
-                Ok(())
-            })();
+            let rebuilt = migrate_step(conn, 5, |conn| {
+                migrate_v4_to_v5(conn).context("Failed to migrate from v4 to v5")
+            });
             conn.pragma_update(None, "foreign_keys", "ON")
                 .context("Failed to re-enable foreign keys after the v4 to v5 rebuild")?;
             rebuilt?;

@@ -1,14 +1,13 @@
-use crate::executor::layout::{resolve_otto_home, run_dir_name, run_root};
+use crate::executor::layout::{expand_tilde, resolve_otto_home, run_dir_name, run_root};
 use crate::ports::{FileSystem, RealFs, StateStore, record_blocking};
-use expanduser::expanduser;
 use eyre::{Result, eyre};
 use log::warn;
 use serde::{Deserialize, Serialize};
-use serde_yaml;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
+use yaml_serde;
 
 use super::state::{RunMetadata, StateManager};
 
@@ -112,7 +111,7 @@ impl Workspace {
 impl<F: FileSystem> Workspace<F> {
     /// Create a new Workspace with a custom filesystem implementation
     pub async fn new_with_fs(root: PathBuf, fs: Arc<F>) -> Result<Self> {
-        let root = expanduser(root.to_string_lossy())?;
+        let root = expand_tilde(&root);
 
         // Get canonical project root, creating parent dirs if needed
         let root = if !root.exists() {
@@ -259,11 +258,6 @@ impl<F: FileSystem> Workspace<F> {
         &self.fs
     }
 
-    /// Get path for a cached script
-    pub fn script_cache(&self, task: &str, hash: &str) -> PathBuf {
-        self.cache.join(task).join(hash)
-    }
-
     /// Get task directory for current run
     pub fn task(&self, name: &str) -> PathBuf {
         self.run.join("tasks").join(name)
@@ -346,7 +340,7 @@ impl<F: FileSystem> Workspace<F> {
     pub async fn save_execution_context(&self, context: ExecutionContext) -> Result<()> {
         let run_yaml_path = self.metadata("run");
         let yaml_content =
-            serde_yaml::to_string(&context).map_err(|e| eyre!("Failed to serialize execution context: {}", e))?;
+            yaml_serde::to_string(&context).map_err(|e| eyre!("Failed to serialize execution context: {}", e))?;
 
         self.fs
             .write(&run_yaml_path, yaml_content.as_bytes())
@@ -366,13 +360,20 @@ impl<F: FileSystem> Workspace<F> {
 
         // Convert ExecutionContext to RunMetadata. The run directory is
         // recorded, not left to be reconstructed later from a guess.
+        //
+        // The hostname comes from `current_system_info`, which existed for this
+        // and had no production caller: every history row was written with a
+        // NULL hostname while `docs/history.md`'s JSON example promised one.
+        // The user still comes from the context, which resolved it once at run
+        // start and is what `run.yaml` records.
+        let (_, hostname) = RunMetadata::current_system_info();
         let metadata = RunMetadata::full(
             context.ottofile.clone(),
             context.hash.clone(),
             context.timestamp,
             Some(context.cwd.clone()),
             Some(context.user.clone()),
-            None, // hostname not in ExecutionContext yet
+            hostname,
             Some(context.args.clone()),
         )
         .with_run_dir(self.run.clone());
@@ -451,7 +452,7 @@ impl<F: FileSystem> Workspace<F> {
     pub async fn save_task_context(&self, task_name: &str, context: &ExecutionContext) -> Result<()> {
         let task_run_yaml = self.task(task_name).join("run.yaml");
         let yaml_content =
-            serde_yaml::to_string(context).map_err(|e| eyre!("Failed to serialize task context: {}", e))?;
+            yaml_serde::to_string(context).map_err(|e| eyre!("Failed to serialize task context: {}", e))?;
 
         self.fs
             .write(&task_run_yaml, yaml_content.as_bytes())

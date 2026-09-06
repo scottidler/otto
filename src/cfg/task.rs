@@ -38,6 +38,28 @@ fn default_max_items() -> usize {
     1000
 }
 
+// Serialization predicates: a field whose value still equals its own default is
+// omitted, so a `foreach: {items: [a]}` does not come back out carrying `glob:
+// null`, `as: item`, `parallel: true`, `max_items: 1000` and `buffer: false` -
+// five keys its ottofile never wrote. Matches `ParamSpec`.
+fn is_default_as(value: &str) -> bool {
+    value == default_as()
+}
+
+fn is_default_parallel(value: &bool) -> bool {
+    *value == default_parallel()
+}
+
+fn is_default_max_items(value: &usize) -> bool {
+    *value == default_max_items()
+}
+
+/// `serde`'s `skip_serializing_if` needs a named function, and `bool::not` has
+/// the wrong signature (`bool -> bool`, not `&bool -> bool`).
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl Default for ForeachSpec {
     fn default() -> Self {
         Self {
@@ -153,12 +175,12 @@ impl ForeachJobs {
 /// `deny_unknown_fields` turns a stale or misplaced `foreach:` key (e.g.
 /// `parallel:` written here instead of one level up, under the task) into a
 /// loud config-load error naming the field, rather than a silently-ignored
-/// no-op. Per `borg/src/config.rs:281-285`.
+/// no-op.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForeachSpec {
     /// Glob pattern to match files
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glob: Option<String>,
 
     /// Explicit list of items
@@ -166,27 +188,27 @@ pub struct ForeachSpec {
     pub items: Vec<String>,
 
     /// Numeric range (e.g., "1-10" for 1 through 10 inclusive)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<String>,
 
     /// Shell command whose stdout lines are the items. Mutually exclusive with
     /// `glob`/`items`/`range`. Unlike the other three sources this one executes,
     /// so it resolves lazily and at most once per invocation - never for `--help`
     /// (see docs/design/2026-08-28-boundary-fixes-and-dynamic-foreach.md, Phase 6).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 
     /// Variable name for the current item (default: "item")
-    #[serde(default = "default_as")]
+    #[serde(default = "default_as", skip_serializing_if = "is_default_as")]
     #[serde(rename = "as")]
     pub var_name: String,
 
     /// Whether subtasks run in parallel (default: true)
-    #[serde(default = "default_parallel")]
+    #[serde(default = "default_parallel", skip_serializing_if = "is_default_parallel")]
     pub parallel: bool,
 
     /// Maximum number of items before erroring (default: 1000)
-    #[serde(default = "default_max_items")]
+    #[serde(default = "default_max_items", skip_serializing_if = "is_default_max_items")]
     pub max_items: usize,
 
     /// Run subtasks concurrently but print each subtask's output as one
@@ -197,7 +219,7 @@ pub struct ForeachSpec {
     /// `tty: true` on the same task is rejected at load
     /// (`Parser::validate_foreach_buffer`): a tty task owns the terminal
     /// exclusively, so there is nothing to buffer.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub buffer: bool,
 
     /// Concurrency for THIS group's items, overriding the global `-j`/`otto.jobs`.
@@ -334,30 +356,96 @@ impl ForeachSpec {
         self.command.is_some()
     }
 
-    /// Reject a `command:` source combined with any static source. Loud config
-    /// error naming the task, checked at load time so `otto --help` reports it
-    /// too (validating the shape executes nothing).
+    /// Every load-time check on a `foreach:` block. Shape only: nothing here
+    /// executes, so every surface including `otto --help` reports the same
+    /// error the run would.
+    pub fn validate(&self, task_name: &str) -> Result<()> {
+        self.validate_sources(task_name)?;
+        self.validate_var_name(task_name)?;
+        self.validate_range(task_name)
+    }
+
+    /// Require exactly one of the four sources (`command`, `glob`, `items`,
+    /// `range`). Loud config error naming the task and every source it found.
+    ///
+    /// This used to return `Ok` whenever `command` was absent, so two static
+    /// sources loaded happily and `resolve_items`'s `else if` chain silently
+    /// dropped all but the first (`glob:` plus `items:` expanded the glob and
+    /// ignored the items), and an empty `foreach: {}` loaded and failed much
+    /// later, at expansion.
     pub fn validate_sources(&self, task_name: &str) -> Result<()> {
-        let Some(command) = &self.command else {
-            return Ok(());
-        };
-        let mut combined: Vec<&str> = Vec::new();
+        let mut sources: Vec<&str> = Vec::new();
+        if self.command.is_some() {
+            sources.push("command");
+        }
         if self.glob.is_some() {
-            combined.push("glob");
+            sources.push("glob");
         }
         if !self.items.is_empty() {
-            combined.push("items");
+            sources.push("items");
         }
         if self.range.is_some() {
-            combined.push("range");
+            sources.push("range");
         }
-        if !combined.is_empty() {
-            return Err(eyre!(
-                "Task '{}': foreach command '{}' cannot be combined with {}; \
+        match sources.len() {
+            1 => Ok(()),
+            0 => Err(eyre!(
+                "Task '{task_name}': foreach declares no source; \
+                 foreach takes exactly one source (command, glob, items, or range)"
+            )),
+            _ => Err(eyre!(
+                "Task '{task_name}': foreach declares {}; \
                  foreach takes exactly one source (command, glob, items, or range)",
-                task_name,
-                command,
-                combined.join(", ")
+                sources.join(" and ")
+            )),
+        }
+    }
+
+    /// Reject a `foreach.as` that is not a shell identifier.
+    ///
+    /// The item variable is exported into the subtask's script, so a name like
+    /// `my item` cannot be assigned. It used to load and fail at
+    /// `executor::action`, whose message names "environment variable name" and
+    /// not the field the author wrote, at run time rather than at load.
+    fn validate_var_name(&self, task_name: &str) -> Result<()> {
+        if crate::naming::is_identifier(&self.var_name) {
+            return Ok(());
+        }
+        Err(eyre!(
+            "Task '{task_name}': foreach.as '{}' is not a valid identifier \
+             (letters, digits and underscore only, not starting with a digit); \
+             it becomes a shell variable in every subtask",
+            self.var_name
+        ))
+    }
+
+    /// Reject a `range:` whose bounds are unparseable, inverted, or wider than
+    /// `max_items`, at load, without materializing a single item.
+    ///
+    /// `range: "0-18446744073709551615"` used to be accepted here and then
+    /// counted by iterating: `max_items` was checked against an already-built
+    /// `Vec`, so the guard could only fire after the allocation it exists to
+    /// prevent.
+    fn validate_range(&self, task_name: &str) -> Result<()> {
+        let Some(range) = &self.range else {
+            return Ok(());
+        };
+        let (start, end) = Self::parse_range(range)?;
+        let count = end
+            .checked_sub(start)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| {
+                eyre!(
+                    "Task '{task_name}': foreach range '{range}' spans more items than this platform can \
+                     count, far exceeding max_items ({}); narrow the range",
+                    self.max_items
+                )
+            })?;
+        if count > self.max_items {
+            return Err(eyre!(
+                "Task '{task_name}': foreach range '{range}' expands to {count} items, \
+                 exceeding max_items ({}); narrow the range or raise max_items",
+                self.max_items
             ));
         }
         Ok(())
@@ -509,8 +597,12 @@ impl ForeachSpec {
             .collect()
     }
 
-    fn resolve_range(&self, range: &str) -> Result<Vec<ForeachItem>> {
-        // Parse range format: supports "start..end" (Rust-like) or "start-end" (inclusive)
+    /// Parse `range:` into its inclusive bounds. Supports "start..end"
+    /// (Rust-like) and "start-end".
+    ///
+    /// Separated from `resolve_range` so the bounds can be checked at config
+    /// load, where no items are wanted, by the same code that expands them.
+    fn parse_range(range: &str) -> Result<(usize, usize)> {
         let (start_str, end_str) = if range.contains("..") {
             // Rust-like format: "1..10"
             let parts: Vec<&str> = range.split("..").collect();
@@ -544,6 +636,33 @@ impl ForeachSpec {
 
         if start > end {
             return Err(eyre!("Invalid range: start ({}) > end ({})", start, end));
+        }
+
+        Ok((start, end))
+    }
+
+    fn resolve_range(&self, range: &str) -> Result<Vec<ForeachItem>> {
+        let (start, end) = Self::parse_range(range)?;
+
+        // Count before building. A range wider than `max_items` (up to the whole
+        // `usize` space, which `checked_add` catches) is a config error, not an
+        // allocation: the post-hoc `check_max_items` could only fire after the
+        // Vec it exists to prevent had already been built.
+        let count = end
+            .checked_sub(start)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| {
+                eyre!(
+                    "foreach range '{range}' spans more items than this platform can count, \
+                     far exceeding max_items ({})",
+                    self.max_items
+                )
+            })?;
+        if count > self.max_items {
+            return Err(eyre!(
+                "foreach range '{range}' expands to {count} items, exceeding max_items ({})",
+                self.max_items
+            ));
         }
 
         // Calculate padding width for zero-padding
@@ -590,11 +709,10 @@ pub struct TaskSpec {
 // `deny_unknown_fields` turns a stale or misplaced task-level key (e.g.
 // `parallel:` written beside `foreach:` instead of inside it) into a loud
 // config-load error naming the field, rather than a silently-ignored no-op.
-// Per `borg/src/config.rs:281-285`. `TaskSpec`'s hand-written `Deserialize`
-// impl below does nothing but delegate to this helper, so the attribute
-// lives here rather than on `TaskSpec` itself. Does not reach `envs`' or
-// `params`' free-form keys: the attribute governs the helper's own field
-// names, not the contents of the maps those fields hold.
+// `TaskSpec`'s hand-written `Deserialize` impl below does nothing but delegate
+// to this helper, so the attribute lives here rather than on `TaskSpec` itself.
+// Does not reach `envs`' or `params`' free-form keys: the attribute governs the
+// helper's own field names, not the contents of the maps those fields hold.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TaskSpecHelper {
@@ -826,36 +944,6 @@ fn deserialize_script_string(s: &str) -> String {
 }
 
 impl TaskSpec {
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        name: String,
-        help: Option<String>,
-        after: Vec<EdgeSpec>,
-        before: Vec<EdgeSpec>,
-        input: Vec<String>,
-        output: Vec<String>,
-        envs: HashMap<String, String>,
-        params: ParamSpecs,
-        action: String,
-    ) -> Self {
-        Self {
-            name,
-            help,
-            after,
-            before,
-            input,
-            output,
-            envs,
-            params,
-            action,
-            foreach: None,
-            virtual_parent: false,
-            on_failure: Vec::new(),
-            tty: None,
-        }
-    }
-
     /// Check if this task has a foreach configuration
     #[must_use]
     pub fn has_foreach(&self) -> bool {
@@ -995,6 +1083,74 @@ fn test_namify() {
     assert_eq!(namify("--name"), "name".to_string());
 }
 
+/// The name a YAML plain scalar collapses to once it is resolved, when that
+/// differs from the source text: `0x1f` -> `31`, `True` -> `true`, `+5` -> `5`.
+/// `None` for anything that resolves to a string (the overwhelming majority of
+/// task names) or is not a single scalar at all.
+fn resolved_scalar_name(name: &str) -> Option<String> {
+    match yaml_serde::from_str::<yaml_serde::Value>(name) {
+        Ok(yaml_serde::Value::Number(number)) => Some(number.to_string()),
+        Ok(yaml_serde::Value::Bool(boolean)) => Some(boolean.to_string()),
+        _ => None,
+    }
+}
+
+/// Reconcile the two spellings one task name arrives in.
+///
+/// A task keyed `0x1f:` and an edge naming it (`after: [0x1f]`) are the same
+/// name written by the same hand, but they reach us through different serde
+/// calls: the task map asks for a `String` key and gets the raw source text
+/// (`0x1f`), while the edge is deserialized with `deserialize_any` and gets the
+/// resolved integer, which it can only render as `31`. yaml_serde hands a
+/// visitor no way back to the source text of a plain scalar (see
+/// `visit_untagged_scalar`), so the reconciliation happens here, once the whole
+/// map is in hand: an edge target that names no task, and that is the resolved
+/// form of exactly one task key, is rewritten to that key. The author's
+/// spelling is what survives - the task stays `0x1f` on the command line, in
+/// help, and on re-emit.
+///
+/// The limit of that, deliberately accepted: a QUOTED key is indistinguishable
+/// from an unquoted one by the time it gets here. YAML strips the quotes before
+/// `next_key::<String>()` sees anything, so `"0x1f":` and `0x1f:` are the same
+/// four bytes, and `tasks: {"0x1f": ..., report: {after: [31]}}` binds the edge
+/// to the quoted key even though the author wrote one as a string and the other
+/// as a number. Reaching that takes a hex-, octal-, boolean- or signed-decimal
+/// spelling quoted on one side and written as its resolved value on the other,
+/// which is a config nobody writes on purpose; the alternative is to give up the
+/// case authors do write. Pinned by
+/// `a_quoted_scalar_key_is_indistinguishable_from_an_unquoted_one`.
+fn resolve_scalar_edge_targets(tasks: &mut TaskSpecs) {
+    let mut by_resolved: HashMap<String, Option<String>> = HashMap::new();
+    for key in tasks.keys() {
+        let Some(resolved) = resolved_scalar_name(key) else {
+            continue;
+        };
+        if resolved == *key {
+            continue;
+        }
+        // Two keys resolving to one name (`0x1f` and `0X1F`) is ambiguous;
+        // `None` parks it so neither claims the edge.
+        by_resolved
+            .entry(resolved)
+            .and_modify(|winner| *winner = None)
+            .or_insert_with(|| Some(key.clone()));
+    }
+    if by_resolved.is_empty() {
+        return;
+    }
+    let keys: Vec<String> = tasks.keys().cloned().collect();
+    for spec in tasks.values_mut() {
+        for edge in spec.after.iter_mut().chain(spec.before.iter_mut()) {
+            if keys.contains(&edge.task) {
+                continue;
+            }
+            if let Some(Some(key)) = by_resolved.get(&edge.task) {
+                edge.task = key.clone();
+            }
+        }
+    }
+}
+
 pub fn deserialize_task_map<'de, D>(deserializer: D) -> Result<TaskSpecs, D::Error>
 where
     D: Deserializer<'de>,
@@ -1017,6 +1173,7 @@ where
                 task_spec.name = namify(&name);
                 tasks.insert(name.clone(), task_spec);
             }
+            resolve_scalar_edge_targets(&mut tasks);
             Ok(tasks)
         }
     }

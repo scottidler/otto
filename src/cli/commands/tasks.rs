@@ -183,7 +183,7 @@ pub fn choose_format(explicit: Option<&str>, stdout_is_tty: bool) -> TasksFormat
 pub fn render_tasks_view(view: &TasksView, format: TasksFormat) -> Result<String> {
     match format {
         TasksFormat::Json => serde_json::to_string_pretty(view).wrap_err("failed to render task list as JSON"),
-        TasksFormat::Yaml => serde_yaml::to_string(view).wrap_err("failed to render task list as YAML"),
+        TasksFormat::Yaml => yaml_serde::to_string(view).wrap_err("failed to render task list as YAML"),
     }
 }
 

@@ -107,6 +107,10 @@ impl DynamicResolver {
     }
 
     /// Whether `task`'s command source has already run this invocation.
+    ///
+    /// Test-only: the memoization it reports on is observable to production
+    /// code only as "the command ran once", which is what the tests assert.
+    #[cfg(test)]
     #[must_use]
     pub fn has_foreach(&self, task: &str) -> bool {
         self.foreach.borrow().contains_key(task)
@@ -130,7 +134,9 @@ impl DynamicResolver {
         Ok(values)
     }
 
-    /// Whether `key`'s (`task:param`) choices command has already run this invocation.
+    /// Whether `key`'s (`task:param`) choices command has already run this
+    /// invocation. Test-only, as `has_foreach` is.
+    #[cfg(test)]
     #[must_use]
     pub fn has_choices(&self, key: &str) -> bool {
         self.choices.borrow().contains_key(key)

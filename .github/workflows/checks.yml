@@ -51,15 +51,15 @@ jobs:
     - name: Install otto (dogfood - this repo's own checks run through otto)
       run: cargo install --path . --locked
 
-    # `otto quick` runs compile + clippy + fmt-check + test as independent
-    # siblings (`.otto.yml`), so one failing check does not hide the others
+    # `otto quick` runs compile + clippy + fmt-check + test + docs-check as
+    # independent siblings (`.otto.yml`), so one failing check does not hide the others
     # and the invocation can never drift from what a contributor runs
     # locally. `otto ci` also includes `lint`, which shells out to a
     # personal `whitespace` binary with no published release; that has no
     # CI-portable install path, so it stays a local-only check and is not
     # run here (unchanged from the CI behavior this replaces, which never
     # ran it either).
-    - name: Run otto quick (compile + clippy + fmt-check + test)
+    - name: Run otto quick (compile + clippy + fmt-check + test + doc links)
       run: otto quick
 
   bash32:
@@ -131,8 +131,10 @@ jobs:
   # (see the note on `otto quick` above). Running `cov` directly gets the gate
   # without the unusable dependency: `cov` instruments and runs the suite, its
   # own `after: [cov-report]` chains the threshold check, and `cov-report`
-  # exits 1 when line coverage is under `--fail-under`'s committed default
-  # (`.otto.yml`, currently 85). This job is what makes the floor real: before
+  # exits 1 when line coverage is under `cov-report`'s `--fail-under` default
+  # (`.otto.yml`; see that task's own comment for the current number, rather
+  # than duplicating a value here that will drift again). This job is what
+  # makes the floor real: before
   # it existed, the committed floor only ever ran on a developer's machine.
   #
   # Its own job rather than a step in `checks` so a coverage failure and a

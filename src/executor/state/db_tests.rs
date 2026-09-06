@@ -4,13 +4,34 @@ use super::*;
 use serial_test::serial;
 use tempfile::TempDir;
 
-/// Restore the two knobs to "unset" so one test cannot leak into the next.
-fn clear_path_env() {
-    // SAFETY: every test that touches these is `#[serial]`.
+/// Force one environment variable, returning what it held before.
+fn swap_var(key: &str, value: Option<&str>) -> Option<String> {
+    let previous = std::env::var(key).ok();
+    // SAFETY: every caller is reached from a `#[serial]` test body.
     unsafe {
-        std::env::remove_var("OTTO_DB_PATH");
-        std::env::remove_var("OTTO_HOME");
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
     }
+    previous
+}
+
+/// Run `f` with the two path knobs forced to the given values, then put back
+/// whatever the process had before.
+///
+/// Restored, not cleared. These tests used to `remove_var` both knobs on the way
+/// in and on the way out, which is not a restore: `--lib` tests share one
+/// process, and an `OTTO_HOME` this file unset stays unset for every later test,
+/// where `default_db_path()` then resolves to the developer's real
+/// `~/.otto/otto.db`. Same discipline as `manager_tests::with_otto_home`.
+fn with_path_env<T>(otto_home: Option<&str>, otto_db_path: Option<&str>, f: impl FnOnce() -> T) -> T {
+    let previous_home = swap_var("OTTO_HOME", otto_home);
+    let previous_db_path = swap_var("OTTO_DB_PATH", otto_db_path);
+    let out = f();
+    swap_var("OTTO_HOME", previous_home.as_deref());
+    swap_var("OTTO_DB_PATH", previous_db_path.as_deref());
+    out
 }
 
 #[test]
@@ -19,13 +40,7 @@ fn test_db_path_follows_otto_home_alone() -> Result<()> {
     // The defect this pins: `OTTO_HOME` moved the run directories but not
     // the database, so a run under a scratch home wrote its rows into the
     // developer's real `~/.otto/otto.db`.
-    clear_path_env();
-    // SAFETY: serialized.
-    unsafe {
-        std::env::set_var("OTTO_HOME", "/tmp/otto-scratch-home");
-    }
-    let path = DatabaseManager::default_db_path();
-    clear_path_env();
+    let path = with_path_env(Some("/tmp/otto-scratch-home"), None, DatabaseManager::default_db_path);
 
     assert_eq!(path?, PathBuf::from("/tmp/otto-scratch-home/otto.db"));
     Ok(())
@@ -36,14 +51,11 @@ fn test_db_path_follows_otto_home_alone() -> Result<()> {
 fn test_db_path_prefers_an_explicit_override() -> Result<()> {
     // `OTTO_DB_PATH` is kept as an override of the derived default, not
     // deleted: pointing several projects at one store is legitimate.
-    clear_path_env();
-    // SAFETY: serialized.
-    unsafe {
-        std::env::set_var("OTTO_HOME", "/tmp/otto-scratch-home");
-        std::env::set_var("OTTO_DB_PATH", "/tmp/elsewhere/shared.db");
-    }
-    let path = DatabaseManager::default_db_path();
-    clear_path_env();
+    let path = with_path_env(
+        Some("/tmp/otto-scratch-home"),
+        Some("/tmp/elsewhere/shared.db"),
+        DatabaseManager::default_db_path,
+    );
 
     assert_eq!(path?, PathBuf::from("/tmp/elsewhere/shared.db"));
     Ok(())
@@ -52,12 +64,32 @@ fn test_db_path_prefers_an_explicit_override() -> Result<()> {
 #[test]
 #[serial]
 fn test_db_path_falls_back_to_home_dot_otto() -> Result<()> {
-    clear_path_env();
-    let path = DatabaseManager::default_db_path()?;
+    let path = with_path_env(None, None, DatabaseManager::default_db_path)?;
 
     let expected = PathBuf::from(std::env::var("HOME")?).join(".otto").join("otto.db");
     assert_eq!(path, expected);
     Ok(())
+}
+
+/// The restore is the point of `with_path_env`, so it is asserted rather than
+/// assumed: the helper that replaced `clear_path_env` must leave the process's
+/// own `OTTO_HOME` exactly as it found it.
+#[test]
+#[serial]
+fn path_env_is_restored_not_cleared() {
+    let sentinel = "/tmp/otto-restore-sentinel";
+    let previous = swap_var("OTTO_HOME", Some(sentinel));
+
+    with_path_env(Some("/tmp/otto-somewhere-else"), None, || {
+        assert_eq!(std::env::var("OTTO_HOME").as_deref(), Ok("/tmp/otto-somewhere-else"));
+    });
+
+    assert_eq!(
+        std::env::var("OTTO_HOME").as_deref(),
+        Ok(sentinel),
+        "with_path_env must restore OTTO_HOME, not leave it unset for the next test"
+    );
+    swap_var("OTTO_HOME", previous.as_deref());
 }
 
 #[test]
@@ -124,33 +156,6 @@ fn test_foreign_keys_enabled() -> Result<()> {
         assert_eq!(foreign_keys, 1);
         Ok(())
     })?;
-
-    Ok(())
-}
-
-#[test]
-fn test_health_check() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("test.db");
-
-    let db = DatabaseManager::new(db_path)?;
-    db.health_check()?;
-
-    Ok(())
-}
-
-#[test]
-fn test_stats() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("test.db");
-
-    let db = DatabaseManager::new(db_path)?;
-    let stats = db.stats()?;
-
-    // New database should have zero records
-    assert_eq!(stats.project_count, 0);
-    assert_eq!(stats.run_count, 0);
-    assert_eq!(stats.task_count, 0);
 
     Ok(())
 }

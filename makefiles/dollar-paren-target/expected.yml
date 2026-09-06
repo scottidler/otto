@@ -1,0 +1,15 @@
+# Expected conversion of this directory's Makefile: the `$(TARGETS)` rule
+# produces no task at all, only a warning naming the target; `dep`, the next
+# real rule in the file, becomes the default.
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - dep
+  envs:
+    TARGETS: build
+tasks:
+  dep:
+    bash: echo dep
+  build:
+    bash: echo build

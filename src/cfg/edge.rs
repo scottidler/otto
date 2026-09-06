@@ -50,6 +50,21 @@ impl<'de> Deserialize<'de> for EdgeSpec {
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("a task name string or a {task, when} object")
             }
+            // A task keyed `2024:` or `true:` in an ottofile loads: YAML hands
+            // the task map an integer or boolean scalar and the map key is
+            // stringified. An edge naming that task is the same name written in
+            // the same place, so it stringifies the same way - without these
+            // three, `after: [2024]` failed with "invalid type: integer" while
+            // the task it named loaded fine.
+            fn visit_u64<E: Error>(self, value: u64) -> Result<EdgeSpec, E> {
+                Ok(EdgeSpec::sugar(value.to_string()))
+            }
+            fn visit_i64<E: Error>(self, value: i64) -> Result<EdgeSpec, E> {
+                Ok(EdgeSpec::sugar(value.to_string()))
+            }
+            fn visit_bool<E: Error>(self, value: bool) -> Result<EdgeSpec, E> {
+                Ok(EdgeSpec::sugar(value.to_string()))
+            }
             fn visit_str<E: Error>(self, value: &str) -> Result<EdgeSpec, E> {
                 Ok(EdgeSpec {
                     task: value.to_string(),

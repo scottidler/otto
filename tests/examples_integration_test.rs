@@ -155,55 +155,6 @@ fn test_data_passing_demo_validation() {
 }
 
 // ============================================================================
-// Makefile Examples - Verify they parse (moved to makefiles/)
-// ============================================================================
-
-#[test]
-fn test_makefile_python_poetry_service_parses() {
-    let (_home, mut cmd) = otto_cmd();
-    cmd.current_dir("makefiles/python-poetry-service");
-    cmd.arg("--help");
-    let output = cmd.output().expect("Failed to run otto");
-    assert!(output.status.success(), "python-poetry-service should parse");
-}
-
-#[test]
-fn test_makefile_go_build_project_parses() {
-    let (_home, mut cmd) = otto_cmd();
-    cmd.current_dir("makefiles/go-build-project");
-    cmd.arg("--help");
-    let output = cmd.output().expect("Failed to run otto");
-    assert!(output.status.success(), "go-build-project should parse");
-}
-
-#[test]
-fn test_makefile_python_pre_commit_parses() {
-    let (_home, mut cmd) = otto_cmd();
-    cmd.current_dir("makefiles/python-pre-commit");
-    cmd.arg("--help");
-    let output = cmd.output().expect("Failed to run otto");
-    assert!(output.status.success(), "python-pre-commit should parse");
-}
-
-#[test]
-fn test_makefile_docker_compose_service_parses() {
-    let (_home, mut cmd) = otto_cmd();
-    cmd.current_dir("makefiles/docker-compose-service");
-    cmd.arg("--help");
-    let output = cmd.output().expect("Failed to run otto");
-    assert!(output.status.success(), "docker-compose-service should parse");
-}
-
-#[test]
-fn test_makefile_example_parses() {
-    let (_home, mut cmd) = otto_cmd();
-    cmd.current_dir("makefiles/makefile-example");
-    cmd.arg("--help");
-    let output = cmd.output().expect("Failed to run otto");
-    assert!(output.status.success(), "makefile-example should parse");
-}
-
-// ============================================================================
 // Special Examples - Just verify they parse (can't run without interaction)
 // ============================================================================
 

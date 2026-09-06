@@ -123,6 +123,8 @@ fn test_convert_target_with_dependencies() {
     let mut build = target("build", &["echo Building"]);
     build.dependencies = vec!["test".to_string(), "clean".to_string()];
     ast.targets.push(build);
+    ast.targets.push(target("test", &["echo Testing"]));
+    ast.targets.push(target("clean", &["echo Cleaning"]));
 
     let (config, _) = convert(ast);
 
@@ -130,6 +132,32 @@ fn test_convert_target_with_dependencies() {
     assert_eq!(task.before.len(), 2);
     assert!(task.before.iter().any(|e| e.task == "test"));
     assert!(task.before.iter().any(|e| e.task == "clean"));
+}
+
+/// A prerequisite with no rule in this Makefile is warned about and left out.
+///
+/// It used to be emitted, and otto rejects a dangling edge for the whole file,
+/// so one of these made every task in the converted ottofile fail to run, not
+/// just the task carrying it. This test used to assert the opposite, by
+/// depending on two targets it never added to the AST.
+#[test]
+fn a_dependency_with_no_rule_is_dropped_and_named() {
+    let mut ast = MakefileAst::new();
+    let mut build = target("build", &["echo Building"]);
+    build.dependencies = vec!["test".to_string(), "nowhere".to_string()];
+    ast.targets.push(build);
+    ast.targets.push(target("test", &["echo Testing"]));
+
+    let (config, diagnostics) = convert(ast);
+
+    let task = config.tasks.get("build").unwrap();
+    assert_eq!(task.before.len(), 1, "only the edge that resolves survives");
+    assert_eq!(task.before[0].task, "test");
+    assert!(
+        messages(&diagnostics).contains("`nowhere` of `build` has no rule"),
+        "the dropped edge must be named: {}",
+        messages(&diagnostics)
+    );
 }
 
 #[test]
@@ -357,6 +385,46 @@ fn test_command_prefix_handling() {
     assert!(task.action.contains("echo Visible"));
 }
 
+/// Make allows `@`, `-`, and `+` combined, in either order, and repeated. The
+/// old code peeled at most one leading character, so `@-rm -rf dist` kept a
+/// literal `-` in the command (no `|| true`), and `-@echo hi` left a literal
+/// `@` for bash to choke on instead of suppressing it.
+#[test]
+fn test_combined_prefixes_are_all_stripped_in_any_order() {
+    let mut ast = MakefileAst::new();
+    ast.targets
+        .push(target("build", &["@-rm -rf dist", "-@echo hi", "+make -C sub"]));
+
+    let (config, _) = convert(ast);
+
+    let task = config.tasks.get("build").unwrap();
+    assert!(task.action.contains("rm -rf dist || true"), "{}", task.action);
+    assert!(task.action.contains("echo hi || true"), "{}", task.action);
+    assert!(!task.action.contains("@echo hi"), "{}", task.action);
+    // `+` has no otto equivalent (there is no `-n` dry run to override) and
+    // is just stripped, with no `|| true` since `-` never appeared.
+    assert!(task.action.contains("make -C sub"), "{}", task.action);
+    assert!(!task.action.contains("+make"), "{}", task.action);
+}
+
+/// A repeated prefix character (`--rm`, legal but pointless make) must not
+/// double the `|| true`.
+#[test]
+fn test_a_repeated_dash_prefix_still_adds_or_true_once() {
+    let mut ast = MakefileAst::new();
+    ast.targets.push(target("clean", &["--rm -rf dist"]));
+
+    let (config, _) = convert(ast);
+
+    let task = config.tasks.get("clean").unwrap();
+    assert_eq!(task.action.matches("|| true").count(), 1, "{}", task.action);
+    assert!(
+        task.action.contains("\nrm -rf dist || true"),
+        "a leftover literal `-` would make bash read this as an option: {}",
+        task.action
+    );
+}
+
 #[test]
 fn test_empty_makefile() {
     let (config, _) = convert(MakefileAst::new());
@@ -374,6 +442,55 @@ fn test_converted_spec_carries_no_machine_specific_jobs() {
 
     // `jobs` at its default is omitted on serialize, so the converting
     // machine's CPU count never reaches the ottofile.
-    let yaml = serde_yaml::to_string(&config).unwrap();
+    let yaml = yaml_serde::to_string(&config).unwrap();
     assert!(!yaml.contains("jobs:"), "{yaml}");
+}
+
+// ----------------------------------------------------------------------
+// Built-in command names: the loader reserves them, so the converter renames.
+// ----------------------------------------------------------------------
+
+/// `Clean` is otto's built-in command name. The task, every `before:` edge
+/// naming it, and the default goal all move to `clean` together, and the
+/// rename is warned about at the target's line. A `clean` target already in
+/// the Makefile pushes the rename to `clean-task`.
+#[test]
+fn a_target_named_like_a_builtin_is_renamed_everywhere_it_appears() {
+    let mut clean = target("Clean", &["rm -rf build"]);
+    clean.line = 4;
+    let mut build = target("build", &["echo build"]);
+    build.dependencies = vec!["Clean".to_string()];
+    let ast = MakefileAst {
+        targets: vec![clean, build],
+        default_goal: Some("Clean".to_string()),
+        ..Default::default()
+    };
+
+    let (config, diagnostics) = convert(ast);
+
+    assert!(config.tasks.contains_key("clean") && !config.tasks.contains_key("Clean"));
+    assert_eq!(config.tasks["clean"].name, "clean");
+    assert_eq!(config.otto.tasks, vec!["clean".to_string()]);
+    let edges: Vec<String> = config.tasks["build"].before.iter().map(|e| e.task.clone()).collect();
+    assert_eq!(edges, vec!["clean".to_string()]);
+    assert!(
+        messages(&diagnostics).contains(
+            "Makefile:4: warning: target `Clean` is otto's built-in command name and cannot be a task; converted as `clean`"
+        ),
+        "got: {}",
+        messages(&diagnostics)
+    );
+}
+
+#[test]
+fn a_builtin_rename_steps_aside_for_a_target_that_already_has_the_lowercase_name() {
+    let ast = MakefileAst {
+        targets: vec![target("Clean", &["rm -rf build"]), target("clean", &["rm -rf dist"])],
+        ..Default::default()
+    };
+
+    let (config, _) = convert(ast);
+
+    assert_eq!(config.tasks["clean"].action, "#!/bin/bash\nrm -rf dist");
+    assert_eq!(config.tasks["clean-task"].action, "#!/bin/bash\nrm -rf build");
 }

@@ -12,6 +12,30 @@ fn create_test_manager() -> Result<(StateManager, TempDir)> {
     Ok((manager, temp_dir))
 }
 
+/// Fetch every task recorded for `run_id`, ordered by `started_at` ascending.
+///
+/// The `StateStore` port dropped `get_run_tasks` (design doc
+/// `2026-09-02-second-code-review-remediation.md`, Phase 10): nothing in
+/// production ever called it through the trait, only tests. Tests still need
+/// to inspect a run's tasks, so the query moves here rather than disappearing
+/// with no replacement.
+fn run_tasks(manager: &StateManager, run_id: i64) -> Result<Vec<TaskRecord>> {
+    manager.db.with_connection(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, name, status, script_hash, exit_code,
+                    started_at, ended_at, duration_seconds,
+                    stdout_path, stderr_path, script_path, skip_reason, skip_kind
+             FROM tasks
+             WHERE run_id = ?1
+             ORDER BY started_at ASC",
+        )?;
+
+        let rows = stmt.query_map(params![run_id], StateManager::row_to_task_record)?;
+
+        rows.collect::<Result<Vec<_>, _>>().context("Failed to fetch tasks")
+    })
+}
+
 /// Run `f` with `OTTO_HOME` pointed at `otto_home`, restoring it afterwards.
 fn with_otto_home<T>(otto_home: &std::path::Path, f: impl FnOnce() -> T) -> T {
     let previous = std::env::var("OTTO_HOME").ok();
@@ -31,6 +55,11 @@ fn with_otto_home<T>(otto_home: &std::path::Path, f: impl FnOnce() -> T) -> T {
 /// The DB-driven delete had no symlink or containment check at all - it was
 /// the second half of the same defect as the filesystem scan, and the one
 /// with no `is_dir()` in front of it.
+///
+/// The refusal also has to happen before the rows go away. It used to commit
+/// the row deletion first and fence afterwards, so this exact case - the one
+/// the fence exists for - lost the row and kept the directory, orphaned with
+/// nothing left pointing at it.
 #[test]
 #[serial]
 fn delete_run_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
@@ -59,6 +88,15 @@ fn delete_run_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("Refusing to delete run directory"), "{err}");
     assert!(victim.join("precious.txt").exists(), "the symlink target must survive");
+    let rows = manager.get_runs_with_filters(None, None, 10)?;
+    assert_eq!(
+        rows.len(),
+        1,
+        "and the row survives: a refused delete must leave the database untouched"
+    );
+    assert_eq!(rows[0].id, run_id);
+    let projects = manager.get_all_projects()?;
+    assert_eq!(projects[0].run_count, 1, "the run count is untouched too");
     Ok(())
 }
 
@@ -141,7 +179,7 @@ fn two_runs_in_the_same_second_both_persist() -> Result<()> {
     manager.record_run_complete(first, RunStatus::Success, Some(1))?;
     manager.record_run_complete(second, RunStatus::Failed, Some(2))?;
 
-    let runs = manager.get_recent_runs(10, None)?;
+    let runs = manager.get_runs_with_filters(None, None, 10)?;
     assert_eq!(runs.len(), 2, "both runs survive");
     let mut statuses: Vec<&str> = runs.iter().map(|r| r.status.as_str()).collect();
     statuses.sort_unstable();
@@ -176,7 +214,7 @@ fn a_task_exit_code_is_recorded_verbatim() -> Result<()> {
     let task_id = manager.record_task_start(run_id, "boom", None, None, None, None)?;
     manager.record_task_complete(task_id, 7, TaskStatus::Failed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks[0].exit_code, Some(7));
     assert_eq!(tasks[0].status, TaskStatus::Failed);
     Ok(())
@@ -198,7 +236,7 @@ fn an_unknown_run_status_is_an_error_not_a_failure() -> Result<()> {
         .db
         .with_connection(|conn| Ok(conn.execute("UPDATE runs SET status = 'wat'", [])?))?;
 
-    let err = manager.get_recent_runs(10, None).unwrap_err().to_string();
+    let err = manager.get_runs_with_filters(None, None, 10).unwrap_err().to_string();
     assert!(err.contains("Failed to fetch runs"), "{err}");
     Ok(())
 }
@@ -243,8 +281,8 @@ fn delete_run_never_drives_the_run_count_negative() -> Result<()> {
     Ok(())
 }
 
-/// A skipped task carries a start time, so `get_run_tasks` - which orders by
-/// `started_at` - does not sort every skip ahead of the run.
+/// A skipped task carries a start time, so an ordering-by-`started_at` query
+/// over a run's tasks does not sort every skip ahead of the run.
 #[test]
 fn a_skipped_task_records_when_it_was_skipped() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
@@ -253,10 +291,153 @@ fn a_skipped_task_records_when_it_was_skipped() -> Result<()> {
     let run_id = manager.record_run_start(&metadata)?;
     manager.record_task_skipped(run_id, "gated", None, Some("dep failed"), Some(SkipKind::Unreachable))?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks[0].status, TaskStatus::Skipped);
     assert!(tasks[0].started_at.is_some(), "a skip happens at a moment");
     assert_eq!(tasks[0].skip_kind, Some(SkipKind::Unreachable));
+    Ok(())
+}
+
+/// A stored `skip_kind` no `SkipKind` variant parses is reported, on the same
+/// rule as the `status` column beside it. It used to go through
+/// `and_then(SkipKind::parse)`, so a corrupt kind read back as "skipped for no
+/// recorded reason" and history could not be filtered by reason class.
+#[test]
+fn an_unknown_skip_kind_is_an_error_not_a_missing_reason() -> Result<()> {
+    let (manager, _temp_dir) = create_test_manager()?;
+
+    let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc12345".into(), 1700000000);
+    let run_id = manager.record_run_start(&metadata)?;
+    manager.record_task_skipped(run_id, "gated", None, Some("dep failed"), Some(SkipKind::Unreachable))?;
+    manager
+        .db
+        .with_connection(|conn| Ok(conn.execute("UPDATE tasks SET skip_kind = 'not-a-kind'", [])?))?;
+
+    let err =
+        run_tasks(&manager, run_id).expect_err("an unrecognized skip kind must be a named error, not a silent None");
+    assert!(format!("{err:#}").contains("unknown skip kind"), "{err:#}");
+    Ok(())
+}
+
+/// The project upsert, the run row, and the run counter are one transaction, so
+/// a failure anywhere in them leaves none of the three behind.
+///
+/// They used to be autocommit statements: a failure - or a crash - after the
+/// project upsert left a project row for a run that was never recorded, and one
+/// after the run INSERT left `run_count` permanently short. The failure is
+/// injected with a trigger that aborts the run INSERT, which is the statement
+/// between the other two.
+#[test]
+fn record_run_start_rolls_back_the_project_when_the_run_insert_fails() -> Result<()> {
+    let (manager, _temp_dir) = create_test_manager()?;
+    manager.db.with_connection(|conn| {
+        Ok(conn.execute_batch(
+            "CREATE TRIGGER abort_the_run_insert BEFORE INSERT ON runs
+             BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+        )?)
+    })?;
+
+    let metadata = RunMetadata::minimal(
+        Some(PathBuf::from("/repos/widget/otto.yml")),
+        "abc12345".into(),
+        1700000000,
+    );
+    let err = manager
+        .record_run_start(&metadata)
+        .expect_err("the injected trigger must surface");
+    assert!(format!("{err:#}").contains("injected failure"), "{err:#}");
+
+    assert!(
+        manager.get_all_projects()?.is_empty(),
+        "the project upsert must roll back with the run it was recorded for"
+    );
+    assert!(manager.get_runs_with_filters(None, None, 10)?.is_empty());
+    Ok(())
+}
+
+/// A duration is never negative. The subtraction happens in SQL and is clamped
+/// at zero, the same shape `record_run_complete` already used; it used to be
+/// done in Rust with no clamp, so a clock that stepped backwards between a
+/// task's start and its end wrote a negative duration straight into the stats.
+#[test]
+fn record_task_complete_clamps_a_backwards_clock() -> Result<()> {
+    let (manager, _temp_dir) = create_test_manager()?;
+
+    let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc12345".into(), 1700000000);
+    let run_id = manager.record_run_start(&metadata)?;
+    let task_id = manager.record_task_start(run_id, "build", None, None, None, None)?;
+
+    // An hour in the future, as a clock stepping backwards mid-task looks from
+    // the completion's point of view.
+    let ahead = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs() + 3600;
+    manager.db.with_connection(|conn| {
+        Ok(conn.execute(
+            "UPDATE tasks SET started_at = ?1 WHERE id = ?2",
+            rusqlite::params![ahead as i64, task_id],
+        )?)
+    })?;
+
+    manager.record_task_complete(task_id, 0, TaskStatus::Completed)?;
+
+    let tasks = run_tasks(&manager, run_id)?;
+    assert_eq!(
+        tasks[0].duration_seconds,
+        Some(0.0),
+        "a backwards clock clamps to zero rather than recording a negative duration"
+    );
+    Ok(())
+}
+
+/// `started_at` is nullable, so a task with no recorded start gets no duration
+/// - not one measured from the epoch - and the completion still succeeds.
+#[test]
+fn record_task_complete_leaves_no_duration_when_the_task_never_started() -> Result<()> {
+    let (manager, _temp_dir) = create_test_manager()?;
+
+    let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc12345".into(), 1700000000);
+    let run_id = manager.record_run_start(&metadata)?;
+    let task_id = manager.record_task_start(run_id, "build", None, None, None, None)?;
+    manager
+        .db
+        .with_connection(|conn| Ok(conn.execute("UPDATE tasks SET started_at = NULL", [])?))?;
+
+    manager.record_task_complete(task_id, 0, TaskStatus::Completed)?;
+
+    let tasks = run_tasks(&manager, run_id)?;
+    assert_eq!(tasks[0].status, TaskStatus::Completed);
+    assert_eq!(tasks[0].duration_seconds, None);
+    Ok(())
+}
+
+/// Completing a task that is not there is an error, not a no-op: the row would
+/// stay `running` forever and skew every stat. Same rule as
+/// `record_run_complete`, and the rule the in-memory fake now follows too.
+#[test]
+fn record_task_complete_reports_a_task_that_is_not_there() -> Result<()> {
+    let (manager, _temp_dir) = create_test_manager()?;
+
+    let err = manager
+        .record_task_complete(4242, 0, TaskStatus::Completed)
+        .expect_err("a completion for a missing task must be reported");
+    assert!(format!("{err:#}").contains("No task with id 4242"), "{err:#}");
+    Ok(())
+}
+
+/// The `script_hash` column carries the hash of the rendered script, so a
+/// bash task's row has one. The scheduler passed a literal `None` here with a
+/// TODO beside it while `ProcessedAction::Bash` carried the hash in the same
+/// match; the end-to-end half of this is
+/// `tests/history_records_the_run_test.rs`.
+#[test]
+fn record_task_start_records_the_script_hash() -> Result<()> {
+    let (manager, _temp_dir) = create_test_manager()?;
+
+    let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc12345".into(), 1700000000);
+    let run_id = manager.record_run_start(&metadata)?;
+    manager.record_task_start(run_id, "build", Some("deadbeefcafe"), None, None, None)?;
+
+    let tasks = run_tasks(&manager, run_id)?;
+    assert_eq!(tasks[0].script_hash.as_deref(), Some("deadbeefcafe"));
     Ok(())
 }
 
@@ -281,7 +462,7 @@ fn test_record_run_complete() -> Result<()> {
     let run_id_1 = manager.record_run_start(&metadata)?;
     manager.record_run_complete(run_id_1, RunStatus::Success, Some(1024))?;
 
-    let runs = manager.get_recent_runs(1, None)?;
+    let runs = manager.get_runs_with_filters(None, None, 1)?;
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, RunStatus::Success);
     assert_eq!(runs[0].size_bytes, Some(1024));
@@ -291,7 +472,7 @@ fn test_record_run_complete() -> Result<()> {
 }
 
 #[test]
-fn test_get_recent_runs() -> Result<()> {
+fn test_get_runs_with_filters() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     for i in 0..5 {
@@ -303,7 +484,7 @@ fn test_get_recent_runs() -> Result<()> {
         manager.record_run_start(&metadata)?;
     }
 
-    let runs = manager.get_recent_runs(3, None)?;
+    let runs = manager.get_runs_with_filters(None, None, 3)?;
     assert_eq!(runs.len(), 3);
 
     assert!(runs[0].timestamp > runs[1].timestamp);
@@ -313,7 +494,7 @@ fn test_get_recent_runs() -> Result<()> {
 }
 
 #[test]
-fn test_get_recent_runs_with_project_filter() -> Result<()> {
+fn test_get_runs_with_filters_project_filter() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     for i in 0..3 {
@@ -332,7 +513,7 @@ fn test_get_recent_runs_with_project_filter() -> Result<()> {
         manager.record_run_start(&metadata2)?;
     }
 
-    let runs = manager.get_recent_runs(10, Some("abc123"))?;
+    let runs = manager.get_runs_with_filters(None, Some("abc123"), 10)?;
     assert_eq!(runs.len(), 3);
 
     // All runs should be for abc123
@@ -374,7 +555,7 @@ fn test_full_metadata_recording() -> Result<()> {
 
     manager.record_run_start(&metadata)?;
 
-    let runs = manager.get_recent_runs(1, None)?;
+    let runs = manager.get_runs_with_filters(None, None, 1)?;
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].cwd, Some(PathBuf::from("/home/user/project")));
     assert_eq!(runs[0].user, Some("testuser".to_string()));
@@ -385,6 +566,7 @@ fn test_full_metadata_recording() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn test_try_new_graceful_failure() {
     // Both branches of `try_new`, under an OTTO_HOME this test owns.
     //
@@ -397,6 +579,11 @@ fn test_try_new_graceful_failure() {
     // resolved to `$HOME/.otto/otto.db` and tripped the guard in `db.rs` that
     // exists precisely to catch a test opening the real database. Green locally,
     // red on the first runner that ever saw it.
+    //
+    // `#[serial]` for the same reason `with_otto_home` says it is safe: this
+    // body reads and writes the process-global environment, and every other
+    // test that touches `OTTO_HOME` is in that group. Without it, a `#[serial]`
+    // test's `set_var` lands between this one's `set_var` and its assertion.
     let temp_dir = TempDir::new().unwrap();
 
     // Usable home -> Some, and the store it opened is the one we named.
@@ -438,7 +625,7 @@ fn test_record_task_start() -> Result<()> {
 
     assert!(task_id > 0);
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].name, "test-task");
     assert_eq!(tasks[0].status, TaskStatus::Running);
@@ -457,7 +644,7 @@ fn test_record_task_complete() -> Result<()> {
     let task_id = manager.record_task_start(run_id, "test-task", None, None, None, None)?;
     manager.record_task_complete(task_id, 0, TaskStatus::Completed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].status, TaskStatus::Completed);
     assert_eq!(tasks[0].exit_code, Some(0));
@@ -477,7 +664,7 @@ fn test_record_task_failed() -> Result<()> {
     let task_id = manager.record_task_start(run_id, "test-task", None, None, None, None)?;
     manager.record_task_complete(task_id, 1, TaskStatus::Failed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].status, TaskStatus::Failed);
     assert_eq!(tasks[0].exit_code, Some(1));
@@ -501,7 +688,7 @@ fn test_record_task_skipped() -> Result<()> {
     )?;
     assert!(task_id > 0);
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].name, "test-task");
     assert_eq!(tasks[0].status, TaskStatus::Skipped);
@@ -520,7 +707,7 @@ fn test_record_task_skipped() -> Result<()> {
 }
 
 #[test]
-fn test_get_run_tasks() -> Result<()> {
+fn tasks_for_a_run_are_ordered_by_started_at() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     let metadata = RunMetadata::minimal(Some(PathBuf::from("/test/otto.yml")), "abc123".to_string(), 1234567890);
@@ -534,7 +721,7 @@ fn test_get_run_tasks() -> Result<()> {
     manager.record_task_complete(task_id2, 1, TaskStatus::Failed)?;
     manager.record_task_complete(task_id3, 0, TaskStatus::Completed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 3);
 
     // Tasks should be ordered by started_at
@@ -595,7 +782,7 @@ fn test_task_with_all_fields() -> Result<()> {
 
     manager.record_task_complete(task_id, 0, TaskStatus::Completed)?;
 
-    let tasks = manager.get_run_tasks(run_id)?;
+    let tasks = run_tasks(&manager, run_id)?;
     assert_eq!(tasks.len(), 1);
 
     let task = &tasks[0];
@@ -747,14 +934,14 @@ fn test_delete_run_database_only() -> Result<()> {
     let run_id_9 = manager.record_run_start(&metadata)?;
     manager.record_run_complete(run_id_9, RunStatus::Success, Some(1024))?;
 
-    let runs_before = manager.get_recent_runs(10, None)?;
+    let runs_before = manager.get_runs_with_filters(None, None, 10)?;
     assert_eq!(runs_before.len(), 1);
 
     let deleted = manager.delete_run(run_id_9, false)?;
     assert!(deleted.is_some());
     assert_eq!(deleted.unwrap().timestamp, 1234567890);
 
-    let runs_after = manager.get_recent_runs(10, None)?;
+    let runs_after = manager.get_runs_with_filters(None, None, 10)?;
     assert_eq!(runs_after.len(), 0);
 
     Ok(())
@@ -773,17 +960,21 @@ fn test_delete_run_with_tasks() -> Result<()> {
     let task_id2 = manager.record_task_start(run_id, "task2", None, None, None, None)?;
     manager.record_task_complete(task_id2, 1, TaskStatus::Failed)?;
 
-    let tasks_before = manager.get_run_tasks(run_id)?;
+    let tasks_before = run_tasks(&manager, run_id)?;
     assert_eq!(tasks_before.len(), 2);
 
     manager.delete_run(run_id, false)?;
 
-    let tasks_after = manager.get_run_tasks(run_id)?;
+    let tasks_after = run_tasks(&manager, run_id)?;
     assert_eq!(tasks_after.len(), 0);
 
     Ok(())
 }
 
+/// The counter and the rows move together, in both directions: three starts
+/// then one delete leaves two rows AND a `run_count` of two. The test used to
+/// assert only the row count, so the counter this test is named for was never
+/// read.
 #[test]
 fn test_delete_run_updates_project_count() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
@@ -797,11 +988,17 @@ fn test_delete_run_updates_project_count() -> Result<()> {
         );
         run_ids.push(manager.record_run_start(&metadata)?);
     }
+    assert_eq!(manager.get_all_projects()?[0].run_count, 3);
 
     manager.delete_run(run_ids[1], false)?;
 
-    let runs = manager.get_recent_runs(10, Some("abc123"))?;
+    let runs = manager.get_runs_with_filters(None, Some("abc123"), 10)?;
     assert_eq!(runs.len(), 2);
+    assert_eq!(
+        manager.get_all_projects()?[0].run_count,
+        2,
+        "run_count must track the rows, not drift away from them"
+    );
 
     Ok(())
 }
@@ -867,20 +1064,22 @@ fn test_find_old_runs_complex_policy() -> Result<()> {
     // Keep 3 most recent, delete successful runs older than 30 days, keep failed runs for 50 days
     let old_runs = manager.find_old_runs(30, Some(3), Some(50), None)?;
 
-    // Should get 7 runs total (10 - 3 kept)
-    // But failed runs are kept for 50 days, so all failed runs in the deletable set should be excluded
-    assert!(old_runs.len() <= 7);
-
-    // All returned runs should be either:
-    // 1. Successful runs older than 30 days (not in the keep_last 3)
-    // 2. No failed runs should be in the list (they're kept for 50 days)
-    for run in &old_runs {
-        if run.status == RunStatus::Failed {
-            // Failed runs older than 50 days
-            let age_days = (now - run.timestamp) / (24 * 60 * 60);
-            assert!(age_days > 50, "Failed run should only be deleted if older than 50 days");
-        }
-    }
+    // The fixture's answer is exactly 3, not "at most 7". `keep_last` protects
+    // the newest three (40, 41 and 42 days old); of the remaining seven, the
+    // four failed runs are 43 to 49 days old and `keep_failed_days = 50` keeps
+    // every one of them, leaving the successful runs at 44, 46 and 48 days.
+    // `<= 7` was also true of an empty answer, so this test passed with the
+    // policy returning nothing at all.
+    let ages_returned: Vec<u64> = old_runs.iter().map(|r| (now - r.timestamp) / (24 * 60 * 60)).collect();
+    assert_eq!(
+        ages_returned,
+        vec![48, 46, 44],
+        "unexpected expiry set: {ages_returned:?}"
+    );
+    assert!(
+        old_runs.iter().all(|r| r.status == RunStatus::Success),
+        "no failed run is older than keep_failed_days, so none may expire"
+    );
 
     Ok(())
 }
@@ -888,7 +1087,7 @@ fn test_find_old_runs_complex_policy() -> Result<()> {
 /// A row whose `args` column is not valid JSON must surface a named error,
 /// not panic and not silently drop the row.
 #[test]
-fn get_recent_runs_reports_corrupt_args_json_rather_than_panicking() -> Result<()> {
+fn get_runs_with_filters_reports_corrupt_args_json_rather_than_panicking() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     let metadata = RunMetadata::minimal(
@@ -905,7 +1104,7 @@ fn get_recent_runs_reports_corrupt_args_json_rather_than_panicking() -> Result<(
     })?;
 
     let err = manager
-        .get_recent_runs(10, None)
+        .get_runs_with_filters(None, None, 10)
         .expect_err("corrupt args JSON must be a named error, not a panic or a silently empty list");
     // eyre's plain Display shows only the outermost context; `{:#}` walks
     // the full chain down to the actual `bad_column` message.
@@ -920,7 +1119,7 @@ fn get_recent_runs_reports_corrupt_args_json_rather_than_panicking() -> Result<(
 /// A row whose `status` column holds a value no `RunStatus` variant parses
 /// must surface a named error, not panic and not silently drop the row.
 #[test]
-fn get_recent_runs_reports_an_unknown_status_rather_than_panicking() -> Result<()> {
+fn get_runs_with_filters_reports_an_unknown_status_rather_than_panicking() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     let metadata = RunMetadata::minimal(
@@ -937,7 +1136,7 @@ fn get_recent_runs_reports_an_unknown_status_rather_than_panicking() -> Result<(
     })?;
 
     let err = manager
-        .get_recent_runs(10, None)
+        .get_runs_with_filters(None, None, 10)
         .expect_err("an unrecognized status must be a named error, not a panic or a silently empty list");
     assert!(format!("{err:#}").contains("unknown run status"), "{err:#}");
 

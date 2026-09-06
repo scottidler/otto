@@ -45,11 +45,11 @@ impl Serialize for ParamMapSerializer<'_> {
 
 /// `deny_unknown_fields` turns a stale or misplaced param key into a loud
 /// config-load error naming the field, rather than a silently-ignored no-op.
-/// Per `borg/src/config.rs:281-285`. This also makes the five `#[serde(skip)]`
-/// fields below (`name`, `short`, `long`, `param_type`, `value`) newly
-/// REJECTED input rather than silently-ignored input: writing e.g. `name:`
-/// under a param, which was always a no-op because these fields are derived
-/// from the params-map key via `divine()`, now errors. Verified: nothing in
+/// This also makes the five `#[serde(skip)]` fields below (`name`, `short`,
+/// `long`, `param_type`, `value`) newly REJECTED input rather than
+/// silently-ignored input: writing e.g. `name:` under a param, which was
+/// always a no-op because these fields are derived from the params-map key via
+/// `divine()`, now errors. Verified: nothing in
 /// this repo or the 159 external ottofiles under `~/repos` writes them.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -229,13 +229,10 @@ pub enum ParamType {
     POS,
 }
 
-pub type Values = HashMap<String, Value>;
-
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum Value {
     Item(String),
     List(Vec<String>),
-    Dict(HashMap<String, String>),
     #[default]
     Empty,
 }
@@ -255,13 +252,6 @@ impl Serialize for Value {
                 }
                 seq.end()
             }
-            Self::Dict(dict) => {
-                let mut map = serializer.serialize_map(Some(dict.len()))?;
-                for (k, v) in dict {
-                    map.serialize_entry(k, v)?;
-                }
-                map.end()
-            }
         }
     }
 }
@@ -271,14 +261,6 @@ impl fmt::Display for Value {
         match self {
             Self::Item(s) => write!(f, "Value::Item({s})"),
             Self::List(l) => write!(f, "Value::List([{}])", l.join(", ")),
-            Self::Dict(d) => write!(
-                f,
-                "Value::Dict({{{}}})",
-                d.iter()
-                    .map(|(k, v)| format!("{k}: {v}"))
-                    .collect::<Vec<String>>()
-                    .join(", ")
-            ),
             Self::Empty => write!(f, "Value::Empty"),
         }
     }
@@ -315,7 +297,11 @@ impl Serialize for Nargs {
             Self::OneOrZero => "?".to_string(),
             Self::OneOrMore => "+".to_string(),
             Self::ZeroOrMore => "*".to_string(),
-            Self::Range(min, max) => format!("{}:{}", min + 1, max),
+            // `min == max` is what a bare `nargs: "N"` deserializes to, and it
+            // re-emits as the bare form it was written as. Anything else is a
+            // real span and emits `min:max`, both counts as the user wrote them.
+            Self::Range(min, max) if min == max => min.to_string(),
+            Self::Range(min, max) => format!("{min}:{max}"),
         };
         serializer.serialize_str(&s)
     }
@@ -329,7 +315,7 @@ impl fmt::Display for Nargs {
             Self::OneOrZero => write!(formatter, "Nargs::OneOrZero[?]"),
             Self::OneOrMore => write!(formatter, "Nargs::OneOrMore[+]"),
             Self::ZeroOrMore => write!(formatter, "Nargs::ZeroOrMore[*]"),
-            Self::Range(min, max) => write!(formatter, "Nargs::Range[{}, {}]", min + 1, max),
+            Self::Range(min, max) => write!(formatter, "Nargs::Range[{min}, {max}]"),
         }
     }
 }
@@ -369,12 +355,17 @@ impl<'de> Deserialize<'de> for Nargs {
                             "nargs '{s}': min ({min}) must not be greater than max ({max})"
                         )));
                     }
-                    Self::Range(min - 1, max)
+                    Self::Range(min, max)
                 } else {
+                    // A bare integer means EXACTLY N, which is what it means to
+                    // clap (`num_args(N)`) and to argparse (`nargs=N`). It used
+                    // to mean 1..=N in code and 0..=N in the reference page. A
+                    // bounded zero-to-N is not expressible: use `?` for
+                    // zero-or-one or `*` for zero-or-more.
                     let num = s
                         .parse()
                         .map_err(|e| Error::custom(format!("nargs '{s}': invalid count: {e}")))?;
-                    Self::Range(0, num)
+                    Self::Range(num, num)
                 }
             }
         };

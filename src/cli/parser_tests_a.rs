@@ -46,9 +46,11 @@ fn test_nearest_task_name_gives_up_on_a_distant_name() {
 }
 
 #[test]
-fn test_nearest_task_name_ignores_the_internal_names() {
-    // "graph" and "help" are partition-only entries, not things to suggest.
-    assert_eq!(nearest_task_name("grap", &names(&["graph", "help"])), None);
+fn test_nearest_task_name_ignores_help() {
+    // `help` is a partition-only entry, not a task to suggest. The lowercase
+    // `"graph"` this test used to pair it with was never in a production name
+    // list: the builtin is `Graph`.
+    assert_eq!(nearest_task_name("hel", &names(&["help"])), None);
 }
 
 #[test]
@@ -347,23 +349,159 @@ fn an_ottofile_after_a_double_dash_is_not_ours() {
 
 #[test]
 fn take_tui_flag_strips_the_flag_and_reports_it() {
-    let (kept, found) = take_tui_flag(names(&["build", "--tui", "--msg=x"]));
+    let (kept, found) = take_tui_flag(names(&["build", "--tui", "--msg=x"]), true);
     assert_eq!(kept, names(&["build", "--msg=x"]));
     assert!(found);
 }
 
 #[test]
+fn take_tui_flag_strips_the_declared_short_too() {
+    // `-t` is `--tui`'s declared short and global, so `otto build -t` has to
+    // mean the same thing as `otto build --tui`; unstripped, it reached the
+    // task's clap command as "unexpected argument '-t'".
+    let (kept, found) = take_tui_flag(names(&["build", "-t"]), true);
+    assert_eq!(kept, names(&["build"]));
+    assert!(found);
+}
+
+#[test]
+fn take_tui_flag_leaves_a_short_the_task_declares() {
+    let (kept, found) = take_tui_flag(names(&["build", "-t", "unit"]), false);
+    assert_eq!(kept, names(&["build", "-t", "unit"]));
+    assert!(!found, "a task that declares -t owns it");
+}
+
+#[test]
 fn take_tui_flag_leaves_other_args_alone() {
-    let (kept, found) = take_tui_flag(names(&["build", "--msg=x"]));
+    let (kept, found) = take_tui_flag(names(&["build", "--msg=x"]), true);
     assert_eq!(kept, names(&["build", "--msg=x"]));
     assert!(!found);
 }
 
+/// A foreach subtask is addressed as `up:gamma`, which is not a key of the task
+/// map, so the question "does a task in this arg list declare `-t`?" answered no
+/// for every subtask and otto took the short away from the parent that declared
+/// it: `otto up:gamma -t x` stripped `-t` as the TUI flag and `x` became a stray
+/// positional clap refused.
+#[test]
+fn a_foreach_subtask_claims_its_parents_short_t() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile_path = temp_dir.path().join("otto.yml");
+    fs::write(
+        &ottofile_path,
+        "tasks:\n  up:\n    foreach:\n      items: [alpha, beta, gamma]\n    params:\n      -t|--target:\n        help: where to deploy\n    action: echo up\n",
+    )
+    .unwrap();
+
+    let args = names(&[
+        "otto",
+        "--ottofile",
+        ottofile_path.to_str().unwrap(),
+        "up:gamma",
+        "-t",
+        "x",
+    ]);
+    let (tasks, _, _, _, tui_mode, _) = Parser::new(args)
+        .unwrap()
+        .parse()
+        .expect("the subtask's own -t must not be stripped")
+        .into_run()
+        .unwrap()
+        .into_parts();
+
+    assert!(!tui_mode, "a task that declares -t owns it, subtask id included");
+    let up = tasks
+        .iter()
+        .find(|t| t.name == "up:gamma")
+        .expect("up:gamma must be in the run set");
+    assert_eq!(up.values.get("target"), Some(&Value::Item("x".to_string())));
+}
+
+/// The same lookup gates `-h`: with the parent's `-h|--host` invisible behind
+/// the subtask id, `otto up:gamma -h example.com` printed help and then failed
+/// with `Task 'up:gamma' not found`.
+#[test]
+fn a_foreach_subtask_claims_its_parents_short_h() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let ottofile_path = temp_dir.path().join("otto.yml");
+    fs::write(
+        &ottofile_path,
+        "tasks:\n  up:\n    foreach:\n      items: [alpha, beta, gamma]\n    params:\n      -h|--host:\n        help: host to deploy to\n    action: echo up\n",
+    )
+    .unwrap();
+
+    let args = names(&[
+        "otto",
+        "--ottofile",
+        ottofile_path.to_str().unwrap(),
+        "up:gamma",
+        "-h",
+        "example.com",
+    ]);
+    let (tasks, _, _, _, _, _) = Parser::new(args)
+        .unwrap()
+        .parse()
+        .expect("help must not intercept a short the parent declares")
+        .into_run()
+        .unwrap()
+        .into_parts();
+
+    let up = tasks
+        .iter()
+        .find(|t| t.name == "up:gamma")
+        .expect("up:gamma must be in the run set");
+    assert_eq!(up.values.get("host"), Some(&Value::Item("example.com".to_string())));
+}
+
 #[test]
 fn take_tui_flag_respects_a_double_dash() {
-    let (kept, found) = take_tui_flag(names(&["build", "--", "--tui"]));
-    assert_eq!(kept, names(&["build", "--", "--tui"]));
+    let (kept, found) = take_tui_flag(names(&["build", "--", "--tui", "-t"]), true);
+    assert_eq!(kept, names(&["build", "--", "--tui", "-t"]));
     assert!(!found, "after -- the flag belongs to the task");
+}
+
+// =========================================================================
+// builtin/user task lists (Phase 5)
+// =========================================================================
+
+#[test]
+fn a_mixed_task_list_is_rejected_naming_both_sides() {
+    let err = reject_mixed_task_list(&names(&["build", "Clean"]))
+        .expect_err("a builtin cannot be combined with an ordinary task")
+        .to_string();
+    assert!(err.contains("'build'"), "the error must name the task, got: {err}");
+    assert!(err.contains("'Clean'"), "the error must name the builtin, got: {err}");
+}
+
+#[test]
+fn a_mixed_task_list_names_every_offender() {
+    let err = reject_mixed_task_list(&names(&["build", "Clean", "test", "Stats"]))
+        .expect_err("a builtin cannot be combined with an ordinary task")
+        .to_string();
+    for name in ["build", "test", "Clean", "Stats"] {
+        assert!(err.contains(&format!("'{name}'")), "missing '{name}' in: {err}");
+    }
+}
+
+#[test]
+fn an_all_user_task_list_is_accepted() {
+    assert!(reject_mixed_task_list(&names(&["build", "test"])).is_ok());
+}
+
+#[test]
+fn a_lone_builtin_is_accepted() {
+    assert!(reject_mixed_task_list(&names(&["Clean"])).is_ok());
+}
+
+#[test]
+fn an_empty_task_list_is_accepted() {
+    assert!(reject_mixed_task_list(&[]).is_ok());
 }
 
 #[test]
@@ -515,7 +653,10 @@ fn nargs_to_num_args_maps_every_variant() {
     assert_eq!(nargs_to_num_args(&Nargs::OneOrZero), (0..=1).into());
     assert_eq!(nargs_to_num_args(&Nargs::OneOrMore), (1..).into());
     assert_eq!(nargs_to_num_args(&Nargs::ZeroOrMore), (0..).into());
-    assert_eq!(nargs_to_num_args(&Nargs::Range(1, 5)), (2..=5).into());
+    assert_eq!(nargs_to_num_args(&Nargs::Range(2, 5)), (2..=5).into());
+    // A bare `nargs: "3"` is `Range(3, 3)`: exactly three, which is what the
+    // count means to clap and to argparse.
+    assert_eq!(nargs_to_num_args(&Nargs::Range(3, 3)), (3..=3).into());
 }
 
 #[test]
@@ -619,8 +760,8 @@ fn test_task_to_command_boolean_flags_only() {
 
 #[test]
 fn test_default_jobs_value() {
-    // Test that DEFAULT_JOBS equals num_cpus::get()
-    let expected = num_cpus::get().to_string();
+    // Test that DEFAULT_JOBS equals default_jobs()
+    let expected = default_jobs().to_string();
     assert_eq!(DEFAULT_JOBS.as_str(), expected);
 }
 
@@ -659,7 +800,7 @@ fn test_jobs_parameter_default() {
     let ottofile_path = temp_dir.path().join("otto.yml");
     fs::write(&ottofile_path, "tasks:\n  test:\n    action: echo test\n").unwrap();
 
-    // Test without explicit jobs value (should default to num_cpus::get())
+    // Test without explicit jobs value (should default to default_jobs())
     let args = vec![
         "otto".to_string(),
         "--ottofile".to_string(),
@@ -671,11 +812,11 @@ fn test_jobs_parameter_default() {
     let result = parser.parse();
     assert!(result.is_ok());
     let (_, _, _, jobs, _, _) = result.unwrap().into_run().unwrap().into_parts();
-    assert_eq!(jobs, num_cpus::get());
+    assert_eq!(jobs, default_jobs());
 }
 
 /// Inverted deliberately: this test used to assert that `-j invalid`
-/// silently fell back to `num_cpus::get()`. A concurrency limit the operator
+/// silently fell back to `default_jobs()`. A concurrency limit the operator
 /// typed and otto ignored is exactly the class of silent success this phase
 /// closes, so the value parser now rejects it.
 #[test]
@@ -1032,17 +1173,12 @@ tasks:
 
 #[test]
 fn test_help_renders_dynamic_for_a_command_sourced_foreach() {
-    let mut task_spec = TaskSpec::new(
-        "up".to_string(),
-        Some("Bring up each service".to_string()),
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        crate::cfg::param::ParamSpecs::new(),
-        "echo ${svc}".to_string(),
-    );
+    let mut task_spec = TaskSpec {
+        name: "up".to_string(),
+        help: Some("Bring up each service".to_string()),
+        action: "echo ${svc}".to_string(),
+        ..Default::default()
+    };
     task_spec.foreach = Some(ForeachSpec {
         // If help ever resolved this, the sentinel file would appear.
         command: Some("printf 'alpha\n'".to_string()),
@@ -1061,17 +1197,12 @@ fn test_help_renders_dynamic_for_a_command_sourced_foreach() {
 
 #[test]
 fn test_help_still_renders_item_counts_for_static_foreach() {
-    let mut task_spec = TaskSpec::new(
-        "up".to_string(),
-        Some("Bring up each service".to_string()),
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        crate::cfg::param::ParamSpecs::new(),
-        "echo ${svc}".to_string(),
-    );
+    let mut task_spec = TaskSpec {
+        name: "up".to_string(),
+        help: Some("Bring up each service".to_string()),
+        action: "echo ${svc}".to_string(),
+        ..Default::default()
+    };
     task_spec.foreach = Some(ForeachSpec {
         items: vec!["alpha".to_string(), "beta".to_string()],
         var_name: "svc".to_string(),

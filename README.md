@@ -20,16 +20,16 @@ curl -fsSL https://raw.githubusercontent.com/otto-rs/otto/main/install.sh | bash
 
 ### GitHub Actions (Recommended for CI/CD)
 
-Use [setup-otto](https://github.com/scottidler/setup-otto) to install otto in your workflows:
+Use [setup-otto](https://github.com/otto-rs/setup-otto) to install otto in your workflows:
 
 ```yaml
-- uses: scottidler/setup-otto@v1
+- uses: otto-rs/setup-otto@v1
 
 - name: Run otto tasks
   run: otto ci
 ```
 
-See [setup-otto](https://github.com/scottidler/setup-otto) for full documentation and options.
+See [setup-otto](https://github.com/otto-rs/setup-otto) for full documentation and options.
 
 ### From Source
 
@@ -98,9 +98,9 @@ otto build
 
 ## Usage
 
-`otto` runs tasks named in an ottofile (`otto.yml`/`otto.yaml`/`.otto.yml`),
-discovered by walking up from the current directory unless `-o/--ottofile`
-or `-C/--cwd` says otherwise.
+`otto` runs tasks named in an ottofile (`otto.yml`, `.otto.yml`, `otto.yaml`,
+`.otto.yaml`, `Ottofile`, or `OTTOFILE`), discovered by walking up from the
+current directory unless `-o/--ottofile` or `-C/--cwd` says otherwise.
 
 ```bash
 otto <task> [<task> ...]   # run one or more tasks by name
@@ -128,7 +128,7 @@ Every task and builtin has its own `--help`, e.g. `otto Convert --help` or
 
 ## Version Reporting
 
-The `otto` binary supports `--version` and `-v` flags:
+The `otto` binary supports `--version` and `-V`:
 
 ```
 $ otto --version
@@ -144,6 +144,4 @@ otto v0.1.0-3-gabcdef
 1. **Bump the version in `Cargo.toml`** to the new release version (e.g., `0.2.0`).
 2. **Commit** the change.
 3. **Tag** the commit with an annotated tag: `git tag -a v0.2.0 -m "Release v0.2.0"`.
-4. **Push** the tag: `git push --tags`.
-5. **Build** the binary. The version will be embedded from the tag and `git describe`.
-6. **Create a GitHub Release** and upload the binary. The version in the binary will match the release tag.
+4. **Push the tag**: `git push --tags`. `.github/workflows/release-and-publish.yml` triggers on the tag push, builds Linux and macOS binaries, and creates the GitHub Release with them attached. The version embedded in the binary comes from the tag via `git describe`.

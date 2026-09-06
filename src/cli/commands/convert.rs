@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use crate::makefile::{Diagnostic, MakefileParser, OttoConverter};
 
-/// Convert Makefile to Otto YAML format
+/// Convert a Makefile on stdin to an ottofile
 #[derive(Parser, Debug)]
-#[command(name = "convert")]
-#[command(about = "Convert Makefile to Otto YAML format")]
+#[command(name = "Convert")]
+#[command(about = "Convert a Makefile on stdin to an ottofile")]
 pub struct ConvertCommand {
     /// Treat warnings as errors
     #[arg(long)]
@@ -83,7 +83,7 @@ pub fn convert_makefile(content: String) -> Result<(String, Vec<Diagnostic>)> {
         .collect();
     diagnostics.sort_by_key(|d| d.line);
 
-    let yaml = serde_yaml::to_string(&config).wrap_err("Failed to serialize to YAML")?;
+    let yaml = yaml_serde::to_string(&config).wrap_err("Failed to serialize to YAML")?;
 
     Ok((yaml, diagnostics))
 }

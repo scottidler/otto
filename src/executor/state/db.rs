@@ -1,7 +1,7 @@
 use eyre::{Context, Result};
 use rusqlite::Connection;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use super::migrations::migrate;
@@ -23,10 +23,53 @@ const WAL_PRAGMA_BACKOFF: Duration = Duration::from_millis(20);
 /// The database file name inside the otto home.
 const DB_FILE_NAME: &str = "otto.db";
 
+/// A `BEGIN IMMEDIATE` transaction over a shared `&Connection`.
+///
+/// `Connection::transaction_with_behavior` needs `&mut Connection`, which
+/// neither the migration path nor `with_connection`'s closure has, and
+/// `unchecked_transaction` only gives the deferred behavior. A deferred
+/// transaction starts read-only and has to upgrade to a write lock on its first
+/// write; SQLite refuses to make that upgrade wait, returning `SQLITE_BUSY` at
+/// once rather than deadlocking, so `busy_timeout` cannot help there. Taking the
+/// write lock up front is the case `busy_timeout` does cover, which is why every
+/// read-then-write path in this module uses this and not `unchecked_transaction`.
+///
+/// This drives the statements directly and rolls back on drop if `commit` was
+/// never called.
+///
+/// It lives here rather than in `migrations.rs` because it is connection-level
+/// plumbing that both the cold-start path and `manager.rs`'s record/delete paths
+/// need.
+pub(super) struct TransactionGuard<'c> {
+    conn: &'c Connection,
+    committed: bool,
+}
+
+impl<'c> TransactionGuard<'c> {
+    pub(super) fn immediate(conn: &'c Connection) -> Result<Self> {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .context("Failed to begin an immediate transaction")?;
+        Ok(Self { conn, committed: false })
+    }
+
+    pub(super) fn commit(mut self) -> Result<()> {
+        self.conn.execute_batch("COMMIT").context("Failed to commit")?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for TransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
+}
+
 /// Database manager for Otto's SQLite database
 pub struct DatabaseManager {
-    conn: Arc<Mutex<Connection>>,
-    db_path: PathBuf,
+    conn: Mutex<Connection>,
 }
 
 impl DatabaseManager {
@@ -108,10 +151,7 @@ impl DatabaseManager {
         // Run migrations
         migrate(&conn).context("Failed to run database migrations")?;
 
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-            db_path,
-        })
+        Ok(Self { conn: Mutex::new(conn) })
     }
 
     /// Open the database at the default Otto location.
@@ -120,17 +160,6 @@ impl DatabaseManager {
         Self::new(db_path)
     }
 
-    /// Where the database lives, in precedence order:
-    ///
-    /// 1. `$OTTO_DB_PATH`, an escape hatch for pointing several projects at one
-    ///    store or putting the store on a tmpfs.
-    /// 2. `<otto home>/otto.db`, where the otto home is `$OTTO_HOME` or
-    ///    `$HOME/.otto`.
-    ///
-    /// The database is derived from the otto home rather than hardcoded to
-    /// `$HOME/.otto`, so `OTTO_HOME` is the single knob that moves otto's state.
-    /// It used to move only the run directories: a run under a scratch
-    /// `OTTO_HOME` still wrote its rows into the developer's real database.
     /// Under `cfg(test)` only: abort rather than open `$HOME/.otto/otto.db`.
     ///
     /// Several `--lib` tests mutate `OTTO_HOME` process-globally and a few
@@ -167,17 +196,23 @@ impl DatabaseManager {
         );
     }
 
+    /// Where the database lives, in precedence order:
+    ///
+    /// 1. `$OTTO_DB_PATH`, an escape hatch for pointing several projects at one
+    ///    store or putting the store on a tmpfs.
+    /// 2. `<otto home>/otto.db`, where the otto home is `$OTTO_HOME` or
+    ///    `$HOME/.otto`.
+    ///
+    /// The database is derived from the otto home rather than hardcoded to
+    /// `$HOME/.otto`, so `OTTO_HOME` is the single knob that moves otto's state.
+    /// It used to move only the run directories: a run under a scratch
+    /// `OTTO_HOME` still wrote its rows into the developer's real database.
     pub fn default_db_path() -> Result<PathBuf> {
         if let Ok(db_path) = std::env::var("OTTO_DB_PATH") {
             return Ok(PathBuf::from(db_path));
         }
 
         Ok(resolve_otto_home()?.join(DB_FILE_NAME))
-    }
-
-    /// Get the database path
-    pub fn path(&self) -> &Path {
-        &self.db_path
     }
 
     /// Execute a closure with access to the database connection
@@ -194,38 +229,6 @@ impl DatabaseManager {
             .map_err(|e| eyre::eyre!("Failed to lock database connection: {}", e))?;
         f(&conn)
     }
-
-    pub fn health_check(&self) -> Result<()> {
-        self.with_connection(|conn| {
-            conn.query_row("SELECT 1", [], |_| Ok(()))?;
-            Ok(())
-        })
-    }
-
-    /// Get database statistics
-    pub fn stats(&self) -> Result<DatabaseStats> {
-        self.with_connection(|conn| {
-            let project_count: i64 = conn.query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))?;
-
-            let run_count: i64 = conn.query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))?;
-
-            let task_count: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
-
-            Ok(DatabaseStats {
-                project_count,
-                run_count,
-                task_count,
-            })
-        })
-    }
-}
-
-/// Database statistics
-#[derive(Debug, Clone)]
-pub struct DatabaseStats {
-    pub project_count: i64,
-    pub run_count: i64,
-    pub task_count: i64,
 }
 
 #[path = "db_tests.rs"]

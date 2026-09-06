@@ -1,0 +1,12 @@
+otto:
+  about: Converted from Makefile
+  api: '1'
+  tasks:
+  - clean
+tasks:
+  clean:
+    bash: rm -rf build
+  build:
+    before:
+    - clean
+    bash: echo build

@@ -79,5 +79,48 @@ pub fn is_subtask(name: &str) -> bool {
     split_subtask(name).is_some()
 }
 
+/// The display name for a project recorded in the state database: the name of
+/// the directory its ottofile lives in, or `hash` when there is no ottofile
+/// path (or it has no parent directory to name).
+///
+/// e.g. `/home/user/repos/otto/otto.yml` -> `"otto"`.
+///
+/// Copied three times before this - `StateManager::ensure_project`,
+/// `schema::migrate_v1_to_v2`'s name backfill, and
+/// `MemoryStateStore::get_or_create_project` - once per state backend plus the
+/// migration that seeded the column those backends now read.
+#[must_use]
+pub fn project_name_from(ottofile: Option<&std::path::Path>, hash: &str) -> String {
+    ottofile
+        .and_then(|path| path.parent())
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or(hash)
+        .to_string()
+}
+
+/// Whether `name` is a shell/environment identifier: `[A-Za-z_][A-Za-z0-9_]*`.
+///
+/// The whole-name rule, spelled out rather than pulled through a regex
+/// dependency for one predicate. It was written twice before this - once in
+/// `cfg::env` to reject a bad key in a parsed `.env` file, once in
+/// `executor::action` to reject a name that cannot appear on the left of an
+/// assignment in a generated script - and the two copies were the same
+/// function, so a change to one would have been a divergence.
+///
+/// Deliberately *not* the rule used to fold a name into a variable name. That
+/// fold is per byte (`[A-Za-z0-9_]` kept, everything else `_`), and applying
+/// this leading-digit rule byte by byte would turn `OTTO_INPUT_UP_2024` into
+/// `OTTO_INPUT_UP____`.
+#[must_use]
+pub(crate) fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[path = "naming_tests.rs"]
 mod tests;

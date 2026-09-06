@@ -266,6 +266,21 @@ Otto's own state directory is `$OTTO_HOME` (or `$HOME/.otto`), an environment
 variable with no flag spelling; the database under it can be moved on its own
 with `$OTTO_DB_PATH`.
 
+### Per-Task Option: `--Serial`
+
+Not a global option — it is auto-injected onto every `foreach` task's own
+argument parser (`BUILTIN_PARAMS` in `src/cli/builtins.rs`), so it only
+appears after a foreach task's name, e.g. `otto logs --Serial`.
+
+| Option | Short | Type | Description |
+|--------|-------|------|-------------|
+| `--Serial` | | `Flag` | Force one item at a time for this foreach task's run, overriding `foreach.parallel: true` |
+
+Rejected, at run setup rather than at load time, when combined with
+`foreach.jobs` on the same task: `Task '<name>': --Serial cannot be combined
+with foreach.jobs` (`docs/commands/buffered-foreach.md` has the full rationale
+— `jobs` only makes sense when items run concurrently).
+
 ### Task Arguments
 
 Task arguments are dynamically typed based on configuration:
@@ -460,47 +475,17 @@ command_line
 
 ## Implementation Notes
 
-### Two-Pass Parsing
+The real implementation is `src/cli/parser.rs`. There is no separate two-pass
+parser built on `nom`, no `enum ParseError`, and no `enum ValidatedValue` —
+`nom` is not a dependency of this crate. The actual split between global
+options and task invocations is `partitions()`: it finds where each task
+invocation starts (via `indices()`, matching against the loaded config's task
+names) and slices the argument vector at those boundaries, one slice per task
+invocation plus a leading slice of otto's own global options. Each slice is
+then handed to that task's own `clap`-derived parser. `contains_flag()`
+(`parser.rs`) is the one place a flag like `--Serial` is looked up directly in
+an argument slice, and it skips over any option's value so a flag spelled
+inside a value's text (`--msg --Serial`, the string) doesn't false-match.
 
-1. **Pass 1**: `parse_global_options_only()`
-   - Extracts known global options from anywhere in command line
-   - Returns `(Vec<GlobalOption>, remaining_args: String)`
-   - Uses hybrid approach: nom for individual parsing, loop for structure
-
-2. **Pass 2**: `parse_tasks_only()`
-   - Parses remaining arguments as task invocations
-   - Validates against loaded configuration
-   - Pure nom parser combinators
-
-### Error Handling
-
-```rust
-enum ParseError {
-    // nom errors
-    NomError { input: String, position: usize, kind: ErrorKind, context: Vec<String> },
-
-    // Semantic errors
-    UnknownTask { name: String, suggestions: Vec<String> },
-    UnknownGlobalOption { name: String },
-    UnknownTaskArgument { task_name: String, arg_name: String },
-
-    // Validation errors
-    InvalidArgumentValue { arg_name: String, value: String, expected: String },
-    ValidationError { task_name: String, arg_name: String, error: String },
-
-    // Input errors
-    UnconsumedInput { remaining: String },
-    IncompleteInput,
-}
-```
-
-### Grammar Extensions
-
-The grammar is designed to be extensible:
-
-1. **New global options** can be added to the known options list
-2. **New commands** can be added to the command alternatives
-3. **Task arguments** are dynamically validated against configuration
-4. **Parameter types** can be extended in the validation system
-
-This grammar specification provides a formal foundation for understanding, implementing, and extending the Otto CLI parser.
+This grammar specification is a formal description of the CLI surface, not of
+the parser's internal architecture.

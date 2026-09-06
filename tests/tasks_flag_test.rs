@@ -94,7 +94,7 @@ fn tasks_yaml_format_has_same_keys_as_json_default() {
         .unwrap();
     assert!(yaml_out.status.success());
     let yaml_stdout = String::from_utf8_lossy(&yaml_out.stdout).to_string();
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&yaml_stdout).expect("stdout must be valid YAML");
+    let yaml: yaml_serde::Value = yaml_serde::from_str(&yaml_stdout).expect("stdout must be valid YAML");
     let mut yaml_keys: Vec<String> = yaml
         .as_mapping()
         .expect("top-level value must be a mapping")
@@ -233,7 +233,7 @@ fn tasks_defaults_to_yaml_on_a_real_tty() {
     // On a parse failure, show the bytes. A pty run picks up whatever the host's
     // `script` writes around the child's output, and "control characters are not
     // allowed" with no bytes attached is unactionable from a CI log.
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap_or_else(|e| {
+    let yaml: yaml_serde::Value = yaml_serde::from_str(&stdout).unwrap_or_else(|e| {
         panic!(
             "tty output must be valid YAML: {e}\nfirst 120 bytes: {:?}",
             &output.stdout[..output.stdout.len().min(120)]

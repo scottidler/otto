@@ -232,9 +232,20 @@ async fn main() {
     };
 
     if let Err(e) = otto::run(config).await {
-        eprintln!("{e:#}");
+        report_fatal(&e);
         std::process::exit(1);
     }
+}
+
+/// Print a fatal error to stderr, best effort.
+///
+/// Not `eprintln!`: a run that ended because the terminal hung up has a stderr
+/// whose every write fails EIO, and `eprintln!` panics on a failed write. The
+/// run is already recorded by the time this is reached; a panic here would
+/// only swap the exit code from 1 to 101 for a message nobody can see.
+fn report_fatal(e: &Report) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{e:#}");
 }
 
 /// Handle --is-valid-ottofile argument. Returns Some(exit_code) if handled.
@@ -307,18 +318,48 @@ fn first_command_index(args: &[String]) -> Option<usize> {
     None
 }
 
+/// The builtins that run before any ottofile is read, each through its own clap
+/// parser.
+///
+/// A separate enum from `otto::app::Builtin` because it is deliberately not the
+/// same set: `Graph` needs the parsed ottofile's task specs, so it has no early
+/// route and is reached by the task route alone. Naming the difference in a
+/// type is what lets a test assert it, instead of a comment claiming it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EarlyCommand {
+    Clean,
+    Convert,
+    History,
+    Stats,
+    Upgrade,
+}
+
+impl EarlyCommand {
+    /// The early route for a command name, if it has one. Pure: no I/O, and it
+    /// runs nothing.
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Clean" => Some(Self::Clean),
+            "Convert" => Some(Self::Convert),
+            "History" => Some(Self::History),
+            "Stats" => Some(Self::Stats),
+            "Upgrade" => Some(Self::Upgrade),
+            _ => None,
+        }
+    }
+}
+
 /// Handle subcommands that use their own clap parsers. Returns Some(result) if handled.
 async fn handle_subcommand(args: &[String]) -> Option<Result<(), Report>> {
     let index = first_command_index(args)?;
     let rest = &args[index..];
-    match rest[0].as_str() {
-        "Clean" => Some(otto::app::execute_clean_command(rest).await),
-        "Convert" => Some(otto::app::execute_convert_command(rest)),
-        "History" => Some(otto::app::execute_history_command(rest)),
-        "Stats" => Some(otto::app::execute_stats_command(rest)),
-        "Upgrade" => Some(otto::app::execute_upgrade_command(rest).await),
-        _ => None,
-    }
+    Some(match EarlyCommand::from_name(&rest[0])? {
+        EarlyCommand::Clean => otto::app::execute_clean_command(rest).await,
+        EarlyCommand::Convert => otto::app::execute_convert_command(rest),
+        EarlyCommand::History => otto::app::execute_history_command(rest),
+        EarlyCommand::Stats => otto::app::execute_stats_command(rest),
+        EarlyCommand::Upgrade => otto::app::execute_upgrade_command(rest).await,
+    })
 }
 
 #[path = "main_tests.rs"]
