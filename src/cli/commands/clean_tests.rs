@@ -983,7 +983,7 @@ async fn test_delete_run_from_store() -> Result<()> {
         .expect("the 40-day-old run is in the store");
 
     // Delete it by id, which is what identifies a run.
-    let deleted = store.delete_run(target.id, false)?;
+    let deleted = store.delete_run(target.id, false, Path::new("/unused"))?;
     assert!(deleted.is_some());
 
     // Verify it's gone
@@ -996,7 +996,7 @@ async fn test_delete_run_from_store() -> Result<()> {
 async fn test_delete_nonexistent_run() -> Result<()> {
     let store = Arc::new(MemoryStateStore::new());
 
-    let deleted = store.delete_run(9999, false)?;
+    let deleted = store.delete_run(9999, false, Path::new("/unused"))?;
     assert!(deleted.is_none());
     Ok(())
 }
@@ -1227,36 +1227,6 @@ async fn a_run_deleted_by_someone_else_first_is_not_a_failed_delete() -> Result<
 // The orphan sweep: run directories the database cannot name.
 // ========================================
 
-/// `$OTTO_HOME` pinned for the length of a test, and restored on the way out.
-///
-/// Needed wherever a test reaches `StateManager::delete_run`, which resolves the
-/// home it fences against from the environment rather than taking it as an
-/// argument.
-struct PinnedOttoHome {
-    previous: Option<std::ffi::OsString>,
-}
-
-impl PinnedOttoHome {
-    fn at(home: &Path) -> Self {
-        let previous = std::env::var_os("OTTO_HOME");
-        unsafe {
-            std::env::set_var("OTTO_HOME", home);
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for PinnedOttoHome {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.previous {
-                Some(home) => std::env::set_var("OTTO_HOME", home),
-                None => std::env::remove_var("OTTO_HOME"),
-            }
-        }
-    }
-}
-
 /// A run directory with a row that records it, aged `days_old`.
 fn row_backed_run(store: &MemoryStateStore, otto_home: &Path, timestamp: u64) -> Result<PathBuf> {
     create_test_run(otto_home, "abc12345", timestamp, 1)?;
@@ -1368,15 +1338,12 @@ async fn a_row_with_no_run_directory_leaves_no_orphan_behind() -> Result<()> {
 /// The regression the phase exists for: one row-backed run and one
 /// directory-only run, both past retention, both removed by the default path.
 ///
-/// `OTTO_HOME` is pinned as well as passed, because the two deletions are fenced
-/// from different places: the sweep against the home this command was given, and
-/// the row pass against the one `StateManager` resolves for itself. In
-/// production they are the same directory.
+/// Both deletions are fenced against the same directory: the home this command
+/// was given. The row pass used to resolve its own from `$OTTO_HOME`, so this
+/// test had to pin the environment as well as pass the home.
 #[tokio::test]
-#[serial_test::serial]
 async fn the_default_path_removes_both_a_row_backed_run_and_a_directory_only_run() -> Result<()> {
     let home = TempDir::new()?;
-    let _pinned = PinnedOttoHome::at(home.path());
     let now = now_timestamp();
     let db_path = home.path().join("otto.db");
     let manager = StateManager::with_db_path(db_path)?;
@@ -1442,10 +1409,8 @@ fn row_backed_run_with_status(
 /// failed-run retention. This is the one place the two modes differ by design,
 /// and it is why the parity criterion is scoped to invocations without the flag.
 #[tokio::test]
-#[serial_test::serial]
 async fn keep_failed_widens_the_cutoff_only_for_directories_with_no_row() -> Result<()> {
     let home = TempDir::new()?;
-    let _pinned = PinnedOttoHome::at(home.path());
     let now = now_timestamp();
     let manager = StateManager::with_db_path(home.path().join("otto.db"))?;
 

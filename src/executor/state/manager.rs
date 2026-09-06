@@ -1,13 +1,12 @@
 use eyre::{Context, Result};
 use rusqlite::{OptionalExtension, params};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use super::db::{DatabaseManager, TransactionGuard};
 use super::metadata::RunMetadata;
 use super::retention::{Retention, RunAge};
 use super::schema::{RunStatus, SkipKind, TaskStatus};
-use crate::executor::layout::resolve_otto_home;
 use crate::ports::StateStore;
 
 /// Every column of `runs`, in the order [`StateManager::row_to_run_record`]
@@ -756,15 +755,22 @@ impl StateManager {
     /// kept its directory, orphaned with nothing pointing at it. The unlink stays
     /// after the commit for the opposite reason: a failed unlink must not roll a
     /// committed delete back into existence.
-    pub fn delete_run(&self, run_id: i64, delete_filesystem: bool) -> Result<Option<RunRecord>> {
-        log::debug!("delete_run: run_id={run_id} delete_filesystem={delete_filesystem}");
+    pub fn delete_run(&self, run_id: i64, delete_filesystem: bool, otto_home: &Path) -> Result<Option<RunRecord>> {
+        log::debug!(
+            "delete_run: run_id={run_id} delete_filesystem={delete_filesystem} otto_home={}",
+            otto_home.display()
+        );
 
         let Some(run_record) = self.read_run(run_id)? else {
             return Ok(None);
         };
 
         // Before BEGIN: a refusal here leaves the database untouched.
-        let doomed_dir = if delete_filesystem { self.resolve_run_directory(&run_record)? } else { None };
+        let doomed_dir = if delete_filesystem {
+            self.resolve_run_directory(&run_record, otto_home)?
+        } else {
+            None
+        };
 
         let deleted = self.db.with_connection(|conn| {
             let tx = TransactionGuard::immediate(conn)?;
@@ -840,9 +846,7 @@ impl StateManager {
     /// deletes the row and orphans the directory, with the only pointer to it
     /// gone. `Clean` reclaims those by path instead, so the rows are all this
     /// has to remove.
-    fn resolve_run_directory(&self, run: &RunRecord) -> Result<Option<PathBuf>> {
-        let otto_home = resolve_otto_home().context("Cannot locate the otto home to delete a run directory")?;
-
+    fn resolve_run_directory(&self, run: &RunRecord, otto_home: &Path) -> Result<Option<PathBuf>> {
         let Some(run_dir) = run.run_dir.clone() else {
             log::warn!(
                 "Run {} recorded no directory; deleting its database rows only, and leaving any directory to the orphan sweep",
@@ -866,7 +870,7 @@ impl StateManager {
         // through a symlink, never delete outside the otto root. The DB path had
         // no check at all, so a run directory replaced by a link deleted the
         // link's target instead.
-        let canonical = crate::executor::pruning::ensure_deletable_under_root(&run_dir, &otto_home)
+        let canonical = crate::executor::pruning::ensure_deletable_under_root(&run_dir, otto_home)
             .context("Refusing to delete run directory")?;
         Ok(Some(canonical))
     }
@@ -997,8 +1001,8 @@ impl StateStore for StateManager {
         StateManager::find_old_runs(self, keep_days, keep_last, keep_failed_days, project_filter)
     }
 
-    fn delete_run(&self, run_id: i64, delete_filesystem: bool) -> Result<Option<RunRecord>> {
-        StateManager::delete_run(self, run_id, delete_filesystem)
+    fn delete_run(&self, run_id: i64, delete_filesystem: bool, otto_home: &Path) -> Result<Option<RunRecord>> {
+        StateManager::delete_run(self, run_id, delete_filesystem, otto_home)
     }
 }
 

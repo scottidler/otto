@@ -4,7 +4,7 @@
 //! the real SQLite implementation to be swapped with an in-memory fake for testing.
 
 use eyre::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 
@@ -64,7 +64,15 @@ pub trait StateStore: Send + Sync {
         keep_failed_days: Option<u64>,
         project_filter: Option<&str>,
     ) -> Result<Vec<RunRecord>>;
-    fn delete_run(&self, run_id: i64, delete_filesystem: bool) -> Result<Option<RunRecord>>;
+    /// Delete one run's rows, and its run directory when `delete_filesystem`.
+    ///
+    /// `otto_home` is the root the directory delete is fenced against, passed in
+    /// rather than resolved from `$OTTO_HOME` inside the implementation. The two
+    /// deletion paths used to fence against roots that could differ: `Clean`'s
+    /// orphan sweep against the home it was given, this one against whatever the
+    /// environment said. Identical in production, and a trap in tests, where a
+    /// caller that pinned neither got every directory delete refused.
+    fn delete_run(&self, run_id: i64, delete_filesystem: bool, otto_home: &Path) -> Result<Option<RunRecord>>;
 }
 
 /// Run one blocking `StateStore` call on tokio's blocking pool.
@@ -512,7 +520,7 @@ impl StateStore for MemoryStateStore {
         Ok(runs_to_delete)
     }
 
-    fn delete_run(&self, run_id: i64, _delete_filesystem: bool) -> Result<Option<RunRecord>> {
+    fn delete_run(&self, run_id: i64, _delete_filesystem: bool, _otto_home: &Path) -> Result<Option<RunRecord>> {
         if self.delete_run_returns_none.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(None);
         }

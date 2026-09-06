@@ -529,3 +529,101 @@ async fn builtins_input_fold_matches_the_writer_fold() -> Result<()> {
 
     Ok(())
 }
+
+/// Every file under the otto home that any user other than the owner can read.
+#[cfg(unix)]
+fn world_or_group_readable_files(root: &std::path::Path) -> Result<Vec<PathBuf>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            // Not followed: the task directory reaches the cache entry through
+            // one, and a symlink's own mode means nothing on Linux.
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if entry.metadata()?.permissions().mode() & 0o044 != 0 {
+                found.push(entry.path());
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// A generated task script carries its parameter values verbatim, so it is the
+/// one file in the tree that can hold a secret the caller typed on the command
+/// line. It was written 0o755, inside a `.cache` directory left at the process
+/// umask, so both the values and the file names were readable by every user on
+/// the machine.
+///
+/// The assertion is deliberately the whole tree rather than the one path: a
+/// value that leaks is only interesting if it lands somewhere readable, and
+/// naming the file in advance would miss the next writer that copies it.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn a_parameter_value_never_lands_in_a_file_another_user_can_read() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    const CANARY: &str = "CANARY_SECRET_9Z";
+
+    let temp_dir = TempDir::new()?;
+    setup_test_db(temp_dir.path());
+    let otto_home = temp_dir.path().join(".otto");
+    let workspace = Arc::new(Workspace::new(temp_dir.path().to_path_buf()).await?);
+    workspace.init().await?;
+
+    let processor = ActionProcessor::new(workspace.clone(), "leaky")?;
+
+    let mut task_values = HashMap::new();
+    task_values.insert("token".to_string(), Value::Item(CANARY.to_string()));
+    let task = Task::new(
+        "leaky".to_string(),
+        None,
+        vec![],
+        vec![],
+        vec![],
+        HashMap::new(),
+        task_values,
+        "#!/usr/bin/env bash\ntrue".to_string(),
+    );
+
+    let ProcessedAction::Bash { path, .. } = processor.process(&task.action, &task)? else {
+        panic!("a bash action processes to a bash script");
+    };
+
+    // `path` is the symlink in the task directory; the bytes live in the cache
+    // entry it points at.
+    let cache_file = std::fs::canonicalize(&path)?;
+    let script = std::fs::read_to_string(&cache_file)?;
+    assert!(
+        script.contains(CANARY),
+        "the fixture only means anything if the value really is written into the script"
+    );
+
+    let mode = std::fs::metadata(&cache_file)?.permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "the generated script is owner-only, got {mode:o}");
+
+    let cache_mode = std::fs::metadata(workspace.cache_dir())?.permissions().mode() & 0o777;
+    assert_eq!(
+        cache_mode, 0o700,
+        "and so is the directory holding it, so the names are not enumerable either, got {cache_mode:o}"
+    );
+
+    for readable in world_or_group_readable_files(&otto_home)? {
+        let contents = std::fs::read(&readable)?;
+        assert!(
+            !String::from_utf8_lossy(&contents).contains(CANARY),
+            "the parameter value leaked into {}, which other users can read",
+            readable.display()
+        );
+    }
+
+    Ok(())
+}
