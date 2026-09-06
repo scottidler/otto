@@ -93,6 +93,17 @@ pub struct Workspace<F: FileSystem = RealFs> {
     cache: PathBuf,   // <name>-<hash>/.cache
     run: PathBuf,     // <name>-<hash>/<timestamp>
 
+    // Liveness
+    //
+    // The advisory lock on this run's own directory, and the reason the field
+    // exists at all: `flock` releases when the last descriptor closes, which in
+    // Rust means when the `File` drops. Taken as a local inside the reservation
+    // loop below it would drop before the first task started, and the
+    // protection would be silently absent - the lock taken, nothing guarded.
+    // Held here, it lasts as long as the `Workspace`, which both entry paths
+    // keep alive through `record_run_complete_in_db`.
+    run_lock: crate::executor::runlock::RunLock,
+
     // Database integration
     db_run_id: std::sync::Mutex<Option<i64>>, // Run ID from database
     state_store: Option<Arc<dyn StateStore>>, // Optional state store for DB operations
@@ -176,20 +187,29 @@ impl<F: FileSystem> Workspace<F> {
         fs.create_dir_all(&project)
             .await
             .map_err(|e| eyre!("Failed to create project directory {}: {}", project.display(), e))?;
-        let mut run = project.join(run_dir_name(time, 0));
+        let mut reserved = None;
         for seq in 0..RUN_DIR_ATTEMPTS {
             let candidate = project.join(run_dir_name(time, seq));
             if fs.create_dir_exclusive(&candidate).await? {
-                run = candidate;
+                // Locked in the same step that reserved the name, because the
+                // directory is a deletion candidate from the moment it exists
+                // and its row is not written until later - or, when the store
+                // will not open, never. Failing here aborts the run: proceeding
+                // unprotected is the exact failure the lock exists to prevent,
+                // and it would be invisible.
+                let lock = fs
+                    .lock_run_dir_sync(&candidate)
+                    .map_err(|e| eyre!("Failed to lock run directory {}: {}", candidate.display(), e))?;
+                reserved = Some((candidate, lock));
                 break;
             }
-            if seq + 1 == RUN_DIR_ATTEMPTS {
-                return Err(eyre!(
-                    "Failed to reserve a run directory under {} after {RUN_DIR_ATTEMPTS} attempts",
-                    project.display()
-                ));
-            }
         }
+        let (run, run_lock) = reserved.ok_or_else(|| {
+            eyre!(
+                "Failed to reserve a run directory under {} after {RUN_DIR_ATTEMPTS} attempts",
+                project.display()
+            )
+        })?;
 
         // Try to create default StateManager for production use
         let state_store: Option<Arc<dyn StateStore>> =
@@ -206,6 +226,7 @@ impl<F: FileSystem> Workspace<F> {
             project,
             cache,
             run,
+            run_lock,
             db_run_id: std::sync::Mutex::new(None),
             state_store,
             fs,
@@ -227,6 +248,11 @@ impl<F: FileSystem> Workspace<F> {
     /// Get a reference to the state store (for task recording in scheduler)
     pub fn state_store(&self) -> Option<&Arc<dyn StateStore>> {
         self.state_store.as_ref()
+    }
+
+    /// The lock this run holds on its own directory, which cleanup honours.
+    pub fn run_lock(&self) -> &crate::executor::runlock::RunLock {
+        &self.run_lock
     }
 
     /// Initialize workspace directories

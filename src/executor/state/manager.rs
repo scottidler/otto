@@ -7,7 +7,7 @@ use super::db::{DatabaseManager, TransactionGuard};
 use super::metadata::RunMetadata;
 use super::retention::{Retention, RunAge};
 use super::schema::{RunStatus, SkipKind, TaskStatus};
-use crate::executor::layout::{resolve_otto_home, run_root};
+use crate::executor::layout::resolve_otto_home;
 use crate::ports::StateStore;
 
 /// Every column of `runs`, in the order [`StateManager::row_to_run_record`]
@@ -47,7 +47,9 @@ pub struct RunRecord {
     pub args: Option<Vec<String>>,
     pub ended_at: Option<u64>,
     /// The directory this run wrote into, as recorded at run start. `None` for
-    /// rows written before schema v5, which fall back to a derived path.
+    /// rows written before schema v5, and for runs whose start was recorded
+    /// without one; no path is derived for those, and `Clean` reclaims the
+    /// directory by path instead.
     pub run_dir: Option<PathBuf>,
 }
 
@@ -757,16 +759,12 @@ impl StateManager {
     pub fn delete_run(&self, run_id: i64, delete_filesystem: bool) -> Result<Option<RunRecord>> {
         log::debug!("delete_run: run_id={run_id} delete_filesystem={delete_filesystem}");
 
-        let Some((run_record, project_hash, project_name)) = self.read_run_with_project(run_id)? else {
+        let Some(run_record) = self.read_run(run_id)? else {
             return Ok(None);
         };
 
         // Before BEGIN: a refusal here leaves the database untouched.
-        let doomed_dir = if delete_filesystem {
-            self.resolve_run_directory(&run_record, &project_name, &project_hash)?
-        } else {
-            None
-        };
+        let doomed_dir = if delete_filesystem { self.resolve_run_directory(&run_record)? } else { None };
 
         let deleted = self.db.with_connection(|conn| {
             let tx = TransactionGuard::immediate(conn)?;
@@ -808,24 +806,18 @@ impl StateManager {
         Ok(Some(run_record))
     }
 
-    /// Read one run row together with its project's hash and display name.
-    fn read_run_with_project(&self, run_id: i64) -> Result<Option<(RunRecord, String, String)>> {
+    /// Read one run row.
+    ///
+    /// It used to read the project's hash and display name alongside it, for a
+    /// run directory path derived from them. Nothing derives that path any more:
+    /// a row that recorded no directory has its rows deleted and its directory,
+    /// if there is one, reclaimed by path by `Clean`'s orphan sweep.
+    fn read_run(&self, run_id: i64) -> Result<Option<RunRecord>> {
         self.db.with_connection(|conn| {
             let query = format!("SELECT {RUN_COLUMNS} FROM runs r WHERE r.id = ?1");
-            let Some(run_record) = conn
+            Ok(conn
                 .query_row(&query, params![run_id], Self::row_to_run_record)
-                .optional()?
-            else {
-                return Ok(None);
-            };
-
-            let (hash, name): (String, String) = conn.query_row(
-                "SELECT hash, COALESCE(name, hash) FROM projects WHERE id = ?1",
-                params![run_record.project_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-
-            Ok(Some((run_record, hash, name)))
+                .optional()?)
         })
     }
 
@@ -838,23 +830,25 @@ impl StateManager {
     /// matched neither the `<name>-<hash>` naming convention nor `OTTO_HOME`, so
     /// it deleted the rows and left every directory behind.
     ///
-    /// Rows written before schema v5 carry no directory, so one is derived from
-    /// the same helper `Workspace` builds with. That derivation is best-effort:
-    /// `projects.hash` is a hash of the ottofile's *contents* (`parser.rs`),
-    /// while the directory name carries a hash of the project's *path*
-    /// (`workspace.rs`), and for a pre-v5 row nothing recorded the latter. A
-    /// derivation that misses is reported rather than passed off as a delete.
-    fn resolve_run_directory(
-        &self,
-        run: &RunRecord,
-        project_name: &str,
-        project_hash: &str,
-    ) -> Result<Option<PathBuf>> {
+    /// Rows written before schema v5 carry no directory, and no path is derived
+    /// for them. The derivation that used to be here could not be right: it
+    /// rebuilt `<name>-<hash>/<timestamp>`, which cannot match the
+    /// `<timestamp>-<seq>` directory a same-second run gets and cannot survive a
+    /// moved or renamed ottofile, and `projects.hash` is a hash of the
+    /// ottofile's *contents* (`parser.rs`) while the directory name carries a
+    /// hash of the project's *path* (`workspace.rs`). A guess that misses
+    /// deletes the row and orphans the directory, with the only pointer to it
+    /// gone. `Clean` reclaims those by path instead, so the rows are all this
+    /// has to remove.
+    fn resolve_run_directory(&self, run: &RunRecord) -> Result<Option<PathBuf>> {
         let otto_home = resolve_otto_home().context("Cannot locate the otto home to delete a run directory")?;
 
-        let run_dir = match run.run_dir {
-            Some(ref dir) => dir.clone(),
-            None => run_root(&otto_home, project_name, project_hash).join(run.timestamp.to_string()),
+        let Some(run_dir) = run.run_dir.clone() else {
+            log::warn!(
+                "Run {} recorded no directory; deleting its database rows only, and leaving any directory to the orphan sweep",
+                run.timestamp
+            );
+            return Ok(None);
         };
 
         if std::fs::symlink_metadata(&run_dir).is_err() {

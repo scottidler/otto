@@ -24,6 +24,30 @@ fn otto(home_dir: &std::path::Path, otto_home: &std::path::Path) -> assert_cmd::
     cmd
 }
 
+/// Where a run of `PROJECT` writes: `<otto home>/<name>-<hash>/<timestamp>`.
+fn run_dir(otto_home: &std::path::Path, project_hash: &str, timestamp: u64) -> PathBuf {
+    otto_home
+        .join(format!("{}-{}", PROJECT, project_hash))
+        .join(timestamp.to_string())
+}
+
+/// The run directories a `--dry-run` listing names, sorted.
+///
+/// Both modes print the run directory last on every line they list, which is
+/// what makes two selections comparable as sets instead of as counts.
+fn selected_run_dirs(stdout: &str, otto_home: &std::path::Path) -> Vec<String> {
+    let prefix = otto_home.display().to_string();
+    let mut found: Vec<String> = stdout
+        .lines()
+        .filter(|line| line.starts_with("  "))
+        .filter_map(|line| line.rsplit(' ').next())
+        .filter(|word| word.starts_with(&prefix))
+        .map(str::to_string)
+        .collect();
+    found.sort();
+    found
+}
+
 /// Helper to create a test run directory structure
 fn create_test_run(otto_home: &std::path::Path, project_hash: &str, timestamp: u64, status: &str) -> Result<()> {
     let run_dir = otto_home
@@ -233,6 +257,14 @@ fn test_clean_database_mode_vs_filesystem_mode() -> Result<()> {
     let old_timestamp = now - (40 * 24 * 60 * 60);
     create_test_run(&otto_home, "abc12345", old_timestamp, "success")?;
 
+    // A run directory no row names: the shape the default path could not see at
+    // all before the orphan sweep, and the reason the two modes disagreed.
+    let orphan_timestamp = now - (45 * 24 * 60 * 60);
+    create_test_run(&otto_home, "abc12345", orphan_timestamp, "success")?;
+
+    // A recent run, so both modes have something to keep as well.
+    create_test_run(&otto_home, "abc12345", now - 3600, "success")?;
+
     // Setup database
     setup_test_database(&otto_home, "abc12345", vec![(old_timestamp, "success", 1024)])?;
 
@@ -257,14 +289,24 @@ fn test_clean_database_mode_vs_filesystem_mode() -> Result<()> {
 
     let fs_stdout = String::from_utf8_lossy(&fs_output.stdout);
 
-    // Both modes should find the same run
-    assert!(
-        db_stdout.contains("1") || db_stdout.contains("Found 1"),
-        "Database mode should find 1 run"
+    // The criterion this test exists for: the same **set** of run directories,
+    // not the same counts. Counts cannot express it, because a row that records
+    // no run directory contributes a row deletion with no directory analogue.
+    let expected = vec![
+        run_dir(&otto_home, "abc12345", orphan_timestamp).display().to_string(),
+        run_dir(&otto_home, "abc12345", old_timestamp).display().to_string(),
+    ];
+    let mut expected = expected;
+    expected.sort();
+    assert_eq!(
+        selected_run_dirs(&db_stdout, &otto_home),
+        expected,
+        "the database path must select the row-backed run and the orphan; got: {db_stdout}"
     );
-    assert!(
-        fs_stdout.contains("1") || fs_stdout.contains("Found 1"),
-        "Filesystem mode should find 1 run"
+    assert_eq!(
+        selected_run_dirs(&fs_stdout, &otto_home),
+        expected,
+        "and --no-db must select the same two; got: {fs_stdout}"
     );
 
     // Database mode should say "Querying database"
@@ -291,6 +333,14 @@ fn test_clean_actually_deletes_with_database() -> Result<()> {
 
     let old_timestamp = now - (40 * 24 * 60 * 60);
     create_test_run(&otto_home, "abc12345", old_timestamp, "success")?;
+
+    // A run directory no row names: the shape the default path could not see at
+    // all before the orphan sweep, and the reason the two modes disagreed.
+    let orphan_timestamp = now - (45 * 24 * 60 * 60);
+    create_test_run(&otto_home, "abc12345", orphan_timestamp, "success")?;
+
+    // A recent run, so both modes have something to keep as well.
+    create_test_run(&otto_home, "abc12345", now - 3600, "success")?;
 
     // Setup database
     setup_test_database(&otto_home, "abc12345", vec![(old_timestamp, "success", 1024)])?;

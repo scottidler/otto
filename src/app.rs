@@ -743,9 +743,11 @@ pub async fn execute_clean_from_task(task: &Task) -> Result<(), Report> {
         dry_run: params.dry_run,
         project_filter: params.project_filter,
         no_db: params.no_db,
-        // Not a CLI flag: `#[arg(skip)]` on the field, so it has no meta param
-        // either. Only auto-prune sets it.
+        // Neither of these is a CLI flag: `#[arg(skip)]` on both fields, so
+        // neither has a meta param either. Only auto-prune sets them, and a
+        // user-driven `otto Clean` cleans `$OTTO_HOME`.
         quiet: false,
+        otto_home: None,
     };
     clean_cmd.execute().await?;
 

@@ -4,6 +4,7 @@ pub mod graph;
 pub mod layout;
 pub mod output;
 pub mod pruning;
+pub mod runlock;
 pub mod scheduler;
 pub mod state;
 pub mod task;

@@ -187,9 +187,20 @@ fn same_second_runs_get_their_own_directories() {
 /// present on `tasks`, `runs` still carrying `UNIQUE(timestamp)` and no
 /// `run_dir`. Written with rusqlite rather than through otto, because otto can
 /// only ever produce the current version.
+///
+/// The legacy run is dated an hour ago, not at a fixed point in 2023. A v4 row
+/// has no `run_dir` and never will, so `Clean` cannot reclaim a directory for
+/// it and deletes the row on age alone; the auto-prune each racer runs on its
+/// way out would take a 2023 row with it, and this test would then be measuring
+/// retention rather than whether the upgrade lost anything.
 fn write_v4_fixture(db_path: &Path) {
     let conn = rusqlite::Connection::open(db_path).expect("open the fixture database");
-    conn.execute_batch(
+    let legacy_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+        - 3600;
+    conn.execute_batch(&format!(
         "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
          CREATE TABLE projects (
             id INTEGER PRIMARY KEY,
@@ -236,9 +247,9 @@ fn write_v4_fixture(db_path: &Path) {
          INSERT INTO projects (hash, name, first_seen, last_seen, run_count)
               VALUES ('feedface', 'legacy', 1700000000, 1700000000, 1);
          INSERT INTO runs (id, project_id, timestamp, status)
-              VALUES (1, 1, 1700000000, 'success');
-         INSERT INTO tasks (run_id, name, status) VALUES (1, 'legacy-task', 'completed');",
-    )
+              VALUES (1, 1, {legacy_timestamp}, 'success');
+         INSERT INTO tasks (run_id, name, status) VALUES (1, 'legacy-task', 'completed');"
+    ))
     .expect("write the v4 fixture");
 }
 
