@@ -24,6 +24,15 @@ pub struct ExecutionContext {
     pub timestamp: u64,
     pub hash: String,
     pub ottofile: Option<PathBuf>,
+    /// `argv[0]` followed by the task and subtask names the run was asked
+    /// for, nothing else.
+    ///
+    /// Not `std::env::args()`. Task params are ordinary command line flags
+    /// (`otto deploy --token abc`), and this field is persisted twice, into
+    /// `runs.args` in the database and into `run.yaml` on disk: recording raw
+    /// argv would turn every run directory into a credential sink. It is also
+    /// not the resolved DAG (`tasks` on `RunPlan`), which pulls in every
+    /// dependency and is not what the user asked for. See `record_requested`.
     pub args: Vec<String>,
 }
 
@@ -77,6 +86,20 @@ impl ExecutionContext {
             ottofile: None,
             args: vec!["otto".to_string()],
         }
+    }
+
+    /// Record `argv[0]` plus the requested task and subtask names, and
+    /// nothing else.
+    ///
+    /// `requested_tasks` is `RunPlan::requested_tasks`: what was literally
+    /// named on the command line, or the ottofile's `otto.tasks:` default
+    /// list when nothing was named. Never the resolved DAG, and never a flag
+    /// value, since a flag can carry a secret and this is persisted into both
+    /// the database and `run.yaml`.
+    pub fn record_requested(&mut self, requested_tasks: &[String]) {
+        self.args = std::iter::once(self.prog.clone())
+            .chain(requested_tasks.iter().cloned())
+            .collect();
     }
 }
 

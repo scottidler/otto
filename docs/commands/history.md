@@ -127,7 +127,7 @@ Columns are **Timestamp, Status, Duration, Exit Code, Run ID** — there is no P
     "cwd": "/home/saidler/repos/otto-rs/otto",
     "user": "saidler",
     "hostname": "desk",
-    "args": ["otto"],
+    "args": ["otto", "ci"],
     "ended_at": 1788438233,
     "run_dir": "/tmp/otto-doc-scratch/home/proj-70af3bf4/1788438233-1"
   }
@@ -138,7 +138,7 @@ Columns are **Timestamp, Status, Duration, Exit Code, Run ID** — there is no P
 
 - **`hostname`**: real since it started being recorded (the hostname-collecting call existed with no caller before that, so every run written earlier has `hostname: null`). A run recorded before that point stays `null` forever — there is no back-fill, because guessing the host of a historical row would be inventing data the run never recorded. The table view above never prints hostname at all; this only matters to `--json` consumers.
 - **`run_dir`**: the directory the run actually wrote into, recorded at run start. `null` for runs recorded before this column existed (schema v4 and earlier).
-- **`args`**: the full argv otto was invoked with, `["otto", ...]`.
+- **`args`**: `argv[0]` followed by the task and subtask names the run was asked for, e.g. `["otto", "lint"]`. Not the full command line: flag values (which can carry secrets, e.g. `--token`) are never recorded, and not the resolved dependency closure either, only what was literally named. A bare `otto` records the ottofile's `otto.tasks:` default list, e.g. `["otto", "ci"]` in this repo.
 
 ### Task history (`otto History <task> --json`)
 

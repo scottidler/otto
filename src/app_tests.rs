@@ -12,6 +12,7 @@ fn test_runtime_config_fields() {
         tui_mode: false,
         no_prefix: false,
         retention: crate::cfg::otto::RetentionSpec::default(),
+        requested_tasks: vec![],
     };
 
     assert_eq!(config.tasks.len(), 0);
