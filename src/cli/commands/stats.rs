@@ -52,18 +52,16 @@ impl StatsCommand {
 
     fn show_overall_stats(&self, store: &dyn StateStore) -> Result<()> {
         let stats = store.get_overall_stats()?;
+        let task_stats = store.get_all_task_stats(Some(self.limit))?;
 
         if self.json {
-            println!("{}", serde_json::to_string_pretty(&stats)?);
+            println!("{}", render_overall_json(&stats, &task_stats)?);
             return Ok(());
         }
 
         // Show overall statistics
         println!("\n{}", "Overall Statistics".bold());
         println!("{}", render_overall_table(&stats));
-
-        // Show top tasks
-        let task_stats = store.get_all_task_stats(Some(self.limit))?;
 
         if !task_stats.is_empty() {
             println!("\n{}", format!("Top {} Tasks by Execution Count", self.limit).bold());
@@ -205,6 +203,27 @@ impl StatsCommand {
 
         Ok(())
     }
+}
+
+/// Serialize-only view: the same two payloads the text output prints.
+///
+/// `OverallStats` is a port-level type constructed by every store
+/// implementation, so the per-task rows are attached here instead of being
+/// added to it as a field. `flatten` keeps the seven overall keys at the top
+/// level, in declaration order, where `jq '.total_runs'` already finds them; an
+/// `{overall, tasks}` envelope would move all seven down a level.
+#[derive(serde::Serialize)]
+struct OverallStatsJson<'a> {
+    #[serde(flatten)]
+    overall: &'a OverallStats,
+    tasks: &'a [TaskStats],
+}
+
+fn render_overall_json(stats: &OverallStats, task_stats: &[TaskStats]) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&OverallStatsJson {
+        overall: stats,
+        tasks: task_stats,
+    })?)
 }
 
 fn render_overall_table(stats: &OverallStats) -> Table {

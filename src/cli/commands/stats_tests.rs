@@ -132,6 +132,7 @@ fn test_execute_overall_stats() {
     assert!(result.is_ok());
 }
 
+/// AC4: `otto Stats --json` carries the per-task table the text output prints.
 #[test]
 fn test_execute_overall_stats_json() {
     let store = create_test_store_with_data();
@@ -141,8 +142,101 @@ fn test_execute_overall_stats_json() {
         json: true,
     };
 
-    let result = cmd.execute_with_store(Some(store));
+    let result = cmd.execute_with_store(Some(Arc::clone(&store) as Arc<dyn StateStore>));
     assert!(result.is_ok());
+
+    let payload = overall_json_value(store.as_ref(), 10);
+    let tasks = payload["tasks"].as_array().expect("the payload has a tasks array");
+    assert!(!tasks.is_empty(), "tasks must not be empty, got:\n{payload:#}");
+    assert!(
+        payload["total_runs"].is_number(),
+        "jq '.total_runs' must still resolve at the top level, got:\n{payload:#}"
+    );
+}
+
+/// The `tasks` key is additive: the seven overall keys keep their names, their
+/// order, and their number formatting, byte for byte, so `jq '.total_runs'` in
+/// the wild keeps working.
+#[test]
+fn overall_json_leaves_the_seven_existing_keys_unmoved() {
+    let store = create_test_store_with_data();
+    let stats = store.get_overall_stats().unwrap();
+    let task_stats = store.get_all_task_stats(Some(10)).unwrap();
+
+    let before = serde_json::to_string_pretty(&stats).unwrap();
+    let after = render_overall_json(&stats, &task_stats).unwrap();
+
+    // Everything up to the closing brace of the old object, verbatim.
+    let unmoved = before.strip_suffix("\n}").expect("pretty JSON object ends in a brace");
+    assert!(
+        after.starts_with(unmoved),
+        "the seven pairs must serialize identically and in the same order\nbefore:\n{before}\nafter:\n{after}"
+    );
+    assert_eq!(
+        after[unmoved.len()..].lines().next(),
+        Some(","),
+        "the seven pairs must be followed only by a comma and the new key, got:\n{after}"
+    );
+
+    // Read the key order off the text, not off a parsed map: serde_json's map is
+    // sorted unless `preserve_order` is on, which would hide a reordering.
+    let top_level_keys: Vec<&str> = after
+        .lines()
+        .filter_map(|line| line.strip_prefix("  \""))
+        .filter_map(|line| line.split('"').next())
+        .collect();
+    assert_eq!(
+        top_level_keys,
+        vec![
+            "total_runs",
+            "successful_runs",
+            "failed_runs",
+            "running_runs",
+            "total_tasks",
+            "total_disk_usage",
+            "total_duration_seconds",
+            "tasks",
+        ],
+        "tasks is appended eighth, nothing is nested"
+    );
+}
+
+/// `--limit` reached the text path only: the JSON branch returned before the
+/// per-task fetch, so the flag was unreachable there.
+#[test]
+fn overall_json_honors_the_limit() {
+    let store = create_test_store_with_data();
+    let unlimited = overall_json_value(store.as_ref(), 10);
+    assert!(
+        unlimited["tasks"].as_array().unwrap().len() > 1,
+        "the fixture store must hold more than one task row to make the limit observable"
+    );
+
+    let limited = overall_json_value(store.as_ref(), 1);
+    assert_eq!(
+        limited["tasks"].as_array().unwrap().len(),
+        1,
+        "-n 1 must cap the JSON tasks array, got:\n{limited:#}"
+    );
+}
+
+#[test]
+fn overall_json_on_an_empty_store_still_has_a_tasks_key() {
+    let store = create_empty_store();
+    let payload = overall_json_value(store.as_ref(), 10);
+
+    assert_eq!(
+        payload["tasks"].as_array().map(|t| t.len()),
+        Some(0),
+        "an empty store gets an empty array, not a missing key, got:\n{payload:#}"
+    );
+}
+
+/// The payload `show_overall_stats` emits on the JSON path, parsed.
+fn overall_json_value(store: &dyn StateStore, limit: usize) -> serde_json::Value {
+    let stats = store.get_overall_stats().unwrap();
+    let task_stats = store.get_all_task_stats(Some(limit)).unwrap();
+    serde_json::from_str(&render_overall_json(&stats, &task_stats).unwrap()).unwrap()
 }
 
 #[test]
