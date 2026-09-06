@@ -24,7 +24,7 @@ otto History [OPTIONS] [TASK]
 $ otto History --help
 Show execution history
 
-Usage: History [OPTIONS] [TASK]
+Usage: otto History [OPTIONS] [TASK]
 
 Arguments:
   [TASK]  Show history for a specific task

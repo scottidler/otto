@@ -18,37 +18,18 @@ otto Upgrade [OPTIONS]
 $ otto Upgrade --help
 Upgrade Otto to a newer version
 
-Usage: Upgrade [OPTIONS]
+Usage: otto Upgrade [OPTIONS]
 
 Options:
-      --dry-run
-          Show what would be done without doing it
-
-  -v, --version <VERSION>
-          Specific version to upgrade to (e.g., "0.5.6")
-
-      --list-versions
-          List available versions
-
-      --rollback
-          Rollback to previous version
-
-      --force
-          Force upgrade even if already on target version
-
-      --no-backup
-          Skip creating backup
-
-      --backup-dir <BACKUP_DIR>
-          Directory for backups (default: ~/.otto/backups)
-
-      --github-token <GITHUB_TOKEN>
-          GitHub token for API access (avoids rate limits)
-
-          [env: GITHUB_TOKEN]
-
-  -h, --help
-          Print help (see a summary with '-h')
+      --dry-run                      Show what would be done without doing it
+  -v, --version <VERSION>            Specific version to upgrade to (e.g., "0.5.6")
+      --list-versions                List available versions
+      --rollback                     Rollback to previous version
+      --force                        Force upgrade even if already on target version
+      --no-backup                    Skip creating backup
+      --backup-dir <BACKUP_DIR>      Directory for backups (default: ~/.otto/backups)
+      --github-token <GITHUB_TOKEN>  GitHub token for API access (avoids rate limits) [env: GITHUB_TOKEN]
+  -h, --help                         Print help
 ```
 
 There is no flag to point at a different releases host: every release comes from `otto-rs/otto` on GitHub. `--github-token`'s value is deliberately never echoed by `--help` (clap would otherwise print `[env: GITHUB_TOKEN=<the live token>]`), so setting `$GITHUB_TOKEN` and running `--help` cannot leak it into a terminal, CI log, or transcript.

@@ -691,3 +691,65 @@ None.
   divergent in a test that passes a home without pinning `$OTTO_HOME`. Threading a
   root through `StateStore::delete_run` was out of scope for Phase 8; worth
   deciding before something else takes a home as an argument.
+
+## Post-audit: four cheap-wins from the implementation audit
+
+The implementation audit (Mode 2, Architect + Staff Engineer, round 1) returned
+zero must-fix and four cheap-wins, all documentation or disclosure. This entry
+supersedes nothing; it records what the audit could see that the phases could not.
+
+### Design decisions
+- **Regenerated three help blocks from observed output instead of patching the one
+  wrong line.** `docs/commands/{clean,history,upgrade}.md` each showed an
+  unprefixed `Usage:` line that Phase 3 fixed in the binary but not on the page,
+  because Phase 3 carried no docs bullet. Hand-patching the `Usage:` line alone
+  would have left the rest of each block frozen at v2.3.0 while claiming to be
+  observed output. All three blocks are now a verbatim capture from the installed
+  `otto v2.4.0`.
+
+### Deviations
+- **Phase 2 changed the entire `otto Upgrade --help` layout, and its notes say
+  "Deviations: None".** That entry was wrong, and this entry is the correction.
+  Removing the five-line note at `upgrade.rs:334-338` removed the only
+  multi-paragraph doc comment in the struct, which left clap with no `long_help`
+  anywhere in it, so the command fell back from long help (a paragraph per option)
+  to short help (a line per option), and `-h` and `--help` became byte-identical
+  where they had differed at v2.3.0. All eight options survive and the
+  `hide_env_values(true)` guard is verifiably still in force: zero leaks with
+  `GITHUB_TOKEN` set.
+
+  Worth naming because of *how* it escaped. Phase 2's two success criteria are
+  both greps (`grep -c hide_env_values` -> 0, `grep -c GITHUB_TOKEN` -> 1). Both
+  pass, and both kept passing while the page rendering changed underneath them.
+  Neither review seat could see it from source either; it appears only when you
+  diff two built binaries' output, which is what the audit did. This is the same
+  lesson AC3 and AC7 were written for, arriving at a phase whose criteria were
+  written as greps anyway.
+
+- **`docs/commands/clean.md:199` claimed the database mode is faster because it
+  reads metadata "instead of measuring every directory".** After Phase 8 the
+  database mode always scans and sizes what it selects, so the line stated the
+  opposite of the code. The bullet directly below it had been updated for Phase 8
+  and this one was read past. The advantage the mode actually has is that a run is
+  named by its row rather than by its directory name, and the line now says that.
+
+- **Phase 8's lock has an upgrade window, now stated in the phase.** Only a build
+  carrying the lock writes `.lock`, so a run in flight when that build is installed
+  is unprotected. Measured across all three combinations. Not a regression: the
+  pre-lock build had the identical defect on every run, and it closes itself once
+  every in-flight run postdates the upgrade.
+
+- **Open Questions said "None" while these notes carried one.** The divergent-root
+  question is now repeated in the design doc's Open Questions section so the two
+  documents agree.
+
+### Tradeoffs
+- Left two things the audit surfaced that are real but out of scope here, rather
+  than growing this pass: a task param value is written plaintext to
+  `~/.otto/<project>/.cache/<hash>.sh` (pre-existing in both versions, outside
+  Phase 9's stated scope, though the doc's Security section reads broader than what
+  was proved), and AC8's `Workspace` leg still rests on the in-tree fixture because
+  the audit could not drive that caller standalone from outside the process.
+
+### Open questions
+- None beyond the divergent-root question now recorded in the design doc.
