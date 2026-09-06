@@ -61,7 +61,6 @@ fn with_otto_home<T>(otto_home: &std::path::Path, f: impl FnOnce() -> T) -> T {
 /// the fence exists for - lost the row and kept the directory, orphaned with
 /// nothing left pointing at it.
 #[test]
-#[serial]
 fn delete_run_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
     let (manager, temp_dir) = create_test_manager()?;
 
@@ -83,7 +82,7 @@ fn delete_run_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
     .with_run_dir(run_dir);
     let run_id = manager.record_run_start(&metadata)?;
 
-    let result = with_otto_home(&otto_home, || manager.delete_run(run_id, true));
+    let result = manager.delete_run(run_id, true, &otto_home);
 
     let err = result.unwrap_err().to_string();
     assert!(err.contains("Refusing to delete run directory"), "{err}");
@@ -105,7 +104,6 @@ fn delete_run_never_deletes_through_a_symlinked_run_directory() -> Result<()> {
 /// the `<name>-<hash>` convention nor `OTTO_HOME`, so it deleted the rows
 /// and left 220 of 222 real project directories orphaned.
 #[test]
-#[serial]
 fn delete_run_removes_the_recorded_run_directory() -> Result<()> {
     let (manager, temp_dir) = create_test_manager()?;
 
@@ -121,10 +119,50 @@ fn delete_run_removes_the_recorded_run_directory() -> Result<()> {
     .with_run_dir(run_dir.clone());
     let run_id = manager.record_run_start(&metadata)?;
 
-    let deleted = with_otto_home(&otto_home, || manager.delete_run(run_id, true))?;
+    let deleted = manager.delete_run(run_id, true, &otto_home)?;
 
     assert!(deleted.is_some(), "the run row is deleted");
     assert!(!run_dir.exists(), "the run directory is deleted too");
+    Ok(())
+}
+
+/// The root a directory delete is fenced against is the one the caller passes,
+/// not the one the environment happens to name.
+///
+/// `resolve_run_directory` used to call `resolve_otto_home()` for itself, so a
+/// caller working under a home it had not also exported got every directory
+/// delete refused: the run directory is not under `$OTTO_HOME`, so
+/// `ensure_deletable_under_root` rejected it. Production never saw this, because
+/// both `auto_prune` call sites pass the home they resolved from that same
+/// environment. Tests did, and paid for it by wrapping `with_otto_home` around
+/// every call to this method.
+#[test]
+#[serial]
+fn delete_run_fences_against_the_root_it_is_given_not_the_environment() -> Result<()> {
+    let (manager, temp_dir) = create_test_manager()?;
+
+    let otto_home = temp_dir.path().join("otto-home");
+    let run_dir = otto_home.join("widget-abc12345").join("1234567890");
+    std::fs::create_dir_all(run_dir.join("tasks"))?;
+
+    let metadata = RunMetadata::minimal(
+        Some(PathBuf::from("/test/otto.yml")),
+        "abc12345".to_string(),
+        1234567890,
+    )
+    .with_run_dir(run_dir.clone());
+    let run_id = manager.record_run_start(&metadata)?;
+
+    // Pointed at an unrelated tree, which is what a caller that pins nothing
+    // gets by accident.
+    let elsewhere = TempDir::new()?;
+    let deleted = with_otto_home(elsewhere.path(), || manager.delete_run(run_id, true, &otto_home))?;
+
+    assert!(deleted.is_some(), "the run row is deleted");
+    assert!(
+        !run_dir.exists(),
+        "and so is the directory, fenced against the root that was passed"
+    );
     Ok(())
 }
 
@@ -139,7 +177,6 @@ fn delete_run_removes_the_recorded_run_directory() -> Result<()> {
 /// pointing at it, so no guess is made: the row goes, and `Clean`'s orphan sweep
 /// reclaims the directory by path.
 #[test]
-#[serial]
 fn delete_run_does_not_guess_a_directory_for_a_pre_v5_row() -> Result<()> {
     let (manager, temp_dir) = create_test_manager()?;
 
@@ -158,7 +195,7 @@ fn delete_run_does_not_guess_a_directory_for_a_pre_v5_row() -> Result<()> {
         .db
         .with_connection(|conn| Ok(conn.execute("UPDATE runs SET run_dir = NULL", [])?))?;
 
-    let deleted = with_otto_home(&otto_home, || manager.delete_run(run_id, true))?;
+    let deleted = manager.delete_run(run_id, true, &otto_home)?;
 
     assert!(deleted.is_some(), "the row is deleted");
     assert!(
@@ -271,7 +308,6 @@ fn ensure_project_is_idempotent() -> Result<()> {
 /// A project's run count is a count, so it never goes below zero even when
 /// more runs are deleted than the counter ever saw.
 #[test]
-#[serial]
 fn delete_run_never_drives_the_run_count_negative() -> Result<()> {
     let (manager, temp_dir) = create_test_manager()?;
     let otto_home = temp_dir.path().join("otto-home");
@@ -283,7 +319,7 @@ fn delete_run_never_drives_the_run_count_negative() -> Result<()> {
         .db
         .with_connection(|conn| Ok(conn.execute("UPDATE projects SET run_count = 0", [])?))?;
 
-    with_otto_home(&otto_home, || manager.delete_run(run_id, false))?;
+    manager.delete_run(run_id, false, &otto_home)?;
 
     let projects = manager.get_all_projects()?;
     assert_eq!(projects[0].run_count, 0);
@@ -946,7 +982,7 @@ fn test_delete_run_database_only() -> Result<()> {
     let runs_before = manager.get_runs_with_filters(None, None, 10)?;
     assert_eq!(runs_before.len(), 1);
 
-    let deleted = manager.delete_run(run_id_9, false)?;
+    let deleted = manager.delete_run(run_id_9, false, Path::new("/unused"))?;
     assert!(deleted.is_some());
     assert_eq!(deleted.unwrap().timestamp, 1234567890);
 
@@ -972,7 +1008,7 @@ fn test_delete_run_with_tasks() -> Result<()> {
     let tasks_before = run_tasks(&manager, run_id)?;
     assert_eq!(tasks_before.len(), 2);
 
-    manager.delete_run(run_id, false)?;
+    manager.delete_run(run_id, false, Path::new("/unused"))?;
 
     let tasks_after = run_tasks(&manager, run_id)?;
     assert_eq!(tasks_after.len(), 0);
@@ -999,7 +1035,7 @@ fn test_delete_run_updates_project_count() -> Result<()> {
     }
     assert_eq!(manager.get_all_projects()?[0].run_count, 3);
 
-    manager.delete_run(run_ids[1], false)?;
+    manager.delete_run(run_ids[1], false, Path::new("/unused"))?;
 
     let runs = manager.get_runs_with_filters(None, Some("abc123"), 10)?;
     assert_eq!(runs.len(), 2);
@@ -1017,7 +1053,7 @@ fn test_delete_nonexistent_run() -> Result<()> {
     let (manager, _temp_dir) = create_test_manager()?;
 
     // Try to delete a run that doesn't exist
-    let deleted = manager.delete_run(9999, false)?;
+    let deleted = manager.delete_run(9999, false, Path::new("/unused"))?;
     assert!(deleted.is_none());
 
     Ok(())

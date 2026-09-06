@@ -493,7 +493,7 @@ impl CleanCommand {
                 None => None,
             };
 
-            match store.delete_run(run.id, true) {
+            match store.delete_run(run.id, true, otto_home) {
                 Ok(Some(_)) => {
                     let date_time = format_timestamp(run.timestamp);
                     let ottofile_display = display_ottofile(run.ottofile_path.as_ref());

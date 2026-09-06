@@ -376,7 +376,9 @@ fn test_memory_store_delete_run() {
         .record_task_start(run_id, "build", None, None, None, None)
         .unwrap();
 
-    let deleted = store.delete_run(run_id, false).unwrap();
+    let deleted = store
+        .delete_run(run_id, false, std::path::Path::new("/unused"))
+        .unwrap();
     assert!(deleted.is_some());
 
     let runs = store.get_runs_with_filters(None, None, 10).unwrap();
@@ -390,7 +392,7 @@ fn test_memory_store_delete_run() {
 fn test_memory_store_delete_nonexistent() {
     let store = MemoryStateStore::new();
 
-    let deleted = store.delete_run(9999, false).unwrap();
+    let deleted = store.delete_run(9999, false, std::path::Path::new("/unused")).unwrap();
     assert!(deleted.is_none());
 }
 
