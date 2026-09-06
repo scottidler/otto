@@ -206,6 +206,50 @@ async fn test_auto_prune_disabled() {
 ///
 /// The observable is the marker's mtime: `auto_prune` rewrites `.last_prune`
 /// after it prunes and leaves it untouched when it skips.
+/// A store that cannot be opened must not read as "the throttle skipped".
+///
+/// The boundary test above infers "pruning happened" from the marker's mtime,
+/// and `auto_prune` used to return before touching the marker when the store
+/// failed to open. That is exactly what a CI runner produced once (`Failed to
+/// read the journal mode after WAL was refused`), and the test reported it as a
+/// wrong throttle decision. The store is now carried past like every other
+/// failure, so the marker means "this interval was attempted" whatever
+/// happened inside it, and an environment failure can no longer wear the
+/// costume of a logic bug.
+#[tokio::test]
+async fn a_store_that_will_not_open_still_writes_the_marker() {
+    let temp_dir = TempDir::new().unwrap();
+    let otto_home = temp_dir.path();
+    let marker = otto_home.join(".last_prune");
+
+    // A directory where the database file belongs: `with_db_path` cannot open
+    // it, by any backend, on any platform.
+    fs::create_dir_all(otto_home.join("otto.db")).unwrap();
+
+    let previous = std::env::var("OTTO_DB_PATH").ok();
+    unsafe {
+        std::env::remove_var("OTTO_DB_PATH");
+    }
+
+    let retention = RetentionSpec {
+        auto_prune: true,
+        prune_interval_hours: 0,
+        ..Default::default()
+    };
+    auto_prune(otto_home, &retention).await;
+
+    unsafe {
+        if let Some(value) = &previous {
+            std::env::set_var("OTTO_DB_PATH", value);
+        }
+    }
+
+    assert!(
+        marker.exists(),
+        "the interval marker must be written even when the store never opened,          or auto-prune re-fires on every run and the marker stops meaning anything"
+    );
+}
+
 #[tokio::test]
 async fn auto_prune_throttle_boundary_is_exact() {
     // (label, interval_hours, marker age in seconds, must prune)
